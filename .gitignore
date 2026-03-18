@@ -1,0 +1,14 @@
+result_data/*
+*/__pycache__
+__pycache__/
+.idea/*
+*.png
+*.pkl
+waymo_open_dataset_/*
+test_set/*
+valid_set/*
+*.pth
+output/*
+data_set/*
+data_output/*
+safe_rl_output/*

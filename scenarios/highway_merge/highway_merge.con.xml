@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<connections>
+    <connection from="main_in" to="main_out" fromLane="0" toLane="0"/>
+    <connection from="main_in" to="main_out" fromLane="1" toLane="1"/>
+    <connection from="main_in" to="main_out" fromLane="2" toLane="2"/>
+    <connection from="ramp_in" to="main_out" fromLane="0" toLane="0"/>
+</connections>
