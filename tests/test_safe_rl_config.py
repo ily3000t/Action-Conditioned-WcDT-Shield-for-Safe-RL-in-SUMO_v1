@@ -1,3 +1,5 @@
+from pathlib import Path
+
 from safe_rl.config.config import load_safe_rl_config
 
 
@@ -8,10 +10,13 @@ def test_default_config_loads():
     assert config.ppo.total_timesteps > 0
     assert config.tensorboard.enabled is True
     assert config.tensorboard.root_dir
+    assert config.sim.ego_vehicle_id == "ego"
 
 
-def test_tensorboard_config_override(tmp_path):
-    yaml_path = tmp_path / "tb_override.yaml"
+def test_tensorboard_config_override():
+    temp_dir = Path("safe_rl_output/test_artifacts")
+    temp_dir.mkdir(parents=True, exist_ok=True)
+    yaml_path = temp_dir / "tb_override.yaml"
     yaml_path.write_text(
         "\n".join(
             [

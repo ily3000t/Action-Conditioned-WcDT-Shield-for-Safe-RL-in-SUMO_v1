@@ -16,6 +16,7 @@ sim:
   risky_episodes: 1
   risk_event_prob: 0.3
   random_seed: 7
+  ego_vehicle_id: "ego"
 
 dataset:
   raw_log_dir: "safe_rl_output/quick/raw"

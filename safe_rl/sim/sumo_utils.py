@@ -17,12 +17,23 @@ def _candidate_path(path: str) -> Optional[Path]:
 
 def prepare_sumo_python_path(config: SimConfig):
     if config.sumo_home:
-        tools_path = Path(config.sumo_home) / "tools"
-        if tools_path.is_dir():
-            tools_path_str = str(tools_path)
-            if tools_path_str not in sys.path:
-                sys.path.insert(0, tools_path_str)
-            os.environ.setdefault("SUMO_HOME", str(Path(config.sumo_home)))
+        home = Path(config.sumo_home)
+        tools_path = home / "tools"
+        bin_path = home / "bin"
+
+        for path in (tools_path, bin_path):
+            if path.is_dir():
+                path_str = str(path)
+                if path_str not in sys.path:
+                    sys.path.insert(0, path_str)
+
+        if bin_path.is_dir():
+            bin_str = str(bin_path)
+            current_path = os.environ.get("PATH", "")
+            if bin_str not in current_path.split(os.pathsep):
+                os.environ["PATH"] = bin_str + os.pathsep + current_path if current_path else bin_str
+
+        os.environ.setdefault("SUMO_HOME", str(home))
 
 
 def resolve_sumo_binary(config: SimConfig, use_gui: bool) -> str:
@@ -36,7 +47,6 @@ def resolve_sumo_binary(config: SimConfig, use_gui: bool) -> str:
         home_bin = Path(config.sumo_home) / "bin" / bin_name
         if home_bin.is_file():
             return str(home_bin)
-        # Fallback for non-Windows naming.
         alt_name = "sumo-gui" if use_gui else "sumo"
         home_bin_alt = Path(config.sumo_home) / "bin" / alt_name
         if home_bin_alt.is_file():
@@ -79,10 +89,6 @@ def parse_cfg_net_file(cfg_path: Path) -> Optional[Path]:
 
 
 def maybe_build_network_from_plain(cfg_path: Path, config: SimConfig) -> Tuple[bool, str]:
-    """
-    Returns (ok, message). If net file exists, ok=True immediately.
-    If missing and plain files are present, tries netconvert.
-    """
     net_path = parse_cfg_net_file(cfg_path)
     if net_path is None:
         return False, f"Unable to parse net-file from cfg: {cfg_path}"

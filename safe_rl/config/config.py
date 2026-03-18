@@ -26,6 +26,7 @@ class SimConfig:
     risky_episodes: int = 200
     risk_event_prob: float = 0.35
     random_seed: int = 42
+    ego_vehicle_id: str = "ego"
 
 
 @dataclass

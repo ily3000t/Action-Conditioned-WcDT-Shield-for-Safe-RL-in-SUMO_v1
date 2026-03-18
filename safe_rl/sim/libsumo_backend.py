@@ -5,6 +5,7 @@ from typing import Optional
 from safe_rl.config.config import SimConfig
 from safe_rl.sim.backend_interface import BackendStepResult, ISumoBackend
 from safe_rl.sim.mock_core import MockTrafficCore
+from safe_rl.sim.real_control import RealSumoController
 from safe_rl.sim.sumo_utils import (
     maybe_build_network_from_plain,
     prepare_sumo_python_path,
@@ -19,9 +20,11 @@ class LibsumoBackend(ISumoBackend):
     def __init__(self, config: SimConfig):
         self.config = config
         self._libsumo = None
+        self._controller: Optional[RealSumoController] = None
         self._started = False
         self._cfg_path: Optional[Path] = None
         self._sumo_binary: Optional[str] = None
+        self._last_risk_meta = None
         self._mock = MockTrafficCore(
             episode_steps=config.episode_steps,
             step_length=config.step_length,
@@ -47,6 +50,7 @@ class LibsumoBackend(ISumoBackend):
             import libsumo  # type: ignore
 
             self._libsumo = libsumo
+            self._controller = RealSumoController(self._libsumo, self.config, _LOGGER)
             self._sumo_binary = resolve_sumo_binary(self.config, use_gui=False)
 
             if cfg_path.is_file():
@@ -73,13 +77,11 @@ class LibsumoBackend(ISumoBackend):
 
     def _warmup_after_reset(self):
         max_steps = max(10, int(5.0 / max(self.config.step_length, 1e-3)))
-        for _ in range(max_steps):
-            vehicle_ids = self._libsumo.vehicle.getIDList()
-            if vehicle_ids:
-                return
-            self._libsumo.simulationStep()
+        if self._controller is not None and self._controller.warmup_until_ego(max_steps=max_steps):
+            return
         _LOGGER.warning(
-            "libsumo reset warmup finished with no active vehicle (steps=%d). Continue with placeholder scene.",
+            "libsumo reset warmup finished without ego vehicle '%s' (steps=%d). Continue with placeholder scene.",
+            self.config.ego_vehicle_id,
             max_steps,
         )
 
@@ -89,6 +91,7 @@ class LibsumoBackend(ISumoBackend):
         if self._use_mock:
             return self._mock.reset(seed=seed)
 
+        self._last_risk_meta = None
         try:
             self._load_with_seed(seed)
         except Exception as exc:
@@ -109,51 +112,25 @@ class LibsumoBackend(ISumoBackend):
             scene, task_reward, done, info = self._mock.step(action_id)
             return BackendStepResult(scene=scene, task_reward=task_reward, done=done, info=info)
 
+        action_meta = self._controller.apply_action(action_id)
         self._libsumo.simulationStep()
         scene = self.get_state()
         done = self._libsumo.simulation.getMinExpectedNumber() <= 0
-        ego_speed = 0.0
-        if scene.vehicles:
-            try:
-                ego_speed = float(self._libsumo.vehicle.getSpeed(scene.ego_id))
-            except Exception:
-                ego_speed = 0.0
-        task_reward = float(ego_speed * self.config.step_length * 0.1)
-        return BackendStepResult(scene=scene, task_reward=task_reward, done=done, info={"collision": False, "ego_speed": ego_speed})
+        info = self._controller.summarize_step(scene, action_meta, self._last_risk_meta)
+        task_reward = float(info.get("ego_speed", 0.0) * self.config.step_length * 0.1)
+        self._last_risk_meta = None
+        return BackendStepResult(scene=scene, task_reward=task_reward, done=done, info=info)
 
     def inject_risk_event(self, event_type: Optional[str] = None):
         if self._use_mock:
             self._mock.inject_risk_event(event_type)
             return
-        _LOGGER.info("libsumo risk event injection placeholder invoked: %s", event_type)
+        self._last_risk_meta = self._controller.inject_risk_event(event_type)
 
     def get_state(self):
         if self._use_mock:
             return self._mock.get_scene(timestamp=self._mock.step_index * self.config.step_length)
-
-        from safe_rl.data.types import SceneState, VehicleState
-
-        vehicle_ids = self._libsumo.vehicle.getIDList()
-        vehicles = []
-        for vid in vehicle_ids:
-            x, y = self._libsumo.vehicle.getPosition(vid)
-            speed = self._libsumo.vehicle.getSpeed(vid)
-            lane_index = self._libsumo.vehicle.getLaneIndex(vid)
-            vehicles.append(
-                VehicleState(
-                    vehicle_id=vid,
-                    x=float(x),
-                    y=float(y),
-                    vx=float(speed),
-                    vy=0.0,
-                    ax=0.0,
-                    ay=0.0,
-                    heading=0.0,
-                    lane_id=int(lane_index),
-                )
-            )
-        ego_id = vehicle_ids[0] if vehicle_ids else "ego"
-        return SceneState(timestamp=float(self._libsumo.simulation.getTime()), ego_id=ego_id, vehicles=vehicles)
+        return self._controller.build_scene()
 
     def close(self):
         if not self._started:
