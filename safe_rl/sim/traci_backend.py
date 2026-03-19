@@ -1,4 +1,4 @@
-import logging
+﻿import logging
 from pathlib import Path
 from typing import Optional
 
@@ -28,6 +28,8 @@ class TraciBackend(ISumoBackend):
         self._connection_healthy = False
         self._cfg_path: Optional[Path] = None
         self._runtime_log_path: Optional[Path] = None
+        self._current_episode_id: Optional[str] = None
+        self._current_risky_mode: bool = False
         self._last_risk_meta = None
         self._last_scene: Optional[SceneState] = None
         self._mock = MockTrafficCore(
@@ -42,6 +44,12 @@ class TraciBackend(ISumoBackend):
         if self._runtime_log_path is None:
             return ""
         return str(self._runtime_log_path)
+
+    def set_episode_context(self, episode_id: str, risky_mode: bool):
+        self._current_episode_id = str(episode_id)
+        self._current_risky_mode = bool(risky_mode)
+        if not self._use_mock:
+            self._runtime_log_path = self._resolve_runtime_log_path()
 
     def start(self):
         if self.config.force_mock:
@@ -88,6 +96,10 @@ class TraciBackend(ISumoBackend):
         log_dir = Path(self.config.runtime_log_dir)
         if not log_dir.is_absolute():
             log_dir = (Path.cwd() / log_dir).resolve()
+        if self._current_episode_id:
+            log_dir = log_dir / "episodes"
+            log_dir.mkdir(parents=True, exist_ok=True)
+            return log_dir / f"{self._current_episode_id}.log"
         log_dir.mkdir(parents=True, exist_ok=True)
         return log_dir / "traci_runtime.log"
 
@@ -156,6 +168,7 @@ class TraciBackend(ISumoBackend):
             return scene
 
         self._last_risk_meta = None
+        self._runtime_log_path = self._resolve_runtime_log_path()
         seed_value = int(seed if seed is not None else self.config.random_seed)
         try:
             if not self._session_active or not self._connection_healthy:
@@ -209,6 +222,8 @@ class TraciBackend(ISumoBackend):
             scene = self._mock.get_scene(timestamp=self._mock.step_index * self.config.step_length)
             self._last_scene = scene
             return scene
+        if not self._connection_healthy or not self._session_active or self._controller is None:
+            return self._fallback_scene()
         scene = self._controller.build_scene()
         self._last_scene = scene
         return scene
@@ -240,6 +255,9 @@ class TraciBackend(ISumoBackend):
             "sumo_exception": str(exc),
             "sumo_log_path": self.runtime_log_path,
         }
+        skipped = str(action_meta.get("lane_change_skipped_reason", "") or "")
+        if skipped:
+            info["lane_change_skipped_reason"] = skipped
         self._last_risk_meta = None
         _LOGGER.warning(
             "SUMO closed TraCI connection during simulationStep (%s). Episode terminated early. Log: %s",

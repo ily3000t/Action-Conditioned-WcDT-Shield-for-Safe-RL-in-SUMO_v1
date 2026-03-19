@@ -1,4 +1,4 @@
-import json
+﻿import json
 import uuid
 from pathlib import Path
 
@@ -72,6 +72,7 @@ def test_stage1_creates_manifest_and_datasets():
     assert pipeline.train_pkl.exists()
     assert pipeline.val_pkl.exists()
     assert pipeline.test_pkl.exists()
+    assert Path(result["stage1"]["warning_summary_report"]).exists()
 
 
 def test_policy_artifact_heuristic_roundtrip():
@@ -87,7 +88,7 @@ def test_policy_artifact_heuristic_roundtrip():
     assert isinstance(loaded_policy, HeuristicPolicy)
 
 
-def test_run_scoped_runtime_log_dir_and_failure_report_path():
+def test_run_scoped_runtime_log_dir_and_report_paths():
     config = _tiny_config()
     pipeline = SafeRLPipeline(config)
     run_id = f"ut_logs_{uuid.uuid4().hex[:8]}"
@@ -97,3 +98,4 @@ def test_run_scoped_runtime_log_dir_and_failure_report_path():
 
     assert Path(scoped_config.sim.runtime_log_dir) == pipeline.sumo_logs_dir
     assert pipeline.collector_failure_report_path.name == "collector_failures.json"
+    assert pipeline.warning_summary_report_path.name == "warning_summary.json"

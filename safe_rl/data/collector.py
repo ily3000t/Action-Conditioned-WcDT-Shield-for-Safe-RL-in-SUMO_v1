@@ -1,4 +1,4 @@
-import json
+﻿import json
 import random
 import time
 from datetime import datetime
@@ -8,6 +8,7 @@ from typing import Dict, List
 from safe_rl.config.config import SafeRLConfig
 from safe_rl.data.risk import aggregate_future_risk, compute_min_distance, compute_min_ttc, detect_collision
 from safe_rl.data.types import EpisodeLog, RiskLabels, ShieldDecision, StepLog, dataclass_to_dict
+from safe_rl.data.warning_summary import aggregate_warning_records, summarize_episode_warnings
 from safe_rl.sim.actions import all_action_ids
 from safe_rl.sim.backend_interface import ISumoBackend
 
@@ -18,6 +19,7 @@ class SumoDataCollector:
         self.config = config
         self._rng = random.Random(config.sim.random_seed)
         self.failure_records: List[Dict] = []
+        self.warning_records: List[Dict] = []
         self.successful_episodes: int = 0
         self.failed_episodes: int = 0
 
@@ -30,6 +32,7 @@ class SumoDataCollector:
     def collect(self) -> List[EpisodeLog]:
         episodes: List[EpisodeLog] = []
         self.failure_records = []
+        self.warning_records = []
         self.successful_episodes = 0
         self.failed_episodes = 0
 
@@ -57,8 +60,11 @@ class SumoDataCollector:
                     exception_text=str(exc),
                     reason="episode_exception",
                 )
+                self._record_warning_snapshot(episode_id, risky_mode)
                 self._reset_backend_after_failure()
                 episode = None
+            else:
+                self._record_warning_snapshot(episode_id, risky_mode)
 
             if episode is not None:
                 if episode.steps:
@@ -93,6 +99,7 @@ class SumoDataCollector:
 
     def collect_episode(self, episode_id: str, risky_mode: bool) -> EpisodeLog:
         steps: List[StepLog] = []
+        self.backend.set_episode_context(episode_id=episode_id, risky_mode=risky_mode)
         self.backend.reset(seed=self._rng.randint(1, 1_000_000))
 
         if risky_mode:
@@ -176,12 +183,30 @@ class SumoDataCollector:
             "failures": list(self.failure_records),
         }
 
+    def warning_summary(self) -> Dict:
+        parsed_records = [
+            summarize_episode_warnings(
+                episode_id=record["episode_id"],
+                risky_mode=record["risky_mode"],
+                log_path=record["sumo_log_path"],
+            )
+            for record in self.warning_records
+        ]
+        return aggregate_warning_records(parsed_records)
+
     def save_failure_report(self, path: str):
         report_path = Path(path)
         report_path.parent.mkdir(parents=True, exist_ok=True)
         with report_path.open("w", encoding="utf-8") as f:
             json.dump(self.failure_report(), f, ensure_ascii=False, indent=2)
         print(f"[Collector] failure report saved -> {report_path}", flush=True)
+
+    def save_warning_summary(self, path: str):
+        report_path = Path(path)
+        report_path.parent.mkdir(parents=True, exist_ok=True)
+        with report_path.open("w", encoding="utf-8") as f:
+            json.dump(self.warning_summary(), f, ensure_ascii=False, indent=2)
+        print(f"[Collector] warning summary saved -> {report_path}", flush=True)
 
     def _record_failure(
         self,
@@ -208,8 +233,19 @@ class SumoDataCollector:
             flush=True,
         )
 
+    def _record_warning_snapshot(self, episode_id: str, risky_mode: bool):
+        runtime_log_path = str(getattr(self.backend, "runtime_log_path", "") or "")
+        self.warning_records.append(
+            {
+                "episode_id": str(episode_id),
+                "risky_mode": bool(risky_mode),
+                "sumo_log_path": runtime_log_path,
+            }
+        )
+
     def _reset_backend_after_failure(self):
         try:
             self.backend.close()
         except Exception:
             pass
+

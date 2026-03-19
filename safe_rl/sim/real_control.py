@@ -1,7 +1,7 @@
-import logging
+﻿import logging
 import random
 from dataclasses import dataclass
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Set
 
 from safe_rl.config.config import SimConfig
 from safe_rl.data.risk import detect_collision
@@ -11,18 +11,20 @@ from safe_rl.sim.mock_core import RISK_EVENTS
 
 
 LONGITUDINAL_SPEED_DELTA = {-1: -1.5, 0: 0.0, 1: 1.0}
-MOVE_PLACEMENT_CLEARANCE = 10.0
-HARD_BRAKE_GAP = 16.0
-CLOSE_FOLLOW_GAP = 13.0
-CUT_IN_GAP = 12.0
-MERGE_LANE_END_BUFFER = 10.0
-MAX_CUT_IN_ALIGNMENT_DISTANCE = 35.0
+MOVE_PLACEMENT_CLEARANCE = 12.0
+HARD_BRAKE_GAP = 22.0
+CLOSE_FOLLOW_GAP = 18.0
+CUT_IN_GAP = 16.0
+MERGE_LANE_END_BUFFER = 34.0
+MAX_CUT_IN_ALIGNMENT_DISTANCE = 28.0
+JUNCTION_GUARD_DISTANCE = 30.0
+HIGH_BRAKE_TARGET_SPEED = 6.0
 RISK_EVENT_FALLBACKS = {
     "hard_brake": ["close_follow", "cut_in"],
     "close_follow": ["hard_brake", "cut_in", "unsafe_merge"],
-    "unsafe_merge": ["cut_in", "merge_conflict", "close_follow"],
-    "merge_conflict": ["unsafe_merge", "cut_in", "hard_brake"],
-    "cut_in": ["unsafe_merge", "close_follow", "hard_brake"],
+    "unsafe_merge": ["merge_conflict", "close_follow", "hard_brake"],
+    "merge_conflict": ["unsafe_merge", "close_follow", "hard_brake"],
+    "cut_in": ["close_follow", "hard_brake", "unsafe_merge"],
 }
 
 
@@ -103,21 +105,25 @@ class RealSumoController:
         target_speed = max(0.0, ego.speed + LONGITUDINAL_SPEED_DELTA[action.longitudinal] * self.config.step_length)
         self._safe_call(self.api.vehicle.setSpeed, ego.vehicle_id, target_speed)
 
-        lane_count = self._lane_count_for_vehicle(ego)
         target_lane = ego.lane_index
         lane_violation = False
+        lane_change_skipped_reason = ""
         if action.lateral != 0:
-            target_lane = ego.lane_index - action.lateral
-            if target_lane < 0 or target_lane >= lane_count:
-                lane_violation = True
-                target_lane = ego.lane_index
-            elif target_lane != ego.lane_index:
+            desired_lane = ego.lane_index - action.lateral
+            lane_target = self._resolve_lane_target(ego, desired_lane)
+            lane_violation = bool(lane_target["lane_violation"])
+            lane_change_skipped_reason = str(lane_target["reason"] or "")
+            if lane_target["allowed"] and lane_target["lane_index"] != ego.lane_index:
                 self._safe_call(
                     self.api.vehicle.changeLane,
                     ego.vehicle_id,
-                    target_lane,
+                    lane_target["lane_index"],
                     max(1.0, self.config.step_length * 2.0),
                 )
+                target_lane = lane_target["lane_index"]
+                lane_change_skipped_reason = ""
+            else:
+                target_lane = ego.lane_index
 
         return {
             "applied": True,
@@ -126,6 +132,7 @@ class RealSumoController:
             "target_speed": float(target_speed),
             "target_lane": int(target_lane),
             "action_name": action_name(action_id),
+            "lane_change_skipped_reason": lane_change_skipped_reason,
         }
 
     def inject_risk_event(self, event_type: Optional[str] = None) -> Dict[str, Any]:
@@ -157,7 +164,7 @@ class RealSumoController:
         ego_speed = 0.0
         if self.has_ego():
             ego_speed = float(self._safe_call(self.api.vehicle.getSpeed, self.config.ego_vehicle_id, default=0.0))
-        return {
+        info = {
             "collision": bool(detect_collision(scene)),
             "ego_speed": ego_speed,
             "lane_violation": bool(action_meta.get("lane_violation", False)),
@@ -165,6 +172,10 @@ class RealSumoController:
             "risk_target_vehicle": risk_meta.get("target_vehicle_id", "") if risk_meta else "",
             "risk_requested_event": risk_meta.get("requested_event", "") if risk_meta else "",
         }
+        skipped = str(action_meta.get("lane_change_skipped_reason", "") or "")
+        if skipped:
+            info["lane_change_skipped_reason"] = skipped
+        return info
 
     def _inject_specific_event(self, event_type: str, requested: str) -> Dict[str, Any]:
         ego = self._ego_snapshot()
@@ -183,10 +194,10 @@ class RealSumoController:
             return {"applied": False, "requested_event": requested}
 
         self.prepare_vehicle(lead.vehicle_id)
-        target_speed = max(0.0, min(lead.speed * 0.45, ego.speed * 0.7))
-        self._safe_call(self.api.vehicle.setSpeed, lead.vehicle_id, target_speed)
+        target_speed = max(HIGH_BRAKE_TARGET_SPEED, min(lead.speed * 0.7, ego.speed * 0.85))
+        self._set_speed_smooth(lead.vehicle_id, target_speed)
         used_move = False
-        if lead.x - ego.x > 30.0:
+        if lead.x - ego.x > 34.0:
             used_move = self._move_vehicle_same_road(lead, ego, ego.lane_index, gap=HARD_BRAKE_GAP)
         return {
             "applied": True,
@@ -203,11 +214,10 @@ class RealSumoController:
 
         self.prepare_vehicle(target.vehicle_id)
         used_move = False
-        if target.x - ego.x > 24.0:
+        if target.x - ego.x > 30.0:
             used_move = self._move_vehicle_same_road(target, ego, ego.lane_index, gap=CLOSE_FOLLOW_GAP)
-        if not used_move:
-            target_speed = max(0.0, min(target.speed, ego.speed * 0.8))
-            self._safe_call(self.api.vehicle.setSpeed, target.vehicle_id, target_speed)
+        target_speed = max(HIGH_BRAKE_TARGET_SPEED + 2.0, min(target.speed, ego.speed * 0.9))
+        self._set_speed_smooth(target.vehicle_id, target_speed)
         return {
             "applied": True,
             "requested_event": requested,
@@ -223,17 +233,23 @@ class RealSumoController:
 
         self.prepare_vehicle(target.vehicle_id)
         used_move = False
+        changed_lane = False
         if target.road_id == ego.road_id and abs(target.x - ego.x) <= MAX_CUT_IN_ALIGNMENT_DISTANCE:
             used_move = self._move_vehicle_same_road(target, ego, ego.lane_index, gap=CUT_IN_GAP)
         if not used_move:
-            self._safe_call(
-                self.api.vehicle.changeLane,
-                target.vehicle_id,
-                ego.lane_index,
-                max(1.0, self.config.step_length * 2.0),
-            )
-        target_speed = min(max(target.speed, ego.speed * 0.95), ego.speed + 1.0)
-        self._safe_call(self.api.vehicle.setSpeed, target.vehicle_id, max(0.0, target_speed))
+            changed_lane = self._request_lane_change(target, ego.lane_index)
+        if not used_move and not changed_lane:
+            return {
+                "applied": False,
+                "requested_event": requested,
+                "actual_event": "",
+                "target_vehicle_id": target.vehicle_id,
+                "used_move": False,
+                "reason": "lane_change_guarded",
+            }
+
+        target_speed = min(max(target.speed, ego.speed * 0.95), ego.speed + 0.8)
+        self._set_speed_smooth(target.vehicle_id, max(HIGH_BRAKE_TARGET_SPEED, target_speed))
         return {
             "applied": True,
             "requested_event": requested,
@@ -249,13 +265,14 @@ class RealSumoController:
 
         self.prepare_vehicle(target.vehicle_id)
         used_move = self._move_vehicle_along_current_lane(target, gap_to_lane_end=MERGE_LANE_END_BUFFER)
-        self._safe_call(self.api.vehicle.setSpeed, target.vehicle_id, max(target.speed, min(ego.speed, target.speed + 1.0)))
+        self._set_speed_smooth(target.vehicle_id, max(target.speed, min(ego.speed * 0.95, target.speed + 0.8)))
         return {
-            "applied": True,
+            "applied": bool(used_move),
             "requested_event": requested,
-            "actual_event": "unsafe_merge",
+            "actual_event": "unsafe_merge" if used_move else "",
             "target_vehicle_id": target.vehicle_id,
             "used_move": used_move,
+            "reason": "lane_tail_guarded" if not used_move else "",
         }
 
     def _event_merge_conflict(self, ego: RealVehicleSnapshot, vehicles: List[RealVehicleSnapshot], requested: str) -> Dict[str, Any]:
@@ -268,13 +285,14 @@ class RealSumoController:
 
         self.prepare_vehicle(target.vehicle_id)
         used_move = self._move_vehicle_along_current_lane(target, gap_to_lane_end=MERGE_LANE_END_BUFFER)
-        self._safe_call(self.api.vehicle.setSpeed, target.vehicle_id, max(target.speed, ego.speed))
+        self._set_speed_smooth(target.vehicle_id, max(target.speed, ego.speed * 0.92))
         return {
-            "applied": True,
+            "applied": bool(used_move),
             "requested_event": requested,
-            "actual_event": "merge_conflict",
+            "actual_event": "merge_conflict" if used_move else "",
             "target_vehicle_id": target.vehicle_id,
             "used_move": used_move,
+            "reason": "lane_tail_guarded" if not used_move else "",
         }
 
     def _vehicle_ids(self) -> List[str]:
@@ -322,20 +340,82 @@ class RealSumoController:
                 return max(1, int(count))
         return max(1, vehicle.lane_index + 1)
 
+    def _resolve_lane_target(self, vehicle: RealVehicleSnapshot, desired_lane: int) -> Dict[str, Any]:
+        lane_count = self._lane_count_for_vehicle(vehicle)
+        if desired_lane < 0 or desired_lane >= lane_count:
+            return {
+                "allowed": False,
+                "lane_index": vehicle.lane_index,
+                "lane_violation": True,
+                "reason": "lane_out_of_bounds",
+            }
+        if desired_lane == vehicle.lane_index:
+            return {
+                "allowed": True,
+                "lane_index": desired_lane,
+                "lane_violation": False,
+                "reason": "",
+            }
+        if self._near_lane_end(vehicle):
+            return {
+                "allowed": False,
+                "lane_index": vehicle.lane_index,
+                "lane_violation": False,
+                "reason": "junction_guard",
+            }
+
+        target_lane_id = self._lane_id(vehicle.road_id, desired_lane)
+        if not target_lane_id:
+            return {
+                "allowed": False,
+                "lane_index": vehicle.lane_index,
+                "lane_violation": False,
+                "reason": "lane_missing",
+            }
+
+        next_edge = self._next_route_edge(vehicle.vehicle_id)
+        if next_edge and not self._lane_reaches_edge(target_lane_id, next_edge):
+            return {
+                "allowed": False,
+                "lane_index": vehicle.lane_index,
+                "lane_violation": False,
+                "reason": "route_disconnected",
+            }
+
+        return {
+            "allowed": True,
+            "lane_index": desired_lane,
+            "lane_violation": False,
+            "reason": "",
+        }
+
+    def _request_lane_change(self, vehicle: RealVehicleSnapshot, desired_lane: int) -> bool:
+        lane_target = self._resolve_lane_target(vehicle, desired_lane)
+        if not lane_target["allowed"]:
+            return False
+        self._safe_call(
+            self.api.vehicle.changeLane,
+            vehicle.vehicle_id,
+            lane_target["lane_index"],
+            max(1.0, self.config.step_length * 2.0),
+        )
+        return True
+
     def _move_vehicle_same_road(self, target: RealVehicleSnapshot, ego: RealVehicleSnapshot, lane_index: int, gap: float) -> bool:
         if target.road_id != ego.road_id or not target.road_id:
             return False
-        lane_id = f"{target.road_id}_{lane_index}"
-        lane_length = float(
-            self._safe_call(
-                self.api.lane.getLength,
-                lane_id,
-                default=max(ego.lane_pos + gap + 1.0, 10.0),
-            )
-        )
+        lane_target = self._resolve_lane_target(target, lane_index)
+        if not lane_target["allowed"]:
+            return False
+        lane_id = self._lane_id(target.road_id, lane_target["lane_index"])
+        if not lane_id:
+            return False
+        lane_length = self._lane_length(lane_id, default=max(ego.lane_pos + gap + 1.0, 10.0))
         gap = max(gap, MOVE_PLACEMENT_CLEARANCE)
         target_pos = min(max(ego.lane_pos + gap, 1.0), max(1.0, lane_length - 1.0))
-        if not self._placement_is_clear(target, target.road_id, lane_index, target_pos, clearance=gap):
+        if lane_length - target_pos < JUNCTION_GUARD_DISTANCE:
+            return False
+        if not self._placement_is_clear(target, target.road_id, lane_target["lane_index"], target_pos, clearance=gap):
             return False
         try:
             self.api.vehicle.moveTo(target.vehicle_id, lane_id, target_pos)
@@ -346,15 +426,14 @@ class RealSumoController:
     def _move_vehicle_along_current_lane(self, target: RealVehicleSnapshot, gap_to_lane_end: float) -> bool:
         if not target.lane_id or not target.road_id:
             return False
-        gap_to_lane_end = max(gap_to_lane_end, MOVE_PLACEMENT_CLEARANCE)
-        lane_length = float(
-            self._safe_call(
-                self.api.lane.getLength,
-                target.lane_id,
-                default=target.lane_pos + gap_to_lane_end + 1.0,
-            )
-        )
+        gap_to_lane_end = max(gap_to_lane_end, JUNCTION_GUARD_DISTANCE)
+        lane_length = self._lane_length(target.lane_id, default=target.lane_pos + gap_to_lane_end + 1.0)
         target_pos = max(1.0, lane_length - gap_to_lane_end)
+        next_edge = self._next_route_edge(target.vehicle_id)
+        if next_edge and not self._lane_reaches_edge(target.lane_id, next_edge):
+            return False
+        if lane_length - target_pos < JUNCTION_GUARD_DISTANCE:
+            return False
         if not self._placement_is_clear(target, target.road_id, target.lane_index, target_pos, clearance=MOVE_PLACEMENT_CLEARANCE):
             return False
         try:
@@ -400,11 +479,93 @@ class RealSumoController:
         return candidates[0]
 
     def _nearest_ramp_vehicle(self, ego: RealVehicleSnapshot, vehicles: List[RealVehicleSnapshot]) -> Optional[RealVehicleSnapshot]:
-        candidates = [vehicle for vehicle in vehicles if vehicle.road_id.startswith("ramp")]
+        candidates = [vehicle for vehicle in vehicles if vehicle.road_id.startswith("ramp") or vehicle.road_id.startswith(":merge_3")]
         if not candidates:
             return None
         candidates.sort(key=lambda vehicle: abs(vehicle.x - ego.x))
         return candidates[0]
+
+    def _set_speed_smooth(self, vehicle_id: str, target_speed: float) -> bool:
+        target_speed = max(0.0, float(target_speed))
+        slow_down = getattr(self.api.vehicle, "slowDown", None)
+        duration = max(1.0, self.config.step_length * 12.0)
+        if callable(slow_down):
+            try:
+                slow_down(vehicle_id, target_speed, duration)
+                return True
+            except Exception:
+                pass
+        try:
+            self.api.vehicle.setSpeed(vehicle_id, target_speed)
+            return True
+        except Exception:
+            return False
+
+    def _lane_id(self, road_id: str, lane_index: int) -> str:
+        if not road_id:
+            return ""
+        return f"{road_id}_{lane_index}"
+
+    def _lane_length(self, lane_id: str, default: float) -> float:
+        return float(self._safe_call(self.api.lane.getLength, lane_id, default=default))
+
+    def _near_lane_end(self, vehicle: RealVehicleSnapshot) -> bool:
+        if not vehicle.lane_id:
+            return False
+        lane_length = self._lane_length(vehicle.lane_id, default=vehicle.lane_pos + JUNCTION_GUARD_DISTANCE + 1.0)
+        return (lane_length - vehicle.lane_pos) < JUNCTION_GUARD_DISTANCE
+
+    def _next_route_edge(self, vehicle_id: str) -> Optional[str]:
+        route = self._safe_call(getattr(self.api.vehicle, "getRoute", lambda *_args: None), vehicle_id, default=None)
+        route_index = self._safe_call(getattr(self.api.vehicle, "getRouteIndex", lambda *_args: None), vehicle_id, default=None)
+        if not route or route_index is None:
+            return None
+        try:
+            next_index = int(route_index) + 1
+        except Exception:
+            return None
+        if next_index < len(route):
+            return str(route[next_index])
+        return None
+
+    def _lane_reaches_edge(self, lane_id: str, target_edge: str, depth: int = 2, visited: Optional[Set[str]] = None) -> bool:
+        if not lane_id or not target_edge:
+            return True
+        if visited is None:
+            visited = set()
+        if lane_id in visited:
+            return False
+        visited.add(lane_id)
+
+        edge_id = self._edge_from_lane_id(lane_id)
+        if edge_id == target_edge:
+            return True
+
+        links = self._safe_call(getattr(self.api.lane, "getLinks", lambda *_args: []), lane_id, default=[])
+        for link in links or []:
+            next_lane_id = self._extract_link_lane_id(link)
+            if not next_lane_id:
+                continue
+            next_edge_id = self._edge_from_lane_id(next_lane_id)
+            if next_edge_id == target_edge:
+                return True
+            if depth > 0 and next_edge_id.startswith(":") and self._lane_reaches_edge(next_lane_id, target_edge, depth - 1, visited):
+                return True
+        return False
+
+    def _extract_link_lane_id(self, link: Any) -> str:
+        if isinstance(link, str):
+            return link
+        if isinstance(link, (list, tuple)) and link:
+            head = link[0]
+            if isinstance(head, str):
+                return head
+        return ""
+
+    def _edge_from_lane_id(self, lane_id: str) -> str:
+        if "_" not in lane_id:
+            return lane_id
+        return lane_id.rsplit("_", 1)[0]
 
     @staticmethod
     def _safe_call(func, *args, default=None):

@@ -1,4 +1,4 @@
-import copy
+﻿import copy
 import datetime as dt
 import json
 import time
@@ -56,6 +56,7 @@ class SafeRLPipeline:
         self.buffer_path: Optional[Path] = None
         self.report_path: Optional[Path] = None
         self.collector_failure_report_path: Optional[Path] = None
+        self.warning_summary_report_path: Optional[Path] = None
 
         self.manifest: Dict = {}
 
@@ -147,6 +148,7 @@ class SafeRLPipeline:
         self.buffer_path = self.buffers_dir / "intervention_buffer.pkl"
         self.report_path = self.reports_dir / "pipeline_report.json"
         self.collector_failure_report_path = self.reports_dir / "collector_failures.json"
+        self.warning_summary_report_path = self.reports_dir / "warning_summary.json"
 
         if self.manifest_path.exists():
             with self.manifest_path.open("r", encoding="utf-8") as f:
@@ -174,6 +176,7 @@ class SafeRLPipeline:
                 "buffer": str(self.buffer_path),
                 "report": str(self.report_path),
                 "collector_failure_report": str(self.collector_failure_report_path),
+                "warning_summary_report": str(self.warning_summary_report_path),
                 "sumo_logs_dir": str(self.sumo_logs_dir),
                 "tensorboard_root": str(self.tensorboard_root),
             }
@@ -313,9 +316,11 @@ class SafeRLPipeline:
         collector = SumoDataCollector(backend=backend, config=stage_config)
         episodes = collector.collect()
         collector.save_raw_logs(episodes)
-        collector.save_failure_report(str(self.collector_failure_report_path))
-        failure_report = collector.failure_report()
         backend.close()
+        collector.save_failure_report(str(self.collector_failure_report_path))
+        collector.save_warning_summary(str(self.warning_summary_report_path))
+        failure_report = collector.failure_report()
+        warning_report = collector.warning_summary()
 
         builder = ActionConditionedDatasetBuilder(sim_config=stage_config.sim, dataset_config=stage_config.dataset)
         samples = builder.build_samples(episodes)
@@ -328,6 +333,8 @@ class SafeRLPipeline:
             eval_writer.add_scalar("stage1/failed_episodes", float(failure_report["failed_episodes"]), 0)
             eval_writer.add_scalar("stage1/failure_rate", float(failure_report["failure_rate"]), 0)
             eval_writer.add_scalar("stage1/samples_total", float(len(samples)), 0)
+            eval_writer.add_scalar("stage1/warnings_illegal_lane_index", float(warning_report["overall"]["illegal_lane_index"]["count"]), 0)
+            eval_writer.add_scalar("stage1/warnings_no_connection_next_edge", float(warning_report["overall"]["no_connection_next_edge"]["count"]), 0)
             eval_writer.add_scalar("stage1/samples_train", float(len(train_samples)), 0)
             eval_writer.add_scalar("stage1/samples_val", float(len(val_samples)), 0)
             eval_writer.add_scalar("stage1/samples_test", float(len(test_samples)), 0)
@@ -337,6 +344,7 @@ class SafeRLPipeline:
             "successful_episodes": failure_report["successful_episodes"],
             "failed_episodes": failure_report["failed_episodes"],
             "collector_failure_report": str(self.collector_failure_report_path),
+            "warning_summary_report": str(self.warning_summary_report_path),
             "samples_total": len(samples),
             "samples_train": len(train_samples),
             "samples_val": len(val_samples),
@@ -625,6 +633,9 @@ def run_safe_rl_pipeline(config_path: Optional[str] = None, stage: str = "all", 
     config = load_safe_rl_config(config_path)
     pipeline = SafeRLPipeline(config)
     return pipeline.run(stage=stage, run_id=run_id)
+
+
+
 
 
 

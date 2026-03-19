@@ -1,4 +1,4 @@
-from abc import ABC, abstractmethod
+﻿from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from typing import Any, Dict, Optional
 
@@ -14,6 +14,13 @@ class BackendStepResult:
 
 
 class ISumoBackend(ABC):
+    @property
+    def runtime_log_path(self) -> str:
+        return ""
+
+    def set_episode_context(self, episode_id: str, risky_mode: bool):
+        _ = (episode_id, risky_mode)
+
     @abstractmethod
     def start(self):
         raise NotImplementedError
