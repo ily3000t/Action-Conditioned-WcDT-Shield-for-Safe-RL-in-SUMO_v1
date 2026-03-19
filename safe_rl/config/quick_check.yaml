@@ -60,6 +60,7 @@ ppo:
   batch_size: 32
   n_epochs: 2
   intervene_penalty: 0.1
+  device: "cpu"
 
 distill:
   trigger_buffer_size: 50

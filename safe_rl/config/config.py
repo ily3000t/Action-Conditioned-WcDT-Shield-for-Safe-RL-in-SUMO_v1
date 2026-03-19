@@ -80,6 +80,7 @@ class PPOConfig:
     batch_size: int = 64
     n_epochs: int = 10
     intervene_penalty: float = 0.1
+    device: str = "cpu"
 
 
 @dataclass

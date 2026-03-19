@@ -68,6 +68,7 @@ class SafePPOTrainer:
                     n_epochs=self.config.n_epochs,
                     verbose=1,
                     tensorboard_log=tb_log_root,
+                    device=self.config.device
                 )
                 model.learn(total_timesteps=self.config.total_timesteps, tb_log_name="sb3")
                 print("[PPO] sb3 training finished")
