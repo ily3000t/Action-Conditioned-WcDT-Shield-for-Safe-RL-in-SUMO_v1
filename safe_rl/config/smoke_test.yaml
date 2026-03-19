@@ -1,6 +1,7 @@
 sim:
   backend: "traci"
   sumo_cfg: ""
+  runtime_log_dir: "safe_rl_output/sumo_logs"
   use_gui: false
   step_length: 0.1
   episode_steps: 40

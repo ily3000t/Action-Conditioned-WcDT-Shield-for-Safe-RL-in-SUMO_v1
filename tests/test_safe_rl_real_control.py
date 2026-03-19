@@ -161,3 +161,23 @@ def test_unsafe_merge_prefers_ramp_vehicle_when_available():
     assert meta["actual_event"] == "unsafe_merge"
     assert meta["target_vehicle_id"] == "merge"
     assert controller.api.vehicle.move_calls
+
+
+def test_move_to_respects_spacing_conflict():
+    controller = _controller(
+        {
+            "ego": {"x": 100.0, "speed": 22.0, "lane_index": 1, "road_id": "main_in", "lane_pos": 900.0},
+            "lead": {"x": 150.0, "speed": 18.0, "lane_index": 1, "road_id": "main_in", "lane_pos": 950.0},
+            "blocker": {"x": 112.5, "speed": 18.0, "lane_index": 1, "road_id": "main_in", "lane_pos": 912.5},
+        }
+    )
+
+    moved = controller._move_vehicle_same_road(
+        controller._snapshot("lead"),
+        controller._snapshot("ego"),
+        lane_index=1,
+        gap=12.0,
+    )
+
+    assert moved is False
+    assert controller.api.vehicle.move_calls == []

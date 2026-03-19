@@ -1,8 +1,9 @@
 import json
 import random
 import time
+from datetime import datetime
 from pathlib import Path
-from typing import List
+from typing import Dict, List
 
 from safe_rl.config.config import SafeRLConfig
 from safe_rl.data.risk import aggregate_future_risk, compute_min_distance, compute_min_ttc, detect_collision
@@ -16,9 +17,11 @@ class SumoDataCollector:
         self.backend = backend
         self.config = config
         self._rng = random.Random(config.sim.random_seed)
+        self.failure_records: List[Dict] = []
+        self.successful_episodes: int = 0
+        self.failed_episodes: int = 0
 
     def backend_mode(self) -> str:
-        # Backends expose _use_mock internally; introspection keeps interface stable.
         use_mock = bool(getattr(self.backend, "_use_mock", True))
         if use_mock:
             return "mock"
@@ -26,6 +29,10 @@ class SumoDataCollector:
 
     def collect(self) -> List[EpisodeLog]:
         episodes: List[EpisodeLog] = []
+        self.failure_records = []
+        self.successful_episodes = 0
+        self.failed_episodes = 0
+
         total = self.config.sim.normal_episodes + self.config.sim.risky_episodes
         print(
             f"[Collector] start: backend={self.backend_mode()}, total_episodes={total}, "
@@ -39,7 +46,32 @@ class SumoDataCollector:
         for i in range(total):
             risky_mode = i >= self.config.sim.normal_episodes
             episode_id = f"ep_{i:05d}"
-            episodes.append(self.collect_episode(episode_id, risky_mode=risky_mode))
+
+            try:
+                episode = self.collect_episode(episode_id, risky_mode=risky_mode)
+            except Exception as exc:
+                self._record_failure(
+                    episode_id=episode_id,
+                    risky_mode=risky_mode,
+                    exception_type=type(exc).__name__,
+                    exception_text=str(exc),
+                    reason="episode_exception",
+                )
+                self._reset_backend_after_failure()
+                episode = None
+
+            if episode is not None:
+                if episode.steps:
+                    episodes.append(episode)
+                    self.successful_episodes += 1
+                else:
+                    self._record_failure(
+                        episode_id=episode_id,
+                        risky_mode=risky_mode,
+                        exception_type="EmptyEpisodeError",
+                        exception_text="Episode ended before collecting any steps.",
+                        reason="empty_episode",
+                    )
 
             if (i + 1) % log_interval == 0 or (i + 1) == total:
                 elapsed = time.time() - t0
@@ -51,7 +83,12 @@ class SumoDataCollector:
                     flush=True,
                 )
 
-        print(f"[Collector] done: episodes={len(episodes)}, total_time={time.time() - t0:.1f}s", flush=True)
+        self.failed_episodes = len(self.failure_records)
+        print(
+            f"[Collector] done: episodes={len(episodes)}, failed={self.failed_episodes}, "
+            f"total_time={time.time() - t0:.1f}s",
+            flush=True,
+        )
         return episodes
 
     def collect_episode(self, episode_id: str, risky_mode: bool) -> EpisodeLog:
@@ -128,3 +165,51 @@ class SumoDataCollector:
             if (index + 1) % max(1, len(episodes) // 10) == 0 or (index + 1) == len(episodes):
                 print(f"[Collector] save_raw_logs: {index + 1}/{len(episodes)}", flush=True)
         print(f"[Collector] raw logs saved in {time.time() - t0:.1f}s -> {output_dir}", flush=True)
+
+    def failure_report(self) -> Dict:
+        total_attempts = self.successful_episodes + self.failed_episodes
+        failure_rate = float(self.failed_episodes / total_attempts) if total_attempts > 0 else 0.0
+        return {
+            "successful_episodes": int(self.successful_episodes),
+            "failed_episodes": int(self.failed_episodes),
+            "failure_rate": failure_rate,
+            "failures": list(self.failure_records),
+        }
+
+    def save_failure_report(self, path: str):
+        report_path = Path(path)
+        report_path.parent.mkdir(parents=True, exist_ok=True)
+        with report_path.open("w", encoding="utf-8") as f:
+            json.dump(self.failure_report(), f, ensure_ascii=False, indent=2)
+        print(f"[Collector] failure report saved -> {report_path}", flush=True)
+
+    def _record_failure(
+        self,
+        episode_id: str,
+        risky_mode: bool,
+        exception_type: str,
+        exception_text: str,
+        reason: str,
+    ):
+        runtime_log_path = str(getattr(self.backend, "runtime_log_path", "") or "")
+        record = {
+            "episode_id": episode_id,
+            "risky_mode": bool(risky_mode),
+            "exception_type": exception_type,
+            "exception_text": exception_text,
+            "reason": reason,
+            "sumo_log_path": runtime_log_path,
+            "timestamp": datetime.now().isoformat(timespec="seconds"),
+        }
+        self.failure_records.append(record)
+        print(
+            f"[Collector] episode failed: id={episode_id}, reason={reason}, "
+            f"exception={exception_type}, sumo_log={runtime_log_path}",
+            flush=True,
+        )
+
+    def _reset_backend_after_failure(self):
+        try:
+            self.backend.close()
+        except Exception:
+            pass

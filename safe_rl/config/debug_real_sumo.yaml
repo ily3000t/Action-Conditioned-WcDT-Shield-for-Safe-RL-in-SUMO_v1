@@ -10,18 +10,18 @@ sim:
   force_mock: false
   use_gui: false
   step_length: 0.1
-  episode_steps: 20
+  episode_steps: 150
   history_steps: 10
   future_steps: 8
-  normal_episodes: 2
-  risky_episodes: 1
-  risk_event_prob: 0.3
-  random_seed: 7
+  normal_episodes: 10
+  risky_episodes: 10
+  risk_event_prob: 0.15
+  random_seed: 42
   ego_vehicle_id: "ego"
 
 dataset:
-  raw_log_dir: "safe_rl_output/quick/raw"
-  dataset_dir: "safe_rl_output/quick/datasets"
+  raw_log_dir: "safe_rl_output/debug_real/raw"
+  dataset_dir: "safe_rl_output/debug_real/datasets"
   train_ratio: 0.7
   val_ratio: 0.1
   ttc_threshold: 2.0
@@ -29,7 +29,7 @@ dataset:
 
 light_risk:
   hidden_dim: 64
-  batch_size: 8
+  batch_size: 16
   learning_rate: 0.001
   weight_decay: 0.0001
   epochs: 1
@@ -72,12 +72,12 @@ distill:
 
 eval:
   eval_episodes: 2
-  seed_list: [7]
+  seed_list: [42]
   target_collision_reduction: 0.1
   max_efficiency_drop: 0.5
 
 tensorboard:
   enabled: true
   root_dir: "safe_rl_output/tensorboard"
-  run_name: "quick"
+  run_name: "debug_real_sumo"
   flush_secs: 5

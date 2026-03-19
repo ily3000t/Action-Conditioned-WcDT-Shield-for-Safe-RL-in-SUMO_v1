@@ -42,6 +42,7 @@ class SafeRLPipeline:
         self.policies_dir: Optional[Path] = None
         self.buffers_dir: Optional[Path] = None
         self.reports_dir: Optional[Path] = None
+        self.sumo_logs_dir: Optional[Path] = None
         self.tensorboard_root: Optional[Path] = None
         self.manifest_path: Optional[Path] = None
 
@@ -54,6 +55,7 @@ class SafeRLPipeline:
         self.policy_sb3_path: Optional[Path] = None
         self.buffer_path: Optional[Path] = None
         self.report_path: Optional[Path] = None
+        self.collector_failure_report_path: Optional[Path] = None
 
         self.manifest: Dict = {}
 
@@ -131,6 +133,7 @@ class SafeRLPipeline:
         self.policies_dir = self.run_root / "policies"
         self.buffers_dir = self.run_root / "buffers"
         self.reports_dir = self.run_root / "reports"
+        self.sumo_logs_dir = self.run_root / "sumo_logs"
         self.tensorboard_root = self.run_root / "tensorboard"
         self.manifest_path = self.run_root / "manifest.json"
 
@@ -143,6 +146,7 @@ class SafeRLPipeline:
         self.policy_sb3_path = self.policies_dir / "ppo_sb3.zip"
         self.buffer_path = self.buffers_dir / "intervention_buffer.pkl"
         self.report_path = self.reports_dir / "pipeline_report.json"
+        self.collector_failure_report_path = self.reports_dir / "collector_failures.json"
 
         if self.manifest_path.exists():
             with self.manifest_path.open("r", encoding="utf-8") as f:
@@ -152,22 +156,31 @@ class SafeRLPipeline:
                 "run_id": self.run_id,
                 "config_snapshot": asdict(self.config),
                 "stage_done": {s: False for s in STAGE_ORDER},
-                "artifact_paths": {
-                    "raw_dir": str(self.raw_dir),
-                    "train_pkl": str(self.train_pkl),
-                    "val_pkl": str(self.val_pkl),
-                    "test_pkl": str(self.test_pkl),
-                    "light_model": str(self.light_model_path),
-                    "world_model": str(self.world_model_path),
-                    "policy_meta": str(self.policy_meta_path),
-                    "policy_sb3": str(self.policy_sb3_path),
-                    "buffer": str(self.buffer_path),
-                    "report": str(self.report_path),
-                    "tensorboard_root": str(self.tensorboard_root),
-                },
+                "artifact_paths": {},
                 "timestamps": {},
             }
-            self._save_manifest()
+
+        artifact_paths = self.manifest.setdefault("artifact_paths", {})
+        artifact_paths.update(
+            {
+                "raw_dir": str(self.raw_dir),
+                "train_pkl": str(self.train_pkl),
+                "val_pkl": str(self.val_pkl),
+                "test_pkl": str(self.test_pkl),
+                "light_model": str(self.light_model_path),
+                "world_model": str(self.world_model_path),
+                "policy_meta": str(self.policy_meta_path),
+                "policy_sb3": str(self.policy_sb3_path),
+                "buffer": str(self.buffer_path),
+                "report": str(self.report_path),
+                "collector_failure_report": str(self.collector_failure_report_path),
+                "sumo_logs_dir": str(self.sumo_logs_dir),
+                "tensorboard_root": str(self.tensorboard_root),
+            }
+        )
+        self.manifest.setdefault("stage_done", {s: False for s in STAGE_ORDER})
+        self.manifest.setdefault("timestamps", {})
+        self._save_manifest()
 
     def _save_manifest(self):
         self.manifest_path.parent.mkdir(parents=True, exist_ok=True)
@@ -194,6 +207,7 @@ class SafeRLPipeline:
         cfg = copy.deepcopy(self.config)
         cfg.dataset.raw_log_dir = str(self.raw_dir)
         cfg.dataset.dataset_dir = str(self.datasets_dir)
+        cfg.sim.runtime_log_dir = str(self.sumo_logs_dir)
         return cfg
 
     def _load_dataset_splits(self):
@@ -299,6 +313,8 @@ class SafeRLPipeline:
         collector = SumoDataCollector(backend=backend, config=stage_config)
         episodes = collector.collect()
         collector.save_raw_logs(episodes)
+        collector.save_failure_report(str(self.collector_failure_report_path))
+        failure_report = collector.failure_report()
         backend.close()
 
         builder = ActionConditionedDatasetBuilder(sim_config=stage_config.sim, dataset_config=stage_config.dataset)
@@ -309,6 +325,8 @@ class SafeRLPipeline:
         eval_writer = tb_manager.get_writer("eval")
         if eval_writer is not None:
             eval_writer.add_scalar("stage1/episodes", float(len(episodes)), 0)
+            eval_writer.add_scalar("stage1/failed_episodes", float(failure_report["failed_episodes"]), 0)
+            eval_writer.add_scalar("stage1/failure_rate", float(failure_report["failure_rate"]), 0)
             eval_writer.add_scalar("stage1/samples_total", float(len(samples)), 0)
             eval_writer.add_scalar("stage1/samples_train", float(len(train_samples)), 0)
             eval_writer.add_scalar("stage1/samples_val", float(len(val_samples)), 0)
@@ -316,6 +334,9 @@ class SafeRLPipeline:
 
         return {
             "episodes": len(episodes),
+            "successful_episodes": failure_report["successful_episodes"],
+            "failed_episodes": failure_report["failed_episodes"],
+            "collector_failure_report": str(self.collector_failure_report_path),
             "samples_total": len(samples),
             "samples_train": len(train_samples),
             "samples_val": len(val_samples),
@@ -604,3 +625,7 @@ def run_safe_rl_pipeline(config_path: Optional[str] = None, stage: str = "all", 
     config = load_safe_rl_config(config_path)
     pipeline = SafeRLPipeline(config)
     return pipeline.run(stage=stage, run_id=run_id)
+
+
+
+

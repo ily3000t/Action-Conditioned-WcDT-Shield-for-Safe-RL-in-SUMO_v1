@@ -3,6 +3,7 @@ sim:
   sumo_cfg: "scenarios/highway_merge/highway_merge.sumocfg"
   net_file: ""
   route_file: ""
+  runtime_log_dir: "safe_rl_output/sumo_logs"
   sumo_home: "E:/Program Files/sumo-1.22.0"
   sumo_bin: "E:/Program Files/sumo-1.22.0/bin/sumo.exe"
   sumo_gui_bin: "E:/Program Files/sumo-1.22.0/bin/sumo-gui.exe"

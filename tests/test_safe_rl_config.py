@@ -11,6 +11,7 @@ def test_default_config_loads():
     assert config.tensorboard.enabled is True
     assert config.tensorboard.root_dir
     assert config.sim.ego_vehicle_id == "ego"
+    assert config.sim.runtime_log_dir
 
 
 def test_tensorboard_config_override():

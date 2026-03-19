@@ -11,6 +11,7 @@ class SimConfig:
     sumo_cfg: str = "scenarios/highway_merge/highway_merge.sumocfg"
     net_file: str = ""
     route_file: str = ""
+    runtime_log_dir: str = "safe_rl_output/sumo_logs"
     sumo_home: str = ""
     sumo_bin: str = ""
     sumo_gui_bin: str = ""
