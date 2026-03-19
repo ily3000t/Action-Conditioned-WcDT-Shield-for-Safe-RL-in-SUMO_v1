@@ -1,4 +1,4 @@
-from pathlib import Path
+﻿from pathlib import Path
 
 from safe_rl.config.config import load_safe_rl_config
 
@@ -12,6 +12,8 @@ def test_default_config_loads():
     assert config.tensorboard.root_dir
     assert config.sim.ego_vehicle_id == "ego"
     assert config.sim.runtime_log_dir
+    assert config.sim.collision_action == "teleport"
+    assert config.sim.collision_check_junctions is True
 
 
 def test_tensorboard_config_override():
@@ -36,3 +38,9 @@ def test_tensorboard_config_override():
     assert config.tensorboard.root_dir == "safe_rl_output/tb_test"
     assert config.tensorboard.run_name == "ci_quick"
     assert config.tensorboard.flush_secs == 3
+
+
+def test_debug_real_config_uses_warn_collision_action():
+    config = load_safe_rl_config("safe_rl/config/debug_real_sumo.yaml")
+    assert config.sim.collision_action == "warn"
+    assert config.sim.collision_stoptime == 1.0

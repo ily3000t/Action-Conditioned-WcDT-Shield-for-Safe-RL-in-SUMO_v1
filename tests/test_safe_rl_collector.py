@@ -40,7 +40,12 @@ class _FlakyBackend(ISumoBackend):
         self._runtime_log_path.parent.mkdir(parents=True, exist_ok=True)
         if risky_mode:
             self._runtime_log_path.write_text(
-                "Warning: Vehicle 'ego' performs emergency stop at the end of lane ':merge_0_0' because there is no connection to the next edge.\n",
+                "\n".join(
+                    [
+                        "Warning: Vehicle 'ego' performs emergency stop at the end of lane ':merge_0_0' because there is no connection to the next edge.",
+                        "Warning: Vehicle 'ego'; junction collision with vehicle 'merge_seed', lane=':merge_0_0', gap=-1.00, latGap=0.00, time=4.20, stage=move.",
+                    ]
+                ) + "\n",
                 encoding="utf-8",
             )
         else:
@@ -98,5 +103,10 @@ def test_collector_skips_failed_episode_and_saves_reports():
 
     assert warning_payload["normal"]["illegal_lane_index"]["count"] == 1
     assert warning_payload["risky"]["emergency_stop_no_connection"]["count"] == 1
-    assert warning_payload["overall"]["illegal_lane_index"]["episodes_with_warning"] == 1
-    assert warning_payload["overall"]["emergency_stop_no_connection"]["episodes_with_warning"] == 1
+    assert warning_payload["risky"]["junction_collision"]["count"] == 1
+    assert warning_payload["overall"]["totals"]["traci_command_errors"]["count"] == 1
+    assert warning_payload["overall"]["totals"]["sumo_runtime_warnings"]["count"] == 2
+    assert warning_payload["overall"]["totals"]["collisions"]["count"] == 1
+    assert warning_payload["overall"]["totals"]["route_lane_structural_warnings"]["count"] == 2
+    assert warning_payload["acceptance"]["checks"]["illegal_lane_index_normal_zero"] is False
+    assert warning_payload["acceptance"]["passed"] is False

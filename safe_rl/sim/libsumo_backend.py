@@ -113,11 +113,11 @@ class LibsumoBackend(ISumoBackend):
             "--log",
             str(self._runtime_log_path),
             "--collision.action",
-            "warn",
+            str(self.config.collision_action),
             "--collision.stoptime",
-            "1",
+            str(self.config.collision_stoptime),
             "--collision.check-junctions",
-            "true",
+            "true" if self.config.collision_check_junctions else "false",
         ]
         return args
 
@@ -246,6 +246,7 @@ class LibsumoBackend(ISumoBackend):
             "risk_event": self._last_risk_meta.get("actual_event", "") if self._last_risk_meta else "",
             "risk_target_vehicle": self._last_risk_meta.get("target_vehicle_id", "") if self._last_risk_meta else "",
             "risk_requested_event": self._last_risk_meta.get("requested_event", "") if self._last_risk_meta else "",
+            "risk_skipped_reason": self._last_risk_meta.get("skipped_reason", "") if self._last_risk_meta else "",
             "terminated_by_sumo": True,
             "termination_reason": "sumo_connection_closed",
             "sumo_exception": str(exc),
@@ -286,3 +287,5 @@ class LibsumoBackend(ISumoBackend):
             if fatal_cls is not None and isinstance(exc, fatal_cls):
                 return True
         return exc.__class__.__name__ == "FatalTraCIError"
+
+

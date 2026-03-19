@@ -1,6 +1,12 @@
 ﻿from safe_rl.config.config import SimConfig
 from safe_rl.sim.actions import encode_action
-from safe_rl.sim.real_control import RealSumoController
+from safe_rl.sim.real_control import (
+    RealSumoController,
+    SKIP_INSUFFICIENT_LANE_COUNT,
+    SKIP_MERGE_GUARD_BLOCKED,
+    SKIP_NO_ROUTE_CONNECTION,
+    SKIP_PLACEMENT_CONFLICT,
+)
 
 
 class _VehicleDomain:
@@ -183,7 +189,7 @@ def test_apply_action_skips_lane_change_near_merge():
     meta = controller.apply_action(encode_action(0, -1))
     assert meta["lane_violation"] is False
     assert meta["target_lane"] == 1
-    assert meta["lane_change_skipped_reason"] == "junction_guard"
+    assert meta["lane_change_skipped_reason"] == SKIP_MERGE_GUARD_BLOCKED
     assert controller.api.vehicle.changed_lanes == []
 
 
@@ -212,7 +218,7 @@ def test_apply_action_skips_lane_change_when_route_disconnects():
     meta = controller.apply_action(encode_action(0, -1))
     assert meta["lane_violation"] is False
     assert meta["target_lane"] == 0
-    assert meta["lane_change_skipped_reason"] == "route_disconnected"
+    assert meta["lane_change_skipped_reason"] == SKIP_NO_ROUTE_CONNECTION
     assert controller.api.vehicle.changed_lanes == []
 
 
@@ -321,4 +327,25 @@ def test_cut_in_refuses_single_lane_ramp_like_target():
     meta = controller._event_cut_in(ego, [target], requested="cut_in")
 
     assert meta["applied"] is False
+    assert meta["skipped_reason"] == SKIP_INSUFFICIENT_LANE_COUNT
     assert controller.api.vehicle.changed_lanes == []
+
+
+def test_move_result_reports_placement_conflict_reason():
+    controller = _controller(
+        {
+            "ego": {"x": 100.0, "speed": 22.0, "lane_index": 1, "road_id": "main_in", "lane_pos": 900.0},
+            "lead": {"x": 150.0, "speed": 18.0, "lane_index": 1, "road_id": "main_in", "lane_pos": 950.0},
+            "blocker": {"x": 112.5, "speed": 18.0, "lane_index": 1, "road_id": "main_in", "lane_pos": 912.5},
+        }
+    )
+
+    result = controller._move_vehicle_same_road_result(
+        controller._snapshot("lead"),
+        controller._snapshot("ego"),
+        lane_index=1,
+        gap=12.0,
+    )
+
+    assert result["applied"] is False
+    assert result["skipped_reason"] == SKIP_PLACEMENT_CONFLICT

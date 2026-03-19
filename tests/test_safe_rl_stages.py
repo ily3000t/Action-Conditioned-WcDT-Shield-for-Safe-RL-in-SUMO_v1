@@ -99,3 +99,4 @@ def test_run_scoped_runtime_log_dir_and_report_paths():
     assert Path(scoped_config.sim.runtime_log_dir) == pipeline.sumo_logs_dir
     assert pipeline.collector_failure_report_path.name == "collector_failures.json"
     assert pipeline.warning_summary_report_path.name == "warning_summary.json"
+

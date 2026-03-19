@@ -335,6 +335,8 @@ class SafeRLPipeline:
             eval_writer.add_scalar("stage1/samples_total", float(len(samples)), 0)
             eval_writer.add_scalar("stage1/warnings_illegal_lane_index", float(warning_report["overall"]["illegal_lane_index"]["count"]), 0)
             eval_writer.add_scalar("stage1/warnings_no_connection_next_edge", float(warning_report["overall"]["no_connection_next_edge"]["count"]), 0)
+            eval_writer.add_scalar("stage1/warning_acceptance_passed", float(bool(warning_report["acceptance"]["passed"])), 0)
+            eval_writer.add_scalar("stage1/traci_command_errors", float(warning_report["overall"]["totals"]["traci_command_errors"]["count"]), 0)
             eval_writer.add_scalar("stage1/samples_train", float(len(train_samples)), 0)
             eval_writer.add_scalar("stage1/samples_val", float(len(val_samples)), 0)
             eval_writer.add_scalar("stage1/samples_test", float(len(test_samples)), 0)
@@ -345,6 +347,8 @@ class SafeRLPipeline:
             "failed_episodes": failure_report["failed_episodes"],
             "collector_failure_report": str(self.collector_failure_report_path),
             "warning_summary_report": str(self.warning_summary_report_path),
+            "warning_acceptance_passed": bool(warning_report["acceptance"]["passed"]),
+            "warning_acceptance": warning_report["acceptance"],
             "samples_total": len(samples),
             "samples_train": len(train_samples),
             "samples_val": len(val_samples),
@@ -633,6 +637,7 @@ def run_safe_rl_pipeline(config_path: Optional[str] = None, stage: str = "all", 
     config = load_safe_rl_config(config_path)
     pipeline = SafeRLPipeline(config)
     return pipeline.run(stage=stage, run_id=run_id)
+
 
 
 

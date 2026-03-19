@@ -1,4 +1,4 @@
-sim:
+﻿sim:
   backend: "traci"
   sumo_cfg: "scenarios/highway_merge/highway_merge.sumocfg"
   runtime_log_dir: "safe_rl_output/sumo_logs"
@@ -18,6 +18,9 @@ sim:
   risk_event_prob: 0.3
   random_seed: 7
   ego_vehicle_id: "ego"
+  collision_action: "teleport"
+  collision_stoptime: 1.0
+  collision_check_junctions: true
 
 dataset:
   raw_log_dir: "safe_rl_output/quick/raw"
@@ -81,3 +84,4 @@ tensorboard:
   root_dir: "safe_rl_output/tensorboard"
   run_name: "quick"
   flush_secs: 5
+

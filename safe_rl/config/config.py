@@ -1,4 +1,4 @@
-from dataclasses import dataclass, field
+﻿from dataclasses import dataclass, field
 from pathlib import Path
 from typing import List, Optional
 
@@ -28,6 +28,9 @@ class SimConfig:
     risk_event_prob: float = 0.35
     random_seed: int = 42
     ego_vehicle_id: str = "ego"
+    collision_action: str = "teleport"
+    collision_stoptime: float = 1.0
+    collision_check_junctions: bool = True
 
 
 @dataclass
