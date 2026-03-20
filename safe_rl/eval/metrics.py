@@ -13,6 +13,9 @@ def summarize_episode(episode_id: str, step_infos: List[dict], rewards: List[flo
     interventions = sum(1 for info in step_infos if bool(info.get("intervened", False)))
     avg_speed = float(np.mean([float(info.get("ego_speed", 0.0)) for info in step_infos])) if step_infos else 0.0
     mean_reward = float(np.mean(rewards)) if rewards else 0.0
+    mean_raw_risk = float(np.mean([float(info.get("risk_raw", 0.0)) for info in step_infos])) if step_infos else 0.0
+    mean_final_risk = float(np.mean([float(info.get("risk_final", 0.0)) for info in step_infos])) if step_infos else 0.0
+    mean_risk_reduction = float(np.mean([float(info.get("risk_raw", 0.0)) - float(info.get("risk_final", 0.0)) for info in step_infos])) if step_infos else 0.0
     success = collisions == 0 and steps > 0
     return EpisodeSummary(
         episode_id=episode_id,
@@ -22,6 +25,9 @@ def summarize_episode(episode_id: str, step_infos: List[dict], rewards: List[flo
         avg_speed=avg_speed,
         mean_reward=mean_reward,
         success=success,
+        mean_raw_risk=mean_raw_risk,
+        mean_final_risk=mean_final_risk,
+        mean_risk_reduction=mean_risk_reduction,
     )
 
 
@@ -34,6 +40,9 @@ def aggregate_episode_summaries(summaries: List[EpisodeSummary]) -> Dict[str, fl
             "success_rate": 0.0,
             "avg_speed": 0.0,
             "mean_reward": 0.0,
+            "mean_raw_risk": 0.0,
+            "mean_final_risk": 0.0,
+            "mean_risk_reduction": 0.0,
         }
 
     episodes = len(summaries)
@@ -42,6 +51,9 @@ def aggregate_episode_summaries(summaries: List[EpisodeSummary]) -> Dict[str, fl
     success_rate = float(sum(1 for s in summaries if s.success) / episodes)
     avg_speed = float(np.mean([s.avg_speed for s in summaries]))
     mean_reward = float(np.mean([s.mean_reward for s in summaries]))
+    mean_raw_risk = float(np.mean([s.mean_raw_risk for s in summaries]))
+    mean_final_risk = float(np.mean([s.mean_final_risk for s in summaries]))
+    mean_risk_reduction = float(np.mean([s.mean_risk_reduction for s in summaries]))
     return {
         "episodes": float(episodes),
         "collision_rate": collision_rate,
@@ -49,6 +61,9 @@ def aggregate_episode_summaries(summaries: List[EpisodeSummary]) -> Dict[str, fl
         "success_rate": success_rate,
         "avg_speed": avg_speed,
         "mean_reward": mean_reward,
+        "mean_raw_risk": mean_raw_risk,
+        "mean_final_risk": mean_final_risk,
+        "mean_risk_reduction": mean_risk_reduction,
     }
 
 

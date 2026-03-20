@@ -1,20 +1,27 @@
 import re
+import uuid
+from pathlib import Path
 
 from safe_rl.config.config import TensorboardConfig
 from safe_rl.pipeline.tensorboard_logger import TensorboardManager
 
 
-def test_tensorboard_manager_run_dir_and_writer(tmp_path):
+def _tb_root() -> Path:
+    path = Path("safe_rl_output/test_artifacts/tensorboard") / uuid.uuid4().hex[:8]
+    path.mkdir(parents=True, exist_ok=True)
+    return path
+
+
+def test_tensorboard_manager_run_dir_and_writer():
     config = TensorboardConfig(
         enabled=True,
-        root_dir=str(tmp_path),
+        root_dir=str(_tb_root()),
         run_name="quick check",
         flush_secs=1,
     )
     manager = TensorboardManager(config)
 
     if not manager.is_enabled():
-        # TensorBoard is optional at runtime; manager should degrade gracefully.
         assert manager.get_writer("eval") is None
         return
 
@@ -31,17 +38,17 @@ def test_tensorboard_manager_run_dir_and_writer(tmp_path):
     assert len(files) >= 1
 
 
-def test_tensorboard_manager_disabled(tmp_path):
-    config = TensorboardConfig(enabled=False, root_dir=str(tmp_path), run_name="", flush_secs=1)
+def test_tensorboard_manager_disabled():
+    config = TensorboardConfig(enabled=False, root_dir=str(_tb_root()), run_name="", flush_secs=1)
     manager = TensorboardManager(config)
     assert manager.is_enabled() is False
     assert manager.get_writer("eval") is None
 
 
-def test_tensorboard_manager_stage_prefix_in_run_name(tmp_path):
+def test_tensorboard_manager_stage_prefix_in_run_name():
     config = TensorboardConfig(
         enabled=True,
-        root_dir=str(tmp_path),
+        root_dir=str(_tb_root()),
         run_name="quick",
         flush_secs=1,
     )

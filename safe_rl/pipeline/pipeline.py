@@ -13,6 +13,7 @@ from safe_rl.data.dataset_builder import ActionConditionedDatasetBuilder
 from safe_rl.data.types import InterventionRecord
 from safe_rl.eval import SafeRLEvaluator
 from safe_rl.pipeline.session_event_logger import IncrementalSessionEventLogger
+from safe_rl.pipeline.telemetry import BufferTelemetryTracker, Stage3TelemetryTracker
 from safe_rl.pipeline.tensorboard_logger import TensorboardManager
 from safe_rl.shield import SafetyShield
 from safe_rl.sim import create_backend
@@ -58,6 +59,7 @@ class SafeRLPipeline:
         self.report_path: Optional[Path] = None
         self.collector_failure_report_path: Optional[Path] = None
         self.warning_summary_report_path: Optional[Path] = None
+        self.stage2_training_report_path: Optional[Path] = None
         self.stage3_runtime_config_path: Optional[Path] = None
         self.stage3_session_events_path: Optional[Path] = None
 
@@ -152,6 +154,7 @@ class SafeRLPipeline:
         self.report_path = self.reports_dir / "pipeline_report.json"
         self.collector_failure_report_path = self.reports_dir / "collector_failures.json"
         self.warning_summary_report_path = self.reports_dir / "warning_summary.json"
+        self.stage2_training_report_path = self.reports_dir / "stage2_training_report.json"
         self.stage3_runtime_config_path = self.reports_dir / "stage3_runtime_config.json"
         self.stage3_session_events_path = self.reports_dir / "stage3_session_events.json"
 
@@ -182,6 +185,7 @@ class SafeRLPipeline:
                 "report": str(self.report_path),
                 "collector_failure_report": str(self.collector_failure_report_path),
                 "warning_summary_report": str(self.warning_summary_report_path),
+                "stage2_training_report": str(self.stage2_training_report_path),
                 "stage3_runtime_config_report": str(self.stage3_runtime_config_path),
                 "stage3_session_events_report": str(self.stage3_session_events_path),
                 "sumo_logs_dir": str(self.sumo_logs_dir),
@@ -413,16 +417,25 @@ class SafeRLPipeline:
             tb_world_writer=tb_manager.get_writer("world_model"),
         )
 
-        eval_writer = tb_manager.get_writer("eval")
-        if eval_writer is not None:
-            eval_writer.add_scalar("stage2/light_device_cuda", float("cuda" in str(light_predictor.device)), 0)
-            eval_writer.add_scalar("stage2/world_device_cuda", float("cuda" in str(world_predictor.device)), 0)
+        stage2_report = {
+            "stage": "stage2",
+            "run_id": self.run_id,
+            "created_at": dt.datetime.now().isoformat(timespec="seconds"),
+            "train_samples": len(train_samples),
+            "val_samples": len(val_samples),
+            "light_model": str(self.light_model_path),
+            "world_model": str(self.world_model_path),
+            "light_device": str(light_predictor.device),
+            "world_device": str(world_predictor.device),
+        }
+        self._write_json(self.stage2_training_report_path, stage2_report)
 
         return {
             "light_model": str(self.light_model_path),
             "world_model": str(self.world_model_path),
             "train_samples": len(train_samples),
             "val_samples": len(val_samples),
+            "training_report": str(self.stage2_training_report_path),
         }
 
     def _run_stage3(self, tb_manager: TensorboardManager) -> Dict:
@@ -434,10 +447,6 @@ class SafeRLPipeline:
         shield = SafetyShield(config=self.config.shield, light_predictor=light_predictor, world_predictor=world_predictor)
         policy = self.train_online_policy(stage_config, shield, tb_writer=tb_manager.get_writer("ppo"))
         policy_meta = self._save_policy_artifact(policy)
-
-        eval_writer = tb_manager.get_writer("eval")
-        if eval_writer is not None:
-            eval_writer.add_scalar("stage3/policy_is_sb3", float(policy_meta["policy_type"] == "sb3"), 0)
 
         return {
             "policy_meta": policy_meta,
@@ -455,13 +464,14 @@ class SafeRLPipeline:
         shield = SafetyShield(config=self.config.shield, light_predictor=light_predictor, world_predictor=world_predictor)
         policy = self._load_policy_artifact()
 
-        intervention_buffer = self.collect_interventions(stage_config, policy, shield, save_path=self.buffer_path)
+        intervention_buffer = self.collect_interventions(
+            stage_config,
+            policy,
+            shield,
+            save_path=self.buffer_path,
+            tb_writer=tb_manager.get_writer("buffer"),
+        )
         stats = intervention_buffer.stats()
-
-        distill_writer = tb_manager.get_writer("distill")
-        if distill_writer is not None:
-            distill_writer.add_scalar("status/buffer_size", float(len(intervention_buffer)), 0)
-            distill_writer.add_scalar("status/trigger_buffer_size", float(self.config.distill.trigger_buffer_size), 0)
 
         return {
             "buffer_path": str(self.buffer_path),
@@ -490,7 +500,6 @@ class SafeRLPipeline:
         distill_writer = tb_manager.get_writer("distill")
         if distill_writer is not None:
             distill_writer.add_scalar("status/buffer_size", float(len(buffer)), 0)
-            distill_writer.add_scalar("status/trigger_buffer_size", float(self.config.distill.trigger_buffer_size), 0)
 
         if PolicyDistiller is not None:
             distiller = PolicyDistiller(config=self.config.distill)
@@ -557,7 +566,13 @@ class SafeRLPipeline:
                 "backend_requested": str(stage_config.sim.backend),
             },
         )
-        backend.set_session_event_sink(session_logger.append_event)
+        telemetry = Stage3TelemetryTracker(tb_writer)
+
+        def session_event_sink(event: Dict[str, Any]):
+            session_logger.append_event(event)
+            telemetry.handle_session_event(event)
+
+        backend.set_session_event_sink(session_event_sink)
 
         try:
             backend.start()
@@ -571,10 +586,10 @@ class SafeRLPipeline:
                 ppo_config=stage_config.ppo,
                 shield=shield,
                 episode_prefix="stage3_train",
-                session_event_sink=session_logger.append_event,
+                session_event_sink=session_event_sink,
             )
             trainer = SafePPOTrainer(stage_config.ppo)
-            policy = trainer.train(env, tb_writer=tb_writer)
+            policy = trainer.train(env, tb_writer=tb_writer, telemetry=telemetry)
             session_logger.set_metadata(training_completed=True)
             return policy
         except Exception as exc:
@@ -617,7 +632,14 @@ class SafeRLPipeline:
                 runtime_report=runtime_report,
             )
 
-    def collect_interventions(self, stage_config: SafeRLConfig, policy, shield, save_path: Optional[Path] = None) -> InterventionBuffer:
+    def collect_interventions(
+        self,
+        stage_config: SafeRLConfig,
+        policy,
+        shield,
+        save_path: Optional[Path] = None,
+        tb_writer=None,
+    ) -> InterventionBuffer:
         from safe_rl.rl.env import create_env
 
         backend = create_backend(stage_config.sim)
@@ -629,15 +651,19 @@ class SafeRLPipeline:
             shield=shield,
             episode_prefix="stage4_buffer",
         )
+        telemetry = BufferTelemetryTracker(tb_writer)
         buffer = InterventionBuffer(capacity=max(10000, stage_config.distill.trigger_buffer_size * 4))
 
         for _ in range(stage_config.eval.eval_episodes):
             obs, _ = env.reset(options={"risky_mode": True})
             done = False
+            last_episode_id = ""
             while not done:
                 action = int(policy.predict(obs, deterministic=True))
                 obs, _, terminated, truncated, info = env.step(action)
+                telemetry.on_step(info)
                 done = terminated or truncated
+                last_episode_id = str(info.get("episode_id", "") or last_episode_id)
                 if info.get("intervened", False) and env.last_transition is not None:
                     decision = env.last_transition["decision"]
                     shield_meta = info.get("shield_meta", {})
@@ -653,6 +679,8 @@ class SafeRLPipeline:
                         meta={"episode_step": env.step_count, "episode_id": info.get("episode_id", "")},
                     )
                     buffer.push(record)
+                    telemetry.on_push(record, buffer.stats())
+            telemetry.on_episode_end(last_episode_id)
 
         if save_path is not None:
             save_path.parent.mkdir(parents=True, exist_ok=True)
@@ -769,6 +797,18 @@ def run_safe_rl_pipeline(config_path: Optional[str] = None, stage: str = "all", 
     config = load_safe_rl_config(config_path)
     pipeline = SafeRLPipeline(config)
     return pipeline.run(stage=stage, run_id=run_id)
+
+
+
+
+
+
+
+
+
+
+
+
 
 
 

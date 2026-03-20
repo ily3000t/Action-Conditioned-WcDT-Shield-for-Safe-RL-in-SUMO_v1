@@ -124,6 +124,9 @@ class EpisodeSummary:
     avg_speed: float
     mean_reward: float
     success: bool
+    mean_raw_risk: float = 0.0
+    mean_final_risk: float = 0.0
+    mean_risk_reduction: float = 0.0
 
 
 def dataclass_to_dict(value: Any) -> Any:
@@ -134,3 +137,4 @@ def dataclass_to_dict(value: Any) -> Any:
     if isinstance(value, dict):
         return {k: dataclass_to_dict(v) for k, v in value.items()}
     return value
+
