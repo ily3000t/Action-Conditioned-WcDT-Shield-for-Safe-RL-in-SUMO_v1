@@ -25,7 +25,12 @@ class _RecordingBackend(ISumoBackend):
 
     def get_runtime_diagnostics(self):
         return {
+            "backend": "traci",
+            "collision_action": "teleport",
+            "sumo_binary": "sumo",
+            "sumo_cfg": "scenarios/highway_merge/highway_merge.sumocfg",
             "runtime_log_path": self.current_log_path,
+            "sim_time": float(self.scene.timestamp),
             "last_reset_status": {"restart_count": 0, "restarted": False, "load_attempted": False, "load_failed": False},
         }
 
@@ -54,15 +59,16 @@ class _RecordingBackend(ISumoBackend):
         self.closed = True
 
 
-
 def test_env_reset_sets_episode_context_and_records_episode_prefix():
     backend = _RecordingBackend()
+    session_events = []
     env = SafeDrivingEnv(
         backend=backend,
         sim_config=SimConfig(history_steps=2, episode_steps=5),
         ppo_config=PPOConfig(total_timesteps=10),
         shield=None,
         episode_prefix="stage3_train",
+        session_event_sink=session_events.append,
     )
 
     _, reset_info = env.reset(options={"risky_mode": True})
@@ -78,6 +84,13 @@ def test_env_reset_sets_episode_context_and_records_episode_prefix():
     assert len(records) == 1
     assert records[0]["episode_id"] == "stage3_train_ep_000001"
     assert records[0]["sumo_log_path"].endswith("stage3_train_ep_000001.log")
+
+    event_names = [event["event"] for event in session_events]
+    assert event_names == ["episode_reset_started", "episode_reset_completed", "episode_completed"]
+    assert all(event["episode_id"] == "stage3_train_ep_000001" for event in session_events)
+    assert all(event["source"] == "env" for event in session_events)
+    assert session_events[0]["backend_type"] == "traci"
+    assert session_events[0]["collision_action"] == "teleport"
 
     env.close()
     assert backend.closed is True

@@ -46,8 +46,10 @@ def test_debug_real_config_uses_warn_collision_action():
     assert config.sim.collision_stoptime == 1.0
 
 
-def test_debug_stage3_config_uses_warn_collision_action():
+def test_debug_stage3_config_is_real_debug_profile():
     config = load_safe_rl_config("safe_rl/config/debug_stage3_sumo.yaml")
     assert config.sim.collision_action == "warn"
     assert config.ppo.use_sb3 is True
-    assert config.ppo.total_timesteps == 4096
+    assert config.ppo.total_timesteps == 1024
+    assert config.ppo.n_steps == 128
+    assert config.eval.eval_episodes == 2

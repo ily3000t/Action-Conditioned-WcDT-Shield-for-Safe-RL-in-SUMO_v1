@@ -1,7 +1,10 @@
 from pathlib import Path
 
+import pytest
+
 from safe_rl.config.config import SimConfig
 from safe_rl.data.types import SceneState, VehicleState
+from safe_rl.sim.exceptions import BackendResetError
 from safe_rl.sim.traci_backend import TraciBackend
 
 
@@ -37,6 +40,12 @@ class _ResetRecoveringTraci:
         self.close_calls += 1
 
 
+class _ResetBrokenTraci(_ResetRecoveringTraci):
+    def start(self, _args):
+        self.start_calls += 1
+        raise RuntimeError("restart failed")
+
+
 class _DummyController:
     def apply_action(self, _action_id):
         return {"lane_violation": False}
@@ -49,7 +58,6 @@ class _WarmupController(_DummyController):
     def warmup_until_ego(self, max_steps: int):
         _ = max_steps
         return True
-
 
 
 def test_traci_backend_handles_fatal_simulation_step():
@@ -81,14 +89,14 @@ def test_traci_backend_handles_fatal_simulation_step():
     assert result.info["collision"] is True
     assert result.info["terminated_by_sumo"] is True
     assert result.info["termination_reason"] == "sumo_connection_closed"
+    assert result.info["sumo_exception_type"] == "_FatalTraCIError"
     assert result.info["risk_event"] == "cut_in"
     assert result.info["sumo_log_path"].endswith("traci_runtime.log")
     assert backend._connection_healthy is False
     assert backend._session_active is False
 
 
-
-def test_traci_backend_reset_restarts_after_load_failure():
+def test_traci_backend_reset_restarts_after_load_failure_with_session_log_rotation():
     config = SimConfig(force_mock=False, runtime_log_dir="safe_rl_output/test_artifacts")
     backend = TraciBackend(config)
     backend._use_mock = False
@@ -99,7 +107,8 @@ def test_traci_backend_reset_restarts_after_load_failure():
     backend._controller = _WarmupController()
     backend._sumo_binary = "sumo"
     backend._cfg_path = Path("scenarios/highway_merge/highway_merge.sumocfg")
-    backend._runtime_log_path = Path("safe_rl_output/test_artifacts/traci_reset.log")
+    backend.set_episode_context("stage3_train_ep_000001", True)
+    backend._runtime_log_path = Path("safe_rl_output/test_artifacts/episodes/stage3_train_ep_000001_sess_01.log")
 
     scene = backend.reset(seed=123)
 
@@ -109,3 +118,26 @@ def test_traci_backend_reset_restarts_after_load_failure():
     assert backend.get_runtime_diagnostics()["last_reset_status"]["load_failed"] is True
     assert backend.get_runtime_diagnostics()["last_reset_status"]["restarted"] is True
     assert backend.get_runtime_diagnostics()["last_reset_status"]["restart_count"] == 1
+    assert backend.runtime_log_path.endswith("stage3_train_ep_000001_sess_02.log")
+
+
+def test_traci_backend_reset_raises_structured_backend_reset_error_on_restart_failure():
+    config = SimConfig(force_mock=False, runtime_log_dir="safe_rl_output/test_artifacts")
+    backend = TraciBackend(config)
+    backend._use_mock = False
+    backend._started = True
+    backend._session_active = True
+    backend._connection_healthy = True
+    backend._traci = _ResetBrokenTraci()
+    backend._controller = _WarmupController()
+    backend._sumo_binary = "sumo"
+    backend._cfg_path = Path("scenarios/highway_merge/highway_merge.sumocfg")
+    backend.set_episode_context("stage3_train_ep_000123", False)
+    backend._runtime_log_path = Path("safe_rl_output/test_artifacts/episodes/stage3_train_ep_000123_sess_01.log")
+
+    with pytest.raises(BackendResetError) as exc_info:
+        backend.reset(seed=77)
+
+    assert exc_info.value.backend_type == "traci"
+    assert exc_info.value.episode_id == "stage3_train_ep_000123"
+    assert "stage3_train_ep_000123_sess_02.log" in exc_info.value.sumo_log_path

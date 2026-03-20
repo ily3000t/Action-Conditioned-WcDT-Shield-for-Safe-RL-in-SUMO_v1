@@ -57,10 +57,10 @@ shield:
 
 ppo:
   use_sb3: true
-  total_timesteps: 4096
+  total_timesteps: 1024
   learning_rate: 0.0003
   gamma: 0.99
-  n_steps: 256
+  n_steps: 128
   batch_size: 64
   n_epochs: 4
   intervene_penalty: 0.1
@@ -74,7 +74,7 @@ distill:
   interval_steps: 1000
 
 eval:
-  eval_episodes: 5
+  eval_episodes: 2
   seed_list: [42, 123]
   target_collision_reduction: 0.2
   max_efficiency_drop: 0.3

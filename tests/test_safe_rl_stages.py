@@ -10,7 +10,6 @@ from safe_rl.rl.ppo import HeuristicPolicy
 from safe_rl_main import parse_args
 
 
-
 def _tiny_config() -> SafeRLConfig:
     config = SafeRLConfig()
     config.sim.backend = "traci"
@@ -35,18 +34,15 @@ def _tiny_config() -> SafeRLConfig:
     return config
 
 
-
 def test_cli_stage_requires_run_id_for_single_stage():
     with pytest.raises(SystemExit):
         parse_args(["--stage", "stage2"])
-
 
 
 def test_cli_stage_all_allows_missing_run_id():
     args = parse_args(["--stage", "all"])
     assert args.stage == "all"
     assert args.run_id is None
-
 
 
 def test_stage4_missing_dependencies_fails_fast():
@@ -56,7 +52,6 @@ def test_stage4_missing_dependencies_fails_fast():
 
     with pytest.raises(FileNotFoundError):
         pipeline.run(stage="stage4", run_id=run_id)
-
 
 
 def test_stage1_creates_manifest_and_datasets():
@@ -80,7 +75,6 @@ def test_stage1_creates_manifest_and_datasets():
     assert Path(result["stage1"]["warning_summary_report"]).exists()
 
 
-
 def test_policy_artifact_heuristic_roundtrip():
     config = _tiny_config()
     pipeline = SafeRLPipeline(config)
@@ -92,7 +86,6 @@ def test_policy_artifact_heuristic_roundtrip():
 
     loaded_policy = pipeline._load_policy_artifact()
     assert isinstance(loaded_policy, HeuristicPolicy)
-
 
 
 def test_run_scoped_runtime_log_dir_and_report_paths():
@@ -110,8 +103,7 @@ def test_run_scoped_runtime_log_dir_and_report_paths():
     assert pipeline.stage3_session_events_path.name == "stage3_session_events.json"
 
 
-
-def test_stage3_writes_runtime_and_session_reports():
+def test_stage3_writes_runtime_and_incremental_session_reports():
     config = _tiny_config()
     pipeline = SafeRLPipeline(config)
     run_id = f"ut_stage3_{uuid.uuid4().hex[:8]}"
@@ -134,5 +126,13 @@ def test_stage3_writes_runtime_and_session_reports():
     assert runtime_payload["sim_config"]["collision_action"] == "teleport"
     assert runtime_payload["backend"]["backend"] == "traci"
     assert session_payload["stage"] == "stage3"
-    assert len(session_payload["env_episodes"]) >= 1
-    assert session_payload["env_episodes"][0]["episode_id"].startswith("stage3_train_ep_")
+    assert session_payload["metadata"]["runtime_report_path"].endswith("stage3_runtime_config.json")
+    assert session_payload["metadata"]["runtime_report"]["sim_config"]["collision_action"] == "teleport"
+    assert session_payload["event_count"] >= 3
+
+    event_names = [event["event"] for event in session_payload["events"]]
+    assert "episode_reset_started" in event_names
+    assert "episode_reset_completed" in event_names
+    assert "episode_completed" in event_names
+    assert any(event.get("source") == "env" for event in session_payload["events"])
+    assert any(event.get("episode_id", "").startswith("stage3_train_ep_") for event in session_payload["events"])

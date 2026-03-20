@@ -1,4 +1,4 @@
-﻿import copy
+import copy
 import datetime as dt
 import json
 import time
@@ -12,6 +12,7 @@ from safe_rl.data.collector import SumoDataCollector
 from safe_rl.data.dataset_builder import ActionConditionedDatasetBuilder
 from safe_rl.data.types import InterventionRecord
 from safe_rl.eval import SafeRLEvaluator
+from safe_rl.pipeline.session_event_logger import IncrementalSessionEventLogger
 from safe_rl.pipeline.tensorboard_logger import TensorboardManager
 from safe_rl.shield import SafetyShield
 from safe_rl.sim import create_backend
@@ -544,14 +545,25 @@ class SafeRLPipeline:
 
         backend = create_backend(stage_config.sim)
         env = None
-        training_error: Optional[Dict[str, str]] = None
+        training_error: Optional[Dict[str, Any]] = None
+        close_error: Optional[Dict[str, str]] = None
+        session_logger = IncrementalSessionEventLogger(
+            path=str(self.stage3_session_events_path),
+            stage="stage3",
+            run_id=str(self.run_id or ""),
+            metadata={
+                "runtime_report_path": str(self.stage3_runtime_config_path),
+                "sim_config": asdict(stage_config.sim),
+                "backend_requested": str(stage_config.sim.backend),
+            },
+        )
+        backend.set_session_event_sink(session_logger.append_event)
 
         try:
             backend.start()
-            self._write_json(
-                self.stage3_runtime_config_path,
-                self._build_training_runtime_report("stage3", stage_config, backend),
-            )
+            runtime_report = self._build_training_runtime_report("stage3", stage_config, backend)
+            self._write_json(self.stage3_runtime_config_path, runtime_report)
+            session_logger.set_metadata(backend_start=backend.get_runtime_diagnostics(), runtime_report=runtime_report)
 
             env = create_env(
                 backend=backend,
@@ -559,15 +571,25 @@ class SafeRLPipeline:
                 ppo_config=stage_config.ppo,
                 shield=shield,
                 episode_prefix="stage3_train",
+                session_event_sink=session_logger.append_event,
             )
             trainer = SafePPOTrainer(stage_config.ppo)
             policy = trainer.train(env, tb_writer=tb_writer)
+            session_logger.set_metadata(training_completed=True)
             return policy
         except Exception as exc:
-            training_error = {"type": exc.__class__.__name__, "message": str(exc)}
+            training_error = {
+                "type": exc.__class__.__name__,
+                "message": str(exc),
+            }
+            if hasattr(exc, "to_dict"):
+                try:
+                    training_error["details"] = exc.to_dict()
+                except Exception:
+                    pass
+            session_logger.set_metadata(training_error=training_error)
             raise
         finally:
-            close_error = None
             if env is not None:
                 try:
                     env.close()
@@ -586,14 +608,14 @@ class SafeRLPipeline:
                 extra={"training_error": training_error, "close_error": close_error},
             )
             self._write_json(self.stage3_runtime_config_path, runtime_report)
-            session_report = self._build_training_session_report(
-                "stage3",
-                backend,
-                env,
-                error=training_error,
-                extra={"close_error": close_error},
+            session_logger.set_metadata(
+                training_error=training_error,
+                close_error=close_error,
+                backend_final=backend.get_runtime_diagnostics() if backend is not None else {},
+                env_episode_count=len(env.get_session_records()) if env is not None else 0,
+                env_episodes=env.get_session_records() if env is not None else [],
+                runtime_report=runtime_report,
             )
-            self._write_json(self.stage3_session_events_path, session_report)
 
     def collect_interventions(self, stage_config: SafeRLConfig, policy, shield, save_path: Optional[Path] = None) -> InterventionBuffer:
         from safe_rl.rl.env import create_env
@@ -747,6 +769,9 @@ def run_safe_rl_pipeline(config_path: Optional[str] = None, stage: str = "all", 
     config = load_safe_rl_config(config_path)
     pipeline = SafeRLPipeline(config)
     return pipeline.run(stage=stage, run_id=run_id)
+
+
+
 
 
 

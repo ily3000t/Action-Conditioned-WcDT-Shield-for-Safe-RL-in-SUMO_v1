@@ -1,6 +1,6 @@
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional
 
 from safe_rl.data.types import SceneState
 
@@ -20,6 +20,9 @@ class ISumoBackend(ABC):
 
     def set_episode_context(self, episode_id: str, risky_mode: bool):
         _ = (episode_id, risky_mode)
+
+    def set_session_event_sink(self, sink: Optional[Callable[[Dict[str, Any]], None]]):
+        _ = sink
 
     def get_runtime_diagnostics(self) -> Dict[str, Any]:
         return {}
