@@ -4,7 +4,7 @@ import json
 import time
 from dataclasses import asdict, dataclass
 from pathlib import Path
-from typing import Dict, Optional, Sequence
+from typing import Any, Dict, List, Optional, Sequence
 
 from safe_rl.buffer import InterventionBuffer
 from safe_rl.config import SafeRLConfig, load_safe_rl_config
@@ -57,6 +57,8 @@ class SafeRLPipeline:
         self.report_path: Optional[Path] = None
         self.collector_failure_report_path: Optional[Path] = None
         self.warning_summary_report_path: Optional[Path] = None
+        self.stage3_runtime_config_path: Optional[Path] = None
+        self.stage3_session_events_path: Optional[Path] = None
 
         self.manifest: Dict = {}
 
@@ -149,6 +151,8 @@ class SafeRLPipeline:
         self.report_path = self.reports_dir / "pipeline_report.json"
         self.collector_failure_report_path = self.reports_dir / "collector_failures.json"
         self.warning_summary_report_path = self.reports_dir / "warning_summary.json"
+        self.stage3_runtime_config_path = self.reports_dir / "stage3_runtime_config.json"
+        self.stage3_session_events_path = self.reports_dir / "stage3_session_events.json"
 
         if self.manifest_path.exists():
             with self.manifest_path.open("r", encoding="utf-8") as f:
@@ -177,6 +181,8 @@ class SafeRLPipeline:
                 "report": str(self.report_path),
                 "collector_failure_report": str(self.collector_failure_report_path),
                 "warning_summary_report": str(self.warning_summary_report_path),
+                "stage3_runtime_config_report": str(self.stage3_runtime_config_path),
+                "stage3_session_events_report": str(self.stage3_session_events_path),
                 "sumo_logs_dir": str(self.sumo_logs_dir),
                 "tensorboard_root": str(self.tensorboard_root),
             }
@@ -212,6 +218,44 @@ class SafeRLPipeline:
         cfg.dataset.dataset_dir = str(self.datasets_dir)
         cfg.sim.runtime_log_dir = str(self.sumo_logs_dir)
         return cfg
+
+    def _write_json(self, path: Path, payload: Dict):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("w", encoding="utf-8") as f:
+            json.dump(payload, f, indent=2, ensure_ascii=False, default=str)
+
+    def _build_training_runtime_report(self, stage: str, stage_config: SafeRLConfig, backend, extra: Optional[Dict] = None) -> Dict:
+        payload = {
+            "stage": stage,
+            "run_id": self.run_id,
+            "created_at": dt.datetime.now().isoformat(timespec="seconds"),
+            "sim_config": asdict(stage_config.sim),
+            "backend": backend.get_runtime_diagnostics(),
+        }
+        if extra:
+            payload.update(extra)
+        return payload
+
+    def _build_training_session_report(
+        self,
+        stage: str,
+        backend,
+        env,
+        error: Optional[Dict[str, str]] = None,
+        extra: Optional[Dict[str, Any]] = None,
+    ) -> Dict:
+        payload = {
+            "stage": stage,
+            "run_id": self.run_id,
+            "created_at": dt.datetime.now().isoformat(timespec="seconds"),
+            "training_error": error,
+            "env_episodes": env.get_session_records() if env is not None else [],
+            "backend_session_events": backend.get_session_events(clear=False) if backend is not None else [],
+            "backend_final": backend.get_runtime_diagnostics() if backend is not None else {},
+        }
+        if extra:
+            payload.update(extra)
+        return payload
 
     def _load_dataset_splits(self):
         self._require_files("dataset_load", [self.train_pkl, self.val_pkl, self.test_pkl])
@@ -384,9 +428,10 @@ class SafeRLPipeline:
         print("[Pipeline] stage3: train online policy with shield", flush=True)
         self._require_files("stage3", [self.light_model_path, self.world_model_path])
 
+        stage_config = self._config_with_run_paths()
         light_predictor, world_predictor = self._build_predictors_from_saved_models()
         shield = SafetyShield(config=self.config.shield, light_predictor=light_predictor, world_predictor=world_predictor)
-        policy = self.train_online_policy(shield, tb_writer=tb_manager.get_writer("ppo"))
+        policy = self.train_online_policy(stage_config, shield, tb_writer=tb_manager.get_writer("ppo"))
         policy_meta = self._save_policy_artifact(policy)
 
         eval_writer = tb_manager.get_writer("eval")
@@ -396,17 +441,20 @@ class SafeRLPipeline:
         return {
             "policy_meta": policy_meta,
             "policy_meta_path": str(self.policy_meta_path),
+            "runtime_report": str(self.stage3_runtime_config_path),
+            "session_events_report": str(self.stage3_session_events_path),
         }
 
     def _run_stage4(self, tb_manager: TensorboardManager) -> Dict:
         print("[Pipeline] stage4: collect intervention buffer", flush=True)
         self._require_files("stage4", [self.light_model_path, self.world_model_path, self.policy_meta_path])
 
+        stage_config = self._config_with_run_paths()
         light_predictor, world_predictor = self._build_predictors_from_saved_models()
         shield = SafetyShield(config=self.config.shield, light_predictor=light_predictor, world_predictor=world_predictor)
         policy = self._load_policy_artifact()
 
-        intervention_buffer = self.collect_interventions(policy, shield, save_path=self.buffer_path)
+        intervention_buffer = self.collect_interventions(stage_config, policy, shield, save_path=self.buffer_path)
         stats = intervention_buffer.stats()
 
         distill_writer = tb_manager.get_writer("distill")
@@ -426,6 +474,7 @@ class SafeRLPipeline:
             [self.test_pkl, self.light_model_path, self.world_model_path, self.policy_meta_path, self.buffer_path],
         )
 
+        stage_config = self._config_with_run_paths()
         _, _, test_samples = self._load_dataset_splits()
         light_predictor, world_predictor = self._build_predictors_from_saved_models()
         shield = SafetyShield(config=self.config.shield, light_predictor=light_predictor, world_predictor=world_predictor)
@@ -452,6 +501,7 @@ class SafeRLPipeline:
                 distilled_policy = distiller.distill(buffer, tb_writer=distill_writer)
 
         evaluation = self.evaluate(
+            stage_config=stage_config,
             shield=shield,
             shielded_policy=shielded_policy,
             world_predictor=world_predictor,
@@ -488,37 +538,78 @@ class SafeRLPipeline:
         world_trainer.save(str(self.world_model_path))
         return light_predictor, world_predictor
 
-    def train_online_policy(self, shield, tb_writer=None):
+    def train_online_policy(self, stage_config: SafeRLConfig, shield, tb_writer=None):
         from safe_rl.rl.env import create_env
         from safe_rl.rl.ppo import SafePPOTrainer
 
-        backend = create_backend(self.config.sim)
-        backend.start()
-        env = create_env(
-            backend=backend,
-            sim_config=self.config.sim,
-            ppo_config=self.config.ppo,
-            shield=shield,
-        )
-        trainer = SafePPOTrainer(self.config.ppo)
-        policy = trainer.train(env, tb_writer=tb_writer)
-        env.close()
-        return policy
+        backend = create_backend(stage_config.sim)
+        env = None
+        training_error: Optional[Dict[str, str]] = None
 
-    def collect_interventions(self, policy, shield, save_path: Optional[Path] = None) -> InterventionBuffer:
+        try:
+            backend.start()
+            self._write_json(
+                self.stage3_runtime_config_path,
+                self._build_training_runtime_report("stage3", stage_config, backend),
+            )
+
+            env = create_env(
+                backend=backend,
+                sim_config=stage_config.sim,
+                ppo_config=stage_config.ppo,
+                shield=shield,
+                episode_prefix="stage3_train",
+            )
+            trainer = SafePPOTrainer(stage_config.ppo)
+            policy = trainer.train(env, tb_writer=tb_writer)
+            return policy
+        except Exception as exc:
+            training_error = {"type": exc.__class__.__name__, "message": str(exc)}
+            raise
+        finally:
+            close_error = None
+            if env is not None:
+                try:
+                    env.close()
+                except Exception as exc:
+                    close_error = {"type": exc.__class__.__name__, "message": str(exc)}
+            elif backend is not None:
+                try:
+                    backend.close()
+                except Exception as exc:
+                    close_error = {"type": exc.__class__.__name__, "message": str(exc)}
+
+            runtime_report = self._build_training_runtime_report(
+                "stage3",
+                stage_config,
+                backend,
+                extra={"training_error": training_error, "close_error": close_error},
+            )
+            self._write_json(self.stage3_runtime_config_path, runtime_report)
+            session_report = self._build_training_session_report(
+                "stage3",
+                backend,
+                env,
+                error=training_error,
+                extra={"close_error": close_error},
+            )
+            self._write_json(self.stage3_session_events_path, session_report)
+
+    def collect_interventions(self, stage_config: SafeRLConfig, policy, shield, save_path: Optional[Path] = None) -> InterventionBuffer:
         from safe_rl.rl.env import create_env
 
-        backend = create_backend(self.config.sim)
+        backend = create_backend(stage_config.sim)
         backend.start()
         env = create_env(
             backend=backend,
-            sim_config=self.config.sim,
-            ppo_config=self.config.ppo,
+            sim_config=stage_config.sim,
+            ppo_config=stage_config.ppo,
             shield=shield,
+            episode_prefix="stage4_buffer",
         )
-        buffer = InterventionBuffer(capacity=max(10000, self.config.distill.trigger_buffer_size * 4))
+        buffer = InterventionBuffer(capacity=max(10000, stage_config.distill.trigger_buffer_size * 4))
 
-        for _ in range(self.config.eval.eval_episodes):
+        for _ in range(stage_config.eval.eval_episodes):
             obs, _ = env.reset(options={"risky_mode": True})
             done = False
             while not done:
@@ -537,7 +628,7 @@ class SafeRLPipeline:
                         reason=str(info.get("intervention_reason", decision.reason)),
                         raw_future=shield_meta.get("raw_world_prediction"),
                         final_future=shield_meta.get("final_world_prediction"),
-                        meta={"episode_step": env.step_count},
+                        meta={"episode_step": env.step_count, "episode_id": info.get("episode_id", "")},
                     )
                     buffer.push(record)
 
@@ -550,6 +641,7 @@ class SafeRLPipeline:
 
     def evaluate(
         self,
+        stage_config: SafeRLConfig,
         shield,
         shielded_policy,
         world_predictor,
@@ -560,29 +652,41 @@ class SafeRLPipeline:
         from safe_rl.rl.env import create_env
         from safe_rl.rl.ppo import HeuristicPolicy
 
-        evaluator = SafeRLEvaluator(self.config.eval)
+        evaluator = SafeRLEvaluator(stage_config.eval)
 
-        baseline_backend = create_backend(self.config.sim)
+        baseline_backend = create_backend(stage_config.sim)
         baseline_backend.start()
-        baseline_env = create_env(baseline_backend, self.config.sim, self.config.ppo, shield=None)
+        baseline_env = create_env(
+            baseline_backend,
+            stage_config.sim,
+            stage_config.ppo,
+            shield=None,
+            episode_prefix="stage5_eval_baseline",
+        )
         baseline_policy = HeuristicPolicy()
         baseline_metrics = evaluator.evaluate_policy(
             env=baseline_env,
             policy=baseline_policy,
-            episodes=self.config.eval.eval_episodes,
+            episodes=stage_config.eval.eval_episodes,
             risky_mode=True,
             tb_writer=tb_writer,
             tb_prefix="baseline",
         )
         baseline_env.close()
 
-        shield_backend = create_backend(self.config.sim)
+        shield_backend = create_backend(stage_config.sim)
         shield_backend.start()
-        shield_env = create_env(shield_backend, self.config.sim, self.config.ppo, shield=shield)
+        shield_env = create_env(
+            shield_backend,
+            stage_config.sim,
+            stage_config.ppo,
+            shield=shield,
+            episode_prefix="stage5_eval_shielded",
+        )
         shielded_metrics = evaluator.evaluate_policy(
             env=shield_env,
             policy=shielded_policy,
-            episodes=self.config.eval.eval_episodes,
+            episodes=stage_config.eval.eval_episodes,
             risky_mode=True,
             tb_writer=tb_writer,
             tb_prefix="shielded",
@@ -611,13 +715,19 @@ class SafeRLPipeline:
             tb_writer.add_scalar("world_model/risk_mae", float(world_metrics.get("risk_mae", 0.0)), 0)
 
         if distilled_policy is not None:
-            distill_backend = create_backend(self.config.sim)
+            distill_backend = create_backend(stage_config.sim)
             distill_backend.start()
-            distill_env = create_env(distill_backend, self.config.sim, self.config.ppo, shield=shield)
+            distill_env = create_env(
+                distill_backend,
+                stage_config.sim,
+                stage_config.ppo,
+                shield=shield,
+                episode_prefix="stage5_eval_distilled",
+            )
             distilled_metrics = evaluator.evaluate_policy(
                 env=distill_env,
                 policy=distilled_policy,
-                episodes=self.config.eval.eval_episodes,
+                episodes=stage_config.eval.eval_episodes,
                 risky_mode=True,
                 tb_writer=tb_writer,
                 tb_prefix="distilled",

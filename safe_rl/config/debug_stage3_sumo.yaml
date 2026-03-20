@@ -1,0 +1,86 @@
+sim:
+  backend: "traci"
+  sumo_cfg: "scenarios/highway_merge/highway_merge.sumocfg"
+  runtime_log_dir: "safe_rl_output/sumo_logs"
+  sumo_home: "E:/Program Files/sumo-1.22.0"
+  sumo_bin: "E:/Program Files/sumo-1.22.0/bin/sumo.exe"
+  sumo_gui_bin: "E:/Program Files/sumo-1.22.0/bin/sumo-gui.exe"
+  netconvert_bin: "E:/Program Files/sumo-1.22.0/bin/netconvert.exe"
+  auto_build_network: true
+  force_mock: false
+  use_gui: false
+  step_length: 0.1
+  episode_steps: 300
+  history_steps: 10
+  future_steps: 20
+  normal_episodes: 20
+  risky_episodes: 20
+  risk_event_prob: 0.35
+  random_seed: 42
+  ego_vehicle_id: "ego"
+  collision_action: "warn"
+  collision_stoptime: 1.0
+  collision_check_junctions: true
+
+dataset:
+  raw_log_dir: "safe_rl_output/debug_stage3/raw"
+  dataset_dir: "safe_rl_output/debug_stage3/datasets"
+  train_ratio: 0.8
+  val_ratio: 0.1
+  ttc_threshold: 2.0
+  lane_violation_margin: 0.2
+
+light_risk:
+  hidden_dim: 128
+  batch_size: 32
+  learning_rate: 0.001
+  weight_decay: 0.0001
+  epochs: 2
+
+world_model:
+  multimodal: 4
+  future_steps: 20
+  hidden_dim: 192
+  learning_rate: 0.0001
+  batch_size: 8
+  epochs: 2
+  uncertainty_weight: 0.1
+
+shield:
+  candidate_count: 7
+  coarse_top_k: 4
+  tail_quantile: 0.9
+  risk_threshold: 0.45
+  uncertainty_threshold: 0.35
+  uncertainty_weight: 0.2
+  fallback_action: "DECEL_KEEP"
+
+ppo:
+  use_sb3: true
+  total_timesteps: 4096
+  learning_rate: 0.0003
+  gamma: 0.99
+  n_steps: 256
+  batch_size: 64
+  n_epochs: 4
+  intervene_penalty: 0.1
+  device: "cpu"
+
+distill:
+  trigger_buffer_size: 200
+  batch_size: 32
+  learning_rate: 0.0005
+  epochs: 2
+  interval_steps: 1000
+
+eval:
+  eval_episodes: 5
+  seed_list: [42, 123]
+  target_collision_reduction: 0.2
+  max_efficiency_drop: 0.3
+
+tensorboard:
+  enabled: true
+  root_dir: "safe_rl_output/tensorboard"
+  run_name: "debug_stage3_sumo"
+  flush_secs: 5

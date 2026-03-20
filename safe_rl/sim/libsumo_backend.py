@@ -1,6 +1,7 @@
-﻿import logging
+import datetime as dt
+import logging
 from pathlib import Path
-from typing import Optional
+from typing import Any, Dict, List, Optional
 
 from safe_rl.config.config import SimConfig
 from safe_rl.data.types import SceneState
@@ -32,6 +33,10 @@ class LibsumoBackend(ISumoBackend):
         self._current_risky_mode: bool = False
         self._last_risk_meta = None
         self._last_scene: Optional[SceneState] = None
+        self._last_seed: Optional[int] = None
+        self._last_runtime_args: List[str] = []
+        self._last_reset_status: Dict[str, Any] = {}
+        self._session_events: List[Dict[str, Any]] = []
         self._mock = MockTrafficCore(
             episode_steps=config.episode_steps,
             step_length=config.step_length,
@@ -51,11 +56,38 @@ class LibsumoBackend(ISumoBackend):
         if not self._use_mock:
             self._runtime_log_path = self._resolve_runtime_log_path()
 
+    def get_runtime_diagnostics(self) -> Dict[str, Any]:
+        cfg_path = self._cfg_path or Path(self.config.sumo_cfg).resolve()
+        return {
+            "backend": "libsumo",
+            "use_mock": bool(self._use_mock),
+            "sumo_binary": str(self._sumo_binary or ""),
+            "sumo_cfg": str(cfg_path),
+            "collision_action": str(self.config.collision_action),
+            "collision_stoptime": float(self.config.collision_stoptime),
+            "collision_check_junctions": bool(self.config.collision_check_junctions),
+            "runtime_log_path": self.runtime_log_path,
+            "episode_id": str(self._current_episode_id or ""),
+            "risky_mode": bool(self._current_risky_mode),
+            "session_active": bool(self._session_active),
+            "connection_healthy": bool(self._connection_healthy),
+            "last_seed": self._last_seed,
+            "last_runtime_args": list(self._last_runtime_args),
+            "last_reset_status": dict(self._last_reset_status),
+        }
+
+    def get_session_events(self, clear: bool = False) -> List[Dict[str, Any]]:
+        events = [dict(event) for event in self._session_events]
+        if clear:
+            self._session_events = []
+        return events
+
     def start(self):
         if self.config.force_mock:
             _LOGGER.warning("force_mock=true, using mock backend.")
             self._started = True
             self._use_mock = True
+            self._record_session_event("start_mock_backend")
             return
 
         cfg_path = Path(self.config.sumo_cfg)
@@ -68,29 +100,46 @@ class LibsumoBackend(ISumoBackend):
 
         try:
             import libsumo  # type: ignore
-
-            self._libsumo = libsumo
-            self._controller = RealSumoController(self._libsumo, self.config, _LOGGER)
-            self._sumo_binary = resolve_sumo_binary(self.config, use_gui=False)
-
-            if cfg_path.is_file():
-                ok, message = maybe_build_network_from_plain(cfg_path, self.config)
-                if not ok:
-                    _LOGGER.warning("SUMO cfg check failed (%s), fallback to mock backend.", message)
-                else:
-                    _LOGGER.info(message)
-                    self._start_real_session(seed=self.config.random_seed)
-                    self._use_mock = False
-                    _LOGGER.info(
-                        "libsumo backend started in real SUMO mode with cfg=%s, log=%s",
-                        cfg_path,
-                        self.runtime_log_path,
-                    )
-            else:
-                _LOGGER.warning("SUMO cfg not found (%s), fallback to mock backend.", cfg_path)
         except Exception as exc:
             _LOGGER.warning("libsumo unavailable (%s), fallback to mock backend.", exc)
+            self._use_mock = True
+            self._started = True
+            self._record_session_event("start_mock_backend", reason="libsumo_import_failed", error=str(exc))
+            return
+
+        self._libsumo = libsumo
+        self._controller = RealSumoController(self._libsumo, self.config, _LOGGER)
+        self._sumo_binary = resolve_sumo_binary(self.config, use_gui=False)
+
+        if not cfg_path.is_file():
+            _LOGGER.warning("SUMO cfg not found (%s), fallback to mock backend.", cfg_path)
+            self._use_mock = True
+            self._started = True
+            self._record_session_event("start_mock_backend", reason="missing_cfg", cfg_path=str(cfg_path))
+            return
+
+        ok, message = maybe_build_network_from_plain(cfg_path, self.config)
+        if not ok:
+            _LOGGER.warning("SUMO cfg check failed (%s), fallback to mock backend.", message)
+            self._use_mock = True
+            self._started = True
+            self._record_session_event("start_mock_backend", reason="cfg_check_failed", error=str(message))
+            return
+
+        _LOGGER.info(message)
+        try:
+            self._start_real_session(seed=self.config.random_seed, reason="initial_start")
+        except Exception as exc:
+            self._record_session_event("initial_start_failed", error=str(exc))
+            raise RuntimeError(self._format_runtime_error("libsumo initial start failed", exc, self.config.random_seed)) from exc
+
+        self._use_mock = False
         self._started = True
+        _LOGGER.info(
+            "libsumo backend started in real SUMO mode with cfg=%s, log=%s",
+            cfg_path,
+            self.runtime_log_path,
+        )
 
     def _resolve_runtime_log_path(self) -> Path:
         log_dir = Path(self.config.runtime_log_dir)
@@ -105,7 +154,7 @@ class LibsumoBackend(ISumoBackend):
 
     def _runtime_args(self, seed: Optional[int]):
         cfg_path = self._cfg_path or Path(self.config.sumo_cfg).resolve()
-        args = [
+        return [
             "-c",
             str(cfg_path),
             "--seed",
@@ -119,45 +168,56 @@ class LibsumoBackend(ISumoBackend):
             "--collision.check-junctions",
             "true" if self.config.collision_check_junctions else "false",
         ]
-        return args
 
-    def _start_real_session(self, seed: Optional[int]):
+    def _start_real_session(self, seed: Optional[int], reason: str):
         if self._runtime_log_path is None:
             self._runtime_log_path = self._resolve_runtime_log_path()
-        self._libsumo.start([self._sumo_binary] + self._runtime_args(seed))
+        args = [self._sumo_binary] + self._runtime_args(seed)
+        self._last_seed = int(seed if seed is not None else self.config.random_seed)
+        self._last_runtime_args = list(args)
+        self._libsumo.start(args)
         self._session_active = True
         self._connection_healthy = True
+        self._record_session_event("start_real_session", reason=reason, seed=self._last_seed, runtime_args=args)
 
-    def _restart_real_session(self, seed: Optional[int]):
+    def _restart_real_session(self, seed: Optional[int], cause: str):
+        self._record_session_event("restart_real_session", cause=cause, seed=int(seed if seed is not None else self.config.random_seed))
         try:
             self._libsumo.close()
         except Exception:
             pass
-        self._start_real_session(seed)
+        self._start_real_session(seed, reason=f"restart:{cause}")
 
     def _load_with_seed(self, seed: Optional[int]):
-        self._libsumo.load(self._runtime_args(seed))
+        args = self._runtime_args(seed)
+        self._last_seed = int(seed if seed is not None else self.config.random_seed)
+        self._last_runtime_args = list(args)
+        self._libsumo.load(args)
+        self._record_session_event("load_session", seed=self._last_seed, runtime_args=args)
 
-    def _warmup_after_reset(self):
+    def _warmup_after_reset(self) -> Dict[str, bool]:
         max_steps = max(10, int(5.0 / max(self.config.step_length, 1e-3)))
         try:
             if self._controller is not None and self._controller.warmup_until_ego(max_steps=max_steps):
-                return
+                return {"fatal": False, "ego_found": True}
         except Exception as exc:
             if self._is_fatal_libsumo_error(exc):
                 self._mark_connection_closed()
+                self._record_session_event("warmup_connection_lost", error=str(exc))
                 _LOGGER.warning(
                     "libsumo reset warmup lost SUMO connection (%s). See log: %s",
                     exc,
                     self.runtime_log_path,
                 )
-                return
+                return {"fatal": True, "ego_found": False}
             raise
+        self._record_session_event("warmup_finished_without_ego", max_steps=max_steps)
         _LOGGER.warning(
             "libsumo reset warmup finished without ego vehicle '%s' (steps=%d). Continue with placeholder scene.",
             self.config.ego_vehicle_id,
             max_steps,
         )
+        return {"fatal": False, "ego_found": False}
 
     def reset(self, seed: Optional[int] = None):
         if not self._started:
@@ -165,23 +225,87 @@ class LibsumoBackend(ISumoBackend):
         if self._use_mock:
             scene = self._mock.reset(seed=seed)
             self._last_scene = scene
+            self._last_reset_status = {
+                "seed": None if seed is None else int(seed),
+                "load_attempted": False,
+                "load_failed": False,
+                "restarted": False,
+                "restart_count": 0,
+                "reset_error": "",
+                "ego_found": True,
+            }
             return scene
 
         self._last_risk_meta = None
         self._runtime_log_path = self._resolve_runtime_log_path()
         seed_value = int(seed if seed is not None else self.config.random_seed)
+        self._last_reset_status = {
+            "seed": seed_value,
+            "episode_id": str(self._current_episode_id or ""),
+            "risky_mode": bool(self._current_risky_mode),
+            "load_attempted": False,
+            "load_failed": False,
+            "restarted": False,
+            "restart_count": 0,
+            "warmup_fatal": False,
+            "reset_error": "",
+            "ego_found": False,
+        }
+
         try:
             if not self._session_active or not self._connection_healthy:
-                self._restart_real_session(seed_value)
+                self._last_reset_status["restarted"] = True
+                self._last_reset_status["restart_count"] = 1
+                self._restart_real_session(seed_value, cause="pre_reset_unhealthy")
             else:
-                self._load_with_seed(seed_value)
+                self._last_reset_status["load_attempted"] = True
+                try:
+                    self._load_with_seed(seed_value)
+                except Exception as exc:
+                    self._last_reset_status["load_failed"] = True
+                    self._mark_connection_closed()
+                    self._record_session_event("reset_load_failed", error=str(exc))
+                    self._last_reset_status["restarted"] = True
+                    self._last_reset_status["restart_count"] = 1
+                    self._restart_real_session(seed_value, cause="load_failure")
         except Exception as exc:
-            _LOGGER.warning("libsumo load/restart failed (%s), restarting SUMO once.", exc)
-            self._restart_real_session(seed_value)
+            self._last_reset_status["reset_error"] = str(exc)
+            self._record_session_event("reset_failed", stage="load_or_restart", error=str(exc))
+            raise RuntimeError(self._format_runtime_error("libsumo reset failed", exc, seed_value)) from exc
 
-        self._warmup_after_reset()
+        warmup_status = self._warmup_after_reset()
+        if warmup_status["fatal"]:
+            self._last_reset_status["warmup_fatal"] = True
+            if self._last_reset_status["restart_count"] >= 1:
+                message = RuntimeError("warmup_connection_lost")
+                self._last_reset_status["reset_error"] = str(message)
+                self._record_session_event("reset_failed", stage="warmup", error=str(message))
+                raise RuntimeError(self._format_runtime_error("libsumo reset failed after warmup connection loss", message, seed_value))
+            try:
+                self._last_reset_status["restarted"] = True
+                self._last_reset_status["restart_count"] = 1
+                self._restart_real_session(seed_value, cause="warmup_connection_lost")
+            except Exception as exc:
+                self._last_reset_status["reset_error"] = str(exc)
+                self._record_session_event("reset_failed", stage="warmup_restart", error=str(exc))
+                raise RuntimeError(self._format_runtime_error("libsumo reset warmup restart failed", exc, seed_value)) from exc
+
+            warmup_status = self._warmup_after_reset()
+            if warmup_status["fatal"]:
+                message = RuntimeError("warmup_connection_lost")
+                self._last_reset_status["reset_error"] = str(message)
+                self._record_session_event("reset_failed", stage="warmup_retry", error=str(message))
+                raise RuntimeError(self._format_runtime_error("libsumo reset failed after warmup retry", message, seed_value))
+
+        self._last_reset_status["ego_found"] = bool(warmup_status["ego_found"])
         scene = self.get_state()
         self._last_scene = scene
+        self._record_session_event(
+            "reset_completed",
+            seed=seed_value,
+            restart_count=int(self._last_reset_status["restart_count"]),
+            runtime_log_path=self.runtime_log_path,
+        )
         return scene
 
     def step(self, action_id: int) -> BackendStepResult:
@@ -232,12 +356,14 @@ class LibsumoBackend(ISumoBackend):
                 self._libsumo.close()
             except Exception:
                 pass
+        self._record_session_event("close_backend")
         self._session_active = False
         self._connection_healthy = False
         self._started = False
 
     def _handle_fatal_step(self, exc: Exception, action_meta: dict) -> BackendStepResult:
         self._mark_connection_closed()
+        self._record_session_event("fatal_step", error=str(exc))
         scene = self._fallback_scene()
         info = {
             "collision": True,
@@ -278,6 +404,24 @@ class LibsumoBackend(ISumoBackend):
         self._session_active = False
         self._connection_healthy = False
 
+    def _record_session_event(self, event_type: str, **payload: Any):
+        event = {
+            "timestamp": dt.datetime.now().isoformat(timespec="seconds"),
+            "backend": "libsumo",
+            "event": str(event_type),
+            "episode_id": str(self._current_episode_id or ""),
+            "risky_mode": bool(self._current_risky_mode),
+            "runtime_log_path": self.runtime_log_path,
+        }
+        event.update(payload)
+        self._session_events.append(event)
+
+    def _format_runtime_error(self, prefix: str, exc: Exception, seed: int) -> str:
+        return (
+            f"{prefix}: {exc} | episode_id={self._current_episode_id or ''} | seed={seed} | "
+            f"sumo_log_path={self.runtime_log_path} | runtime_args={self._last_runtime_args}"
+        )
+
     def _is_fatal_libsumo_error(self, exc: Exception) -> bool:
         fatal_candidates = [
             getattr(self._libsumo, "FatalTraCIError", None),
@@ -287,5 +431,3 @@ class LibsumoBackend(ISumoBackend):
             if fatal_cls is not None and isinstance(exc, fatal_cls):
                 return True
         return exc.__class__.__name__ == "FatalTraCIError"
-
-

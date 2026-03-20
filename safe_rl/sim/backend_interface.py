@@ -1,6 +1,6 @@
-﻿from abc import ABC, abstractmethod
+from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 from safe_rl.data.types import SceneState
 
@@ -20,6 +20,13 @@ class ISumoBackend(ABC):
 
     def set_episode_context(self, episode_id: str, risky_mode: bool):
         _ = (episode_id, risky_mode)
+
+    def get_runtime_diagnostics(self) -> Dict[str, Any]:
+        return {}
+
+    def get_session_events(self, clear: bool = False) -> List[Dict[str, Any]]:
+        _ = clear
+        return []
 
     @abstractmethod
     def start(self):

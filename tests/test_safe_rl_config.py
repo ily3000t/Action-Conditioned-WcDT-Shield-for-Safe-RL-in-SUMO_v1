@@ -1,4 +1,4 @@
-﻿from pathlib import Path
+from pathlib import Path
 
 from safe_rl.config.config import load_safe_rl_config
 
@@ -44,3 +44,10 @@ def test_debug_real_config_uses_warn_collision_action():
     config = load_safe_rl_config("safe_rl/config/debug_real_sumo.yaml")
     assert config.sim.collision_action == "warn"
     assert config.sim.collision_stoptime == 1.0
+
+
+def test_debug_stage3_config_uses_warn_collision_action():
+    config = load_safe_rl_config("safe_rl/config/debug_stage3_sumo.yaml")
+    assert config.sim.collision_action == "warn"
+    assert config.ppo.use_sb3 is True
+    assert config.ppo.total_timesteps == 4096

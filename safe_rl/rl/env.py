@@ -46,16 +46,21 @@ class SafeDrivingEnv(BaseEnv):
         sim_config: SimConfig,
         ppo_config: PPOConfig,
         shield: Optional[SafetyShield] = None,
+        episode_prefix: str = "env",
     ):
         self.backend = backend
         self.sim_config = sim_config
         self.ppo_config = ppo_config
         self.shield = shield
+        self.episode_prefix = self._sanitize_episode_prefix(episode_prefix)
         self.history: deque = deque(maxlen=sim_config.history_steps)
         self.step_count = 0
         self.episode_interventions = 0
         self.episode_collisions = 0
         self.last_transition: Optional[Dict[str, Any]] = None
+        self.episode_index = 0
+        self.session_records: List[Dict[str, Any]] = []
+        self._current_episode_record: Optional[Dict[str, Any]] = None
 
         self.action_space = spaces.Discrete(9)
         self.observation_space = spaces.Box(
@@ -68,7 +73,57 @@ class SafeDrivingEnv(BaseEnv):
     def reset(self, *, seed: Optional[int] = None, options: Optional[Dict[str, Any]] = None):
         options = options or {}
         risky_mode = bool(options.get("risky_mode", False))
-        scene = self.backend.reset(seed=seed)
+
+        if self._current_episode_record is not None:
+            self._finalize_episode(closed_early=True, termination_reason="reset_before_terminal")
+
+        self.episode_index += 1
+        episode_id = f"{self.episode_prefix}_ep_{self.episode_index:06d}"
+        self.backend.set_episode_context(episode_id, risky_mode)
+
+        self._current_episode_record = {
+            "episode_id": episode_id,
+            "reset_seed": None if seed is None else int(seed),
+            "risky_mode": risky_mode,
+            "sumo_log_path": self.backend.runtime_log_path,
+            "restarted": False,
+            "restart_count": 0,
+            "reset_failed": False,
+            "fatal_step_terminated": False,
+        }
+
+        try:
+            scene = self.backend.reset(seed=seed)
+        except Exception as exc:
+            diagnostics = self.backend.get_runtime_diagnostics()
+            self._current_episode_record.update(
+                {
+                    "reset_failed": True,
+                    "reset_error_type": exc.__class__.__name__,
+                    "reset_error_message": str(exc),
+                    "sumo_log_path": str(diagnostics.get("runtime_log_path") or self.backend.runtime_log_path),
+                    "backend_diagnostics": diagnostics,
+                    "restart_count": int(diagnostics.get("last_reset_status", {}).get("restart_count", 0)),
+                    "restarted": bool(diagnostics.get("last_reset_status", {}).get("restarted", False)),
+                    "termination_reason": "reset_error",
+                }
+            )
+            self.session_records.append(dict(self._current_episode_record))
+            self._current_episode_record = None
+            raise
+
+        diagnostics = self.backend.get_runtime_diagnostics()
+        reset_status = diagnostics.get("last_reset_status", {})
+        self._current_episode_record.update(
+            {
+                "sumo_log_path": str(diagnostics.get("runtime_log_path") or self.backend.runtime_log_path),
+                "restart_count": int(reset_status.get("restart_count", 0)),
+                "restarted": bool(reset_status.get("restarted", False)),
+                "load_attempted": bool(reset_status.get("load_attempted", False)),
+                "load_failed": bool(reset_status.get("load_failed", False)),
+            }
+        )
+
         self.history.clear()
         for _ in range(self.sim_config.history_steps):
             self.history.append(scene)
@@ -81,7 +136,11 @@ class SafeDrivingEnv(BaseEnv):
             self.backend.inject_risk_event()
 
         observation = self._current_observation()
-        info = {"risky_mode": risky_mode}
+        info = {
+            "risky_mode": risky_mode,
+            "episode_id": episode_id,
+            "sumo_log_path": str(diagnostics.get("runtime_log_path") or self.backend.runtime_log_path),
+        }
         return observation, info
 
     def step(self, action: int):
@@ -127,6 +186,12 @@ class SafeDrivingEnv(BaseEnv):
             "lane_violation": bool(result.info.get("lane_violation", False)),
             "shield_meta": decision.meta,
             "ego_speed": float(result.info.get("ego_speed", 0.0)),
+            "episode_id": self._current_episode_record.get("episode_id", "") if self._current_episode_record else "",
+            "risky_mode": bool(self._current_episode_record.get("risky_mode", False)) if self._current_episode_record else False,
+            "terminated_by_sumo": bool(result.info.get("terminated_by_sumo", False)),
+            "termination_reason": str(result.info.get("termination_reason", "")),
+            "sumo_exception": str(result.info.get("sumo_exception", "")),
+            "sumo_log_path": str(result.info.get("sumo_log_path", self.backend.runtime_log_path)),
         }
 
         self.last_transition = {
@@ -141,6 +206,9 @@ class SafeDrivingEnv(BaseEnv):
         terminated = bool(result.done)
         truncated = bool(self.step_count >= self.sim_config.episode_steps)
 
+        if terminated or truncated:
+            self._finalize_episode(terminated=terminated, truncated=truncated, info=info)
+
         return observation, reward, terminated, truncated, info
 
     def _current_observation(self) -> np.ndarray:
@@ -149,9 +217,71 @@ class SafeDrivingEnv(BaseEnv):
     def get_history(self) -> List[SceneState]:
         return list(self.history)
 
+    def get_session_records(self) -> List[Dict[str, Any]]:
+        return [dict(record) for record in self.session_records]
+
     def close(self):
+        if self._current_episode_record is not None:
+            self._finalize_episode(closed_early=True, termination_reason="env_closed")
         self.backend.close()
 
+    def _sanitize_episode_prefix(self, value: str) -> str:
+        text = "".join(char if char.isalnum() or char in ("_", "-") else "_" for char in str(value or "env"))
+        return text.strip("_") or "env"
 
-def create_env(backend: ISumoBackend, sim_config: SimConfig, ppo_config: PPOConfig, shield: Optional[SafetyShield]):
-    return SafeDrivingEnv(backend=backend, sim_config=sim_config, ppo_config=ppo_config, shield=shield)
+    def _finalize_episode(
+        self,
+        terminated: bool = False,
+        truncated: bool = False,
+        info: Optional[Dict[str, Any]] = None,
+        closed_early: bool = False,
+        termination_reason: str = "",
+    ):
+        if self._current_episode_record is None:
+            return
+
+        info = info or {}
+        diagnostics = self.backend.get_runtime_diagnostics()
+        reset_status = diagnostics.get("last_reset_status", {})
+        reason = str(
+            termination_reason
+            or info.get("termination_reason")
+            or ("episode_limit" if truncated else "backend_done" if terminated else "")
+        )
+
+        record = dict(self._current_episode_record)
+        record.update(
+            {
+                "terminated": bool(terminated),
+                "truncated": bool(truncated),
+                "closed_early": bool(closed_early),
+                "episode_steps": int(self.step_count),
+                "episode_interventions": int(self.episode_interventions),
+                "episode_collisions": int(self.episode_collisions),
+                "fatal_step_terminated": bool(info.get("terminated_by_sumo", False)),
+                "termination_reason": reason,
+                "sumo_exception": str(info.get("sumo_exception", "")),
+                "sumo_log_path": str(info.get("sumo_log_path") or diagnostics.get("runtime_log_path") or self.backend.runtime_log_path),
+                "restart_count": int(reset_status.get("restart_count", record.get("restart_count", 0))),
+                "restarted": bool(reset_status.get("restarted", record.get("restarted", False))),
+            }
+        )
+        self.session_records.append(record)
+        self._current_episode_record = None
+
+
+
+def create_env(
+    backend: ISumoBackend,
+    sim_config: SimConfig,
+    ppo_config: PPOConfig,
+    shield: Optional[SafetyShield],
+    episode_prefix: str = "env",
+):
+    return SafeDrivingEnv(
+        backend=backend,
+        sim_config=sim_config,
+        ppo_config=ppo_config,
+        shield=shield,
+        episode_prefix=episode_prefix,
+    )
