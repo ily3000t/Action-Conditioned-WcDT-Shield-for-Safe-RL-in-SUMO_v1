@@ -75,6 +75,23 @@ class ShieldConfig:
 
 
 @dataclass
+class ShieldSweepVariant:
+    name: str = ""
+    risk_threshold: float = 0.45
+    uncertainty_threshold: float = 0.35
+    coarse_top_k: int = 4
+
+
+@dataclass
+class ShieldSweepConfig:
+    enabled: bool = False
+    variants: List[ShieldSweepVariant] = field(default_factory=list)
+    target_intervention_min: float = 0.05
+    target_intervention_max: float = 0.30
+    min_avg_speed: float = 10.0
+
+
+@dataclass
 class PPOConfig:
     use_sb3: bool = True
     total_timesteps: int = 50000
@@ -119,6 +136,7 @@ class SafeRLConfig:
     light_risk: LightRiskConfig = field(default_factory=LightRiskConfig)
     world_model: WorldModelConfig = field(default_factory=WorldModelConfig)
     shield: ShieldConfig = field(default_factory=ShieldConfig)
+    shield_sweep: ShieldSweepConfig = field(default_factory=ShieldSweepConfig)
     ppo: PPOConfig = field(default_factory=PPOConfig)
     distill: DistillConfig = field(default_factory=DistillConfig)
     eval: EvalConfig = field(default_factory=EvalConfig)
@@ -150,6 +168,15 @@ def load_safe_rl_config(path: Optional[str] = None) -> SafeRLConfig:
         _update_dataclass(config.world_model, data["world_model"])
     if "shield" in data:
         _update_dataclass(config.shield, data["shield"])
+    if "shield_sweep" in data:
+        shield_sweep_data = dict(data["shield_sweep"] or {})
+        variants_data = list(shield_sweep_data.pop("variants", []) or [])
+        _update_dataclass(config.shield_sweep, shield_sweep_data)
+        config.shield_sweep.variants = []
+        for item in variants_data:
+            variant = ShieldSweepVariant()
+            _update_dataclass(variant, dict(item or {}))
+            config.shield_sweep.variants.append(variant)
     if "ppo" in data:
         _update_dataclass(config.ppo, data["ppo"])
     if "distill" in data:

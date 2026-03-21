@@ -61,3 +61,17 @@ def test_shield_sanity_config_uses_aggressive_thresholds():
     assert config.shield.uncertainty_threshold == 1.0
     assert config.shield.coarse_top_k == 7
     assert config.eval.eval_episodes == 10
+
+
+
+def test_shield_sweep_config_loads_default_variants():
+    config = load_safe_rl_config("safe_rl/config/shield_sweep.yaml")
+    assert config.shield_sweep.enabled is True
+    assert config.shield_sweep.target_intervention_min == 0.05
+    assert config.shield_sweep.target_intervention_max == 0.30
+    assert config.shield_sweep.min_avg_speed == 10.0
+    assert [(variant.name, variant.risk_threshold, variant.uncertainty_threshold, variant.coarse_top_k) for variant in config.shield_sweep.variants] == [
+        ("A", 0.20, 0.60, 7),
+        ("B", 0.25, 0.50, 6),
+        ("C", 0.30, 0.45, 5),
+    ]

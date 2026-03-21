@@ -6,7 +6,7 @@ from types import SimpleNamespace
 import pytest
 
 from safe_rl.buffer import InterventionBuffer
-from safe_rl.config.config import SafeRLConfig
+from safe_rl.config.config import SafeRLConfig, ShieldSweepVariant
 from safe_rl.pipeline.pipeline import SafeRLPipeline
 from safe_rl.rl.ppo import HeuristicPolicy
 from safe_rl_main import parse_args
@@ -388,3 +388,202 @@ def test_attribution_passed_requires_real_action_replacement(monkeypatch):
     assert result["performance_passed"] is True
     assert result["attribution_passed"] is False
     assert result["shield_contribution_validated"] is False
+
+
+
+def test_stage4_shield_sweep_writes_variant_buffers_and_reports():
+    config = _tiny_config()
+    config.eval.eval_episodes = 2
+    config.eval.seed_list = [11, 22]
+    config.shield_sweep.enabled = True
+    config.shield_sweep.variants = [
+        ShieldSweepVariant(name="A", risk_threshold=0.20, uncertainty_threshold=0.60, coarse_top_k=7),
+        ShieldSweepVariant(name="B", risk_threshold=0.25, uncertainty_threshold=0.50, coarse_top_k=6),
+        ShieldSweepVariant(name="C", risk_threshold=0.30, uncertainty_threshold=0.45, coarse_top_k=5),
+    ]
+    pipeline = SafeRLPipeline(config)
+    run_id = f"ut_stage4_sweep_{uuid.uuid4().hex[:8]}"
+    pipeline._prepare_run_context(stage="stage4", run_id=run_id)
+    pipeline.models_dir.mkdir(parents=True, exist_ok=True)
+    pipeline.light_model_path.touch()
+    pipeline.world_model_path.touch()
+    pipeline._save_policy_artifact(HeuristicPolicy())
+    pipeline._build_predictors_from_saved_models = lambda: (None, None)
+
+    def _fake_collect(*args, save_path=None, **kwargs):
+        _ = (args, kwargs)
+        buffer = InterventionBuffer()
+        if save_path is not None:
+            save_path.parent.mkdir(parents=True, exist_ok=True)
+            buffer.save(str(save_path))
+        return buffer
+
+    pipeline.collect_interventions = _fake_collect
+
+    result = pipeline.run(stage="stage4", run_id=run_id)["stage4"]
+
+    assert result["mode"] == "shield_sweep"
+    assert len(result["variants"]) == 3
+    assert not pipeline.buffer_path.exists()
+    assert Path(pipeline.stage4_buffer_report_path).exists()
+    for variant in result["variants"]:
+        assert Path(variant["buffer_path"]).exists()
+        assert Path(variant["stage4_buffer_report_path"]).exists()
+
+
+def test_stage5_shield_sweep_writes_summary_and_variant_reports(monkeypatch):
+    config = _tiny_config()
+    config.eval.eval_episodes = 2
+    config.eval.seed_list = [5, 9]
+    config.shield_sweep.enabled = True
+    config.shield_sweep.target_intervention_min = 0.05
+    config.shield_sweep.target_intervention_max = 0.30
+    config.shield_sweep.min_avg_speed = 10.0
+    config.shield_sweep.variants = [
+        ShieldSweepVariant(name="A", risk_threshold=0.20, uncertainty_threshold=0.60, coarse_top_k=7),
+        ShieldSweepVariant(name="B", risk_threshold=0.25, uncertainty_threshold=0.50, coarse_top_k=6),
+        ShieldSweepVariant(name="C", risk_threshold=0.30, uncertainty_threshold=0.45, coarse_top_k=5),
+    ]
+    pipeline = SafeRLPipeline(config)
+    run_id = f"ut_stage5_sweep_{uuid.uuid4().hex[:8]}"
+    pipeline._prepare_run_context(stage="stage5", run_id=run_id)
+    pipeline.models_dir.mkdir(parents=True, exist_ok=True)
+    pipeline.datasets_dir.mkdir(parents=True, exist_ok=True)
+    pipeline.test_pkl.touch()
+    pipeline.light_model_path.touch()
+    pipeline.world_model_path.touch()
+    pipeline._save_policy_artifact(HeuristicPolicy())
+    policy_meta = pipeline._read_policy_artifact_meta()
+    pipeline._load_dataset_splits = lambda: ([], [], [])
+    pipeline._build_predictors_from_saved_models = lambda: (None, None)
+
+    base_metadata = pipeline._build_stage4_buffer_metadata(config, policy_meta)
+    for variant in config.shield_sweep.variants:
+        variant_name = variant.name
+        buffer_path = pipeline._shield_sweep_variant_buffer_path(variant_name)
+        report_path = pipeline._shield_sweep_variant_stage4_report_path(variant_name)
+        buffer = InterventionBuffer()
+        buffer_path.parent.mkdir(parents=True, exist_ok=True)
+        buffer.save(str(buffer_path))
+        pipeline._write_json(
+            report_path,
+            {
+                **base_metadata,
+                "mode": "shield_sweep_variant",
+                "variant_name": variant_name,
+                "risk_threshold": variant.risk_threshold,
+                "uncertainty_threshold": variant.uncertainty_threshold,
+                "coarse_top_k": variant.coarse_top_k,
+                "buffer_path": str(buffer_path),
+                "buffer_stats": {"size": 0.0},
+            },
+        )
+
+    metrics_by_threshold = {
+        0.20: {
+            "intervention_rate": 0.0,
+            "replacement_count": 0.0,
+            "replacement_same_as_raw_count": 0.0,
+            "fallback_action_count": 0.0,
+            "mean_raw_risk": 0.40,
+            "mean_final_risk": 0.40,
+            "mean_risk_reduction": 0.0,
+            "avg_speed": 20.0,
+            "mean_reward": 1.2,
+            "collision_rate": 0.0,
+            "success_rate": 1.0,
+            "performance_passed": True,
+        },
+        0.25: {
+            "intervention_rate": 0.20,
+            "replacement_count": 6.0,
+            "replacement_same_as_raw_count": 0.0,
+            "fallback_action_count": 2.0,
+            "mean_raw_risk": 0.60,
+            "mean_final_risk": 0.40,
+            "mean_risk_reduction": 0.20,
+            "avg_speed": 12.0,
+            "mean_reward": 1.5,
+            "collision_rate": 0.0,
+            "success_rate": 1.0,
+            "performance_passed": True,
+        },
+        0.30: {
+            "intervention_rate": 1.0,
+            "replacement_count": 10.0,
+            "replacement_same_as_raw_count": 0.0,
+            "fallback_action_count": 10.0,
+            "mean_raw_risk": 0.80,
+            "mean_final_risk": 0.30,
+            "mean_risk_reduction": 0.50,
+            "avg_speed": 5.0,
+            "mean_reward": -0.2,
+            "collision_rate": 0.0,
+            "success_rate": 1.0,
+            "performance_passed": False,
+        },
+    }
+
+    def _fake_evaluate(stage_config, shield, shielded_policy, world_predictor, test_samples, distilled_policy=None, tb_writer=None, paired_results_path=None):
+        _ = (shield, shielded_policy, world_predictor, test_samples, distilled_policy, tb_writer)
+        key = round(float(stage_config.shield.risk_threshold), 2)
+        metrics = metrics_by_threshold[key]
+        if paired_results_path is not None:
+            paired_results_path.parent.mkdir(parents=True, exist_ok=True)
+            paired_results_path.write_text(json.dumps({"pairs": [{"pair_index": 0, "replacement_count": int(metrics["replacement_count"])}]}, ensure_ascii=False), encoding="utf-8")
+        shielded = {
+            "intervention_rate": metrics["intervention_rate"],
+            "replacement_count": metrics["replacement_count"],
+            "replacement_same_as_raw_count": metrics["replacement_same_as_raw_count"],
+            "fallback_action_count": metrics["fallback_action_count"],
+            "mean_raw_risk": metrics["mean_raw_risk"],
+            "mean_final_risk": metrics["mean_final_risk"],
+            "mean_risk_reduction": metrics["mean_risk_reduction"],
+            "avg_speed": metrics["avg_speed"],
+            "mean_reward": metrics["mean_reward"],
+            "collision_rate": metrics["collision_rate"],
+            "success_rate": metrics["success_rate"],
+        }
+        performance_passed = metrics["performance_passed"]
+        attribution_passed = metrics["intervention_rate"] > 0.0 and metrics["mean_risk_reduction"] > 0.0 and metrics["replacement_count"] > 0.0
+        return {
+            "comparison_mode": "same_policy_shield_off_vs_on",
+            "policy_source": str(pipeline.policy_meta_path),
+            "paired_eval": True,
+            "paired_risky_mode": True,
+            "paired_scenario_source": stage_config.sim.sumo_cfg,
+            "evaluation_seeds": [5, 9],
+            "system_baseline": {"collision_rate": 0.0, "avg_speed": 20.0},
+            "system_shielded": shielded,
+            "delta": {"collision_reduction": 0.0, "efficiency_drop": 0.0},
+            "acceptance_passed": performance_passed,
+            "performance_passed": performance_passed,
+            "attribution_passed": attribution_passed,
+            "shield_contribution_validated": attribution_passed,
+            "stage5_paired_episode_results_path": str(paired_results_path),
+        }
+
+    pipeline.evaluate = _fake_evaluate
+
+    result = pipeline.run(stage="stage5", run_id=run_id)["stage5"]
+
+    assert result["mode"] == "shield_sweep"
+    assert result["paired_eval"] is True
+    assert Path(result["shield_sweep_summary_path"]).exists()
+    assert Path(pipeline.report_path).exists()
+
+    summary_payload = json.loads(Path(result["shield_sweep_summary_path"]).read_text(encoding="utf-8"))
+    assert len(summary_payload["variants"]) == 3
+
+    by_name = {entry["variant_name"]: entry for entry in summary_payload["variants"]}
+    assert by_name["A"]["intervention_band_passed"] is False
+    assert by_name["A"]["replacement_passed"] is False
+    assert by_name["B"]["intervention_band_passed"] is True
+    assert by_name["B"]["efficiency_guard_passed"] is True
+    assert by_name["B"]["risk_reduction_passed"] is True
+    assert by_name["C"]["fallback_dominant"] is True
+    assert by_name["C"]["efficiency_guard_passed"] is False
+    for entry in summary_payload["variants"]:
+        assert Path(entry["stage4_buffer_report_path"]).exists()
+        assert Path(entry["stage5_report_path"]).exists()
+        assert Path(entry["stage5_paired_episode_results_path"]).exists()

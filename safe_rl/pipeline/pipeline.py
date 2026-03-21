@@ -64,6 +64,7 @@ class SafeRLPipeline:
         self.stage3_session_events_path: Optional[Path] = None
         self.stage4_buffer_report_path: Optional[Path] = None
         self.stage5_paired_episode_results_path: Optional[Path] = None
+        self.shield_sweep_summary_path: Optional[Path] = None
 
         self.manifest: Dict = {}
 
@@ -161,6 +162,7 @@ class SafeRLPipeline:
         self.stage3_session_events_path = self.reports_dir / "stage3_session_events.json"
         self.stage4_buffer_report_path = self.reports_dir / "stage4_buffer_report.json"
         self.stage5_paired_episode_results_path = self.reports_dir / "stage5_paired_episode_results.json"
+        self.shield_sweep_summary_path = self.reports_dir / "shield_sweep_summary.json"
 
         if self.manifest_path.exists():
             with self.manifest_path.open("r", encoding="utf-8") as f:
@@ -194,6 +196,7 @@ class SafeRLPipeline:
                 "stage3_session_events_report": str(self.stage3_session_events_path),
                 "stage4_buffer_report": str(self.stage4_buffer_report_path),
                 "stage5_paired_episode_results": str(self.stage5_paired_episode_results_path),
+                "shield_sweep_summary_report": str(self.shield_sweep_summary_path),
                 "sumo_logs_dir": str(self.sumo_logs_dir),
                 "tensorboard_root": str(self.tensorboard_root),
             }
@@ -467,10 +470,20 @@ class SafeRLPipeline:
 
         stage_config = self._config_with_run_paths()
         light_predictor, world_predictor = self._build_predictors_from_saved_models()
-        shield = SafetyShield(config=self.config.shield, light_predictor=light_predictor, world_predictor=world_predictor)
         policy = self._load_policy_artifact()
         policy_meta = self._read_policy_artifact_meta()
 
+        if self._shield_sweep_enabled():
+            return self._run_stage4_sweep(
+                tb_manager=tb_manager,
+                stage_config=stage_config,
+                light_predictor=light_predictor,
+                world_predictor=world_predictor,
+                policy=policy,
+                policy_meta=policy_meta,
+            )
+
+        shield = SafetyShield(config=self.config.shield, light_predictor=light_predictor, world_predictor=world_predictor)
         intervention_buffer = self.collect_interventions(
             stage_config,
             policy,
@@ -491,12 +504,20 @@ class SafeRLPipeline:
 
     def _run_stage5(self, tb_manager: TensorboardManager) -> Dict:
         print("[Pipeline] stage5: distill and evaluate", flush=True)
+        stage_config = self._config_with_run_paths()
+
+        if self._shield_sweep_enabled():
+            self._require_files(
+                "stage5",
+                [self.test_pkl, self.light_model_path, self.world_model_path, self.policy_meta_path],
+            )
+            return self._run_stage5_sweep(tb_manager=tb_manager, stage_config=stage_config)
+
         self._require_files(
             "stage5",
             [self.test_pkl, self.light_model_path, self.world_model_path, self.policy_meta_path, self.buffer_path],
         )
 
-        stage_config = self._config_with_run_paths()
         _, _, test_samples = self._load_dataset_splits()
         light_predictor, world_predictor = self._build_predictors_from_saved_models()
         shield = SafetyShield(config=self.config.shield, light_predictor=light_predictor, world_predictor=world_predictor)
@@ -723,11 +744,12 @@ class SafeRLPipeline:
         test_samples,
         distilled_policy=None,
         tb_writer=None,
+        paired_results_path: Optional[Path] = None,
     ) -> Dict:
         from safe_rl.rl.env import create_env
 
         evaluator = SafeRLEvaluator(stage_config.eval)
-        eval_seeds = self._resolve_eval_seeds(stage_config.eval.eval_episodes)
+        eval_seeds = self._resolve_eval_seeds(stage_config.eval.eval_episodes, eval_config=stage_config.eval)
 
         baseline_backend = create_backend(stage_config.sim)
         baseline_backend.start()
@@ -780,7 +802,8 @@ class SafeRLPipeline:
             scenario_source=str(stage_config.sim.sumo_cfg),
             risky_mode=True,
         )
-        self._write_json(self.stage5_paired_episode_results_path, {"pairs": paired_episode_results})
+        target_paired_results_path = paired_results_path or self.stage5_paired_episode_results_path
+        self._write_json(target_paired_results_path, {"pairs": paired_episode_results})
 
         result = {
             "comparison_mode": "same_policy_shield_off_vs_on",
@@ -797,7 +820,7 @@ class SafeRLPipeline:
             "performance_passed": bool(acceptance),
             "attribution_passed": self._compute_attribution_passed(shielded_metrics),
             "shield_contribution_validated": self._compute_attribution_passed(shielded_metrics),
-            "stage5_paired_episode_results_path": str(self.stage5_paired_episode_results_path),
+            "stage5_paired_episode_results_path": str(target_paired_results_path),
         }
 
         if tb_writer is not None:
@@ -833,8 +856,304 @@ class SafeRLPipeline:
 
         return result
 
-    def _resolve_eval_seeds(self, episodes: int) -> List[int]:
-        configured = [int(seed) for seed in self.config.eval.seed_list]
+    def _shield_sweep_enabled(self) -> bool:
+        return bool(self.config.shield_sweep.enabled and self.config.shield_sweep.variants)
+
+    def _sanitize_artifact_key(self, value: str) -> str:
+        text = "".join(char if char.isalnum() or char in ("_", "-") else "_" for char in str(value or "item"))
+        return text.strip("_") or "item"
+
+    def _iter_shield_sweep_variants(self):
+        seen = set()
+        variants = []
+        for index, variant in enumerate(self.config.shield_sweep.variants):
+            name = str(variant.name or f"variant_{index + 1}")
+            key = self._sanitize_artifact_key(name)
+            if key in seen:
+                raise ValueError(f"Duplicate shield_sweep variant name: {name}")
+            seen.add(key)
+            variants.append(variant)
+        return variants
+
+    def _shield_sweep_reports_dir(self) -> Path:
+        return self.reports_dir / "shield_sweep"
+
+    def _shield_sweep_buffers_dir(self) -> Path:
+        return self.buffers_dir / "shield_sweep"
+
+    def _shield_sweep_variant_report_dir(self, variant_name: str) -> Path:
+        return self._shield_sweep_reports_dir() / self._sanitize_artifact_key(variant_name)
+
+    def _shield_sweep_variant_buffer_dir(self, variant_name: str) -> Path:
+        return self._shield_sweep_buffers_dir() / self._sanitize_artifact_key(variant_name)
+
+    def _shield_sweep_variant_buffer_path(self, variant_name: str) -> Path:
+        return self._shield_sweep_variant_buffer_dir(variant_name) / "intervention_buffer.pkl"
+
+    def _shield_sweep_variant_stage4_report_path(self, variant_name: str) -> Path:
+        return self._shield_sweep_variant_report_dir(variant_name) / "stage4_buffer_report.json"
+
+    def _shield_sweep_variant_stage5_report_path(self, variant_name: str) -> Path:
+        return self._shield_sweep_variant_report_dir(variant_name) / "pipeline_report.json"
+
+    def _shield_sweep_variant_stage5_paired_results_path(self, variant_name: str) -> Path:
+        return self._shield_sweep_variant_report_dir(variant_name) / "stage5_paired_episode_results.json"
+
+    def _register_shield_sweep_artifacts(
+        self,
+        variant_name: str,
+        buffer_path: Optional[Path] = None,
+        stage4_report_path: Optional[Path] = None,
+        stage5_report_path: Optional[Path] = None,
+        stage5_paired_results_path: Optional[Path] = None,
+    ):
+        key = self._sanitize_artifact_key(variant_name)
+        artifact_paths = self.manifest.setdefault("artifact_paths", {})
+        if buffer_path is not None:
+            artifact_paths[f"shield_sweep_{key}_buffer"] = str(buffer_path)
+        if stage4_report_path is not None:
+            artifact_paths[f"shield_sweep_{key}_stage4_report"] = str(stage4_report_path)
+        if stage5_report_path is not None:
+            artifact_paths[f"shield_sweep_{key}_stage5_report"] = str(stage5_report_path)
+        if stage5_paired_results_path is not None:
+            artifact_paths[f"shield_sweep_{key}_stage5_paired_results"] = str(stage5_paired_results_path)
+        artifact_paths["shield_sweep_summary_report"] = str(self.shield_sweep_summary_path)
+
+    def _config_for_shield_variant(self, stage_config: SafeRLConfig, variant) -> SafeRLConfig:
+        variant_config = copy.deepcopy(stage_config)
+        variant_config.shield.risk_threshold = float(variant.risk_threshold)
+        variant_config.shield.uncertainty_threshold = float(variant.uncertainty_threshold)
+        variant_config.shield.coarse_top_k = int(variant.coarse_top_k)
+        return variant_config
+
+    def _run_stage4_sweep(
+        self,
+        tb_manager: TensorboardManager,
+        stage_config: SafeRLConfig,
+        light_predictor,
+        world_predictor,
+        policy,
+        policy_meta: Dict[str, Any],
+    ) -> Dict:
+        base_metadata = self._build_stage4_buffer_metadata(stage_config, policy_meta)
+        variant_reports = []
+
+        for variant in self._iter_shield_sweep_variants():
+            variant_name = self._sanitize_artifact_key(str(variant.name or "variant"))
+            variant_config = self._config_for_shield_variant(stage_config, variant)
+            shield = SafetyShield(config=variant_config.shield, light_predictor=light_predictor, world_predictor=world_predictor)
+            buffer_path = self._shield_sweep_variant_buffer_path(variant_name)
+            report_path = self._shield_sweep_variant_stage4_report_path(variant_name)
+
+            intervention_buffer = self.collect_interventions(
+                variant_config,
+                policy,
+                shield,
+                save_path=buffer_path,
+                tb_writer=tb_manager.get_writer(f"buffer_sweep_{variant_name}"),
+            )
+            stats = intervention_buffer.stats()
+            variant_report = {
+                "mode": "shield_sweep_variant",
+                "variant_name": variant_name,
+                "risk_threshold": float(variant.risk_threshold),
+                "uncertainty_threshold": float(variant.uncertainty_threshold),
+                "coarse_top_k": int(variant.coarse_top_k),
+                **base_metadata,
+                "buffer_path": str(buffer_path),
+                "buffer_stats": stats,
+            }
+            self._write_json(report_path, variant_report)
+            self._register_shield_sweep_artifacts(
+                variant_name=variant_name,
+                buffer_path=buffer_path,
+                stage4_report_path=report_path,
+            )
+            variant_reports.append(
+                {
+                    **variant_report,
+                    "stage4_buffer_report_path": str(report_path),
+                }
+            )
+
+        overview = {
+            "mode": "shield_sweep",
+            **base_metadata,
+            "variants": variant_reports,
+        }
+        self._write_json(self.stage4_buffer_report_path, overview)
+        return overview
+
+    def _run_stage5_sweep(self, tb_manager: TensorboardManager, stage_config: SafeRLConfig) -> Dict:
+        _, _, test_samples = self._load_dataset_splits()
+        light_predictor, world_predictor = self._build_predictors_from_saved_models()
+        shielded_policy = self._load_policy_artifact()
+        policy_meta = self._read_policy_artifact_meta()
+
+        from safe_rl.rl import PolicyDistiller
+
+        summary_entries = []
+        eval_seeds = self._resolve_eval_seeds(stage_config.eval.eval_episodes, eval_config=stage_config.eval)
+
+        for variant in self._iter_shield_sweep_variants():
+            variant_name = self._sanitize_artifact_key(str(variant.name or "variant"))
+            variant_config = self._config_for_shield_variant(stage_config, variant)
+            buffer_path = self._shield_sweep_variant_buffer_path(variant_name)
+            stage4_report_path = self._shield_sweep_variant_stage4_report_path(variant_name)
+            paired_results_path = self._shield_sweep_variant_stage5_paired_results_path(variant_name)
+            variant_report_path = self._shield_sweep_variant_stage5_report_path(variant_name)
+
+            self._require_files(
+                f"stage5_sweep_{variant_name}",
+                [buffer_path, stage4_report_path],
+            )
+
+            shield = SafetyShield(config=variant_config.shield, light_predictor=light_predictor, world_predictor=world_predictor)
+            buffer = InterventionBuffer(capacity=max(10000, self.config.distill.trigger_buffer_size * 4))
+            buffer.load(str(buffer_path))
+
+            distilled_policy = None
+            distill_writer = tb_manager.get_writer(f"distill_sweep_{variant_name}")
+            if distill_writer is not None:
+                distill_writer.add_scalar("status/buffer_size", float(len(buffer)), 0)
+
+            if PolicyDistiller is not None:
+                distiller = PolicyDistiller(config=self.config.distill)
+                can_distill = distiller.should_distill(buffer)
+                if distill_writer is not None:
+                    distill_writer.add_scalar("status/triggered", float(can_distill), 0)
+                    distill_writer.add_scalar("status/skipped", float(not can_distill), 0)
+                if can_distill:
+                    distilled_policy = distiller.distill(buffer, tb_writer=distill_writer)
+
+            evaluation = self.evaluate(
+                stage_config=variant_config,
+                shield=shield,
+                shielded_policy=shielded_policy,
+                world_predictor=world_predictor,
+                test_samples=test_samples,
+                distilled_policy=distilled_policy,
+                tb_writer=tb_manager.get_writer(f"eval_sweep_{variant_name}"),
+                paired_results_path=paired_results_path,
+            )
+            buffer_stats = buffer.stats()
+            buffer_metadata = self._load_stage4_buffer_report(stage4_report_path) or self._build_stage4_buffer_metadata(variant_config, policy_meta)
+            evaluation["intervention_buffer"] = buffer_stats
+            evaluation.update(buffer_metadata)
+            evaluation["mode"] = "shield_sweep_variant"
+            evaluation["variant_name"] = variant_name
+            evaluation["risk_threshold"] = float(variant.risk_threshold)
+            evaluation["uncertainty_threshold"] = float(variant.uncertainty_threshold)
+            evaluation["coarse_top_k"] = int(variant.coarse_top_k)
+            evaluation["performance_passed"] = bool(evaluation.get("acceptance_passed", False))
+            evaluation["acceptance_passed"] = bool(evaluation["performance_passed"])
+            evaluation["attribution_passed"] = self._compute_attribution_passed(evaluation.get("system_shielded", {}))
+            evaluation["sanity_check_passed"] = self._compute_sanity_check_passed(
+                shielded_metrics=evaluation.get("system_shielded", {}),
+                buffer_stats=buffer_stats,
+            )
+            evaluation["shield_contribution_validated"] = bool(evaluation["attribution_passed"])
+            evaluation["conclusion_text"] = self._build_evaluation_conclusion(evaluation)
+            self._save_report(evaluation, path=variant_report_path)
+            self._register_shield_sweep_artifacts(
+                variant_name=variant_name,
+                buffer_path=buffer_path,
+                stage4_report_path=stage4_report_path,
+                stage5_report_path=variant_report_path,
+                stage5_paired_results_path=paired_results_path,
+            )
+            summary_entries.append(
+                self._build_shield_sweep_summary_entry(
+                    variant=variant,
+                    variant_name=variant_name,
+                    stage5_report=evaluation,
+                    buffer_stats=buffer_stats,
+                    buffer_path=buffer_path,
+                    stage4_report_path=stage4_report_path,
+                    stage5_report_path=variant_report_path,
+                    paired_results_path=paired_results_path,
+                )
+            )
+
+        sweep_summary = {
+            "mode": "shield_sweep",
+            "policy_source": str(self.policy_meta_path),
+            "paired_eval": True,
+            "paired_risky_mode": True,
+            "paired_scenario_source": str(stage_config.sim.sumo_cfg),
+            "evaluation_seeds": eval_seeds,
+            "variants": summary_entries,
+        }
+        self._write_json(self.shield_sweep_summary_path, sweep_summary)
+        self.manifest.setdefault("artifact_paths", {})["shield_sweep_summary_report"] = str(self.shield_sweep_summary_path)
+
+        overview = {
+            "mode": "shield_sweep",
+            "policy_source": str(self.policy_meta_path),
+            "paired_eval": True,
+            "paired_risky_mode": True,
+            "paired_scenario_source": str(stage_config.sim.sumo_cfg),
+            "evaluation_seeds": eval_seeds,
+            "variants": summary_entries,
+            "shield_sweep_summary_path": str(self.shield_sweep_summary_path),
+        }
+        self._save_report(overview)
+        return overview
+
+    def _build_shield_sweep_summary_entry(
+        self,
+        variant,
+        variant_name: str,
+        stage5_report: Dict[str, Any],
+        buffer_stats: Dict[str, Any],
+        buffer_path: Path,
+        stage4_report_path: Path,
+        stage5_report_path: Path,
+        paired_results_path: Path,
+    ) -> Dict[str, Any]:
+        shielded = dict(stage5_report.get("system_shielded", {}))
+        intervention_rate = float(shielded.get("intervention_rate", 0.0))
+        replacement_count = float(shielded.get("replacement_count", 0.0))
+        fallback_action_count = float(shielded.get("fallback_action_count", 0.0))
+        mean_risk_reduction = float(shielded.get("mean_risk_reduction", 0.0))
+        avg_speed = float(shielded.get("avg_speed", 0.0))
+        min_band = float(self.config.shield_sweep.target_intervention_min)
+        max_band = float(self.config.shield_sweep.target_intervention_max)
+        min_avg_speed = float(self.config.shield_sweep.min_avg_speed)
+
+        return {
+            "variant_name": variant_name,
+            "risk_threshold": float(variant.risk_threshold),
+            "uncertainty_threshold": float(variant.uncertainty_threshold),
+            "coarse_top_k": int(variant.coarse_top_k),
+            "buffer_size": float(buffer_stats.get("size", 0.0)),
+            "intervention_rate": intervention_rate,
+            "replacement_count": replacement_count,
+            "replacement_same_as_raw_count": float(shielded.get("replacement_same_as_raw_count", 0.0)),
+            "fallback_action_count": fallback_action_count,
+            "mean_raw_risk": float(shielded.get("mean_raw_risk", 0.0)),
+            "mean_final_risk": float(shielded.get("mean_final_risk", 0.0)),
+            "mean_risk_reduction": mean_risk_reduction,
+            "avg_speed": avg_speed,
+            "mean_reward": float(shielded.get("mean_reward", 0.0)),
+            "collision_rate": float(shielded.get("collision_rate", 0.0)),
+            "success_rate": float(shielded.get("success_rate", 0.0)),
+            "performance_passed": bool(stage5_report.get("performance_passed", False)),
+            "attribution_passed": bool(stage5_report.get("attribution_passed", False)),
+            "intervention_band_passed": min_band <= intervention_rate <= max_band,
+            "efficiency_guard_passed": avg_speed >= min_avg_speed,
+            "risk_reduction_passed": mean_risk_reduction > 0.0,
+            "replacement_passed": replacement_count > 0.0,
+            "fallback_dominant": fallback_action_count >= 0.9 * max(1.0, replacement_count),
+            "buffer_path": str(buffer_path),
+            "stage4_buffer_report_path": str(stage4_report_path),
+            "stage5_report_path": str(stage5_report_path),
+            "stage5_paired_episode_results_path": str(paired_results_path),
+        }
+
+    def _resolve_eval_seeds(self, episodes: int, eval_config: Optional[Any] = None) -> List[int]:
+        eval_cfg = eval_config or self.config.eval
+        configured = [int(seed) for seed in getattr(eval_cfg, "seed_list", [])]
         if not configured:
             base_seed = int(self.config.sim.random_seed)
             return [base_seed + i for i in range(max(0, episodes))]
@@ -866,15 +1185,16 @@ class SafeRLPipeline:
         return {
             "buffer_policy_source": str(self.policy_meta_path),
             "buffer_policy_type": str(policy_meta.get("policy_type", "")),
-            "buffer_eval_seeds": self._resolve_eval_seeds(stage_config.eval.eval_episodes),
+            "buffer_eval_seeds": self._resolve_eval_seeds(stage_config.eval.eval_episodes, eval_config=stage_config.eval),
             "buffer_risky_mode": True,
             "buffer_scenario_source": str(stage_config.sim.sumo_cfg),
         }
 
-    def _load_stage4_buffer_report(self) -> Optional[Dict[str, Any]]:
-        if self.stage4_buffer_report_path is None or not self.stage4_buffer_report_path.exists():
+    def _load_stage4_buffer_report(self, path: Optional[Path] = None) -> Optional[Dict[str, Any]]:
+        target_path = path or self.stage4_buffer_report_path
+        if target_path is None or not target_path.exists():
             return None
-        with self.stage4_buffer_report_path.open("r", encoding="utf-8") as f:
+        with target_path.open("r", encoding="utf-8") as f:
             return json.load(f)
 
     def _build_paired_episode_results(
@@ -931,9 +1251,10 @@ class SafeRLPipeline:
             "the next step should focus on shield thresholds, replacement execution, and intervention logging."
         )
 
-    def _save_report(self, report: Dict):
-        self.report_path.parent.mkdir(parents=True, exist_ok=True)
-        with self.report_path.open("w", encoding="utf-8") as f:
+    def _save_report(self, report: Dict, path: Optional[Path] = None):
+        target_path = path or self.report_path
+        target_path.parent.mkdir(parents=True, exist_ok=True)
+        with target_path.open("w", encoding="utf-8") as f:
             json.dump(report, f, indent=2, ensure_ascii=False, default=str)
 
 

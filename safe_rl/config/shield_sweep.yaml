@@ -1,0 +1,107 @@
+﻿sim:
+  backend: "traci"
+  sumo_cfg: "scenarios/highway_merge/highway_merge.sumocfg"
+  net_file: ""
+  route_file: ""
+  runtime_log_dir: "safe_rl_output/sumo_logs"
+  sumo_home: "E:/Program Files/sumo-1.22.0"
+  sumo_bin: "E:/Program Files/sumo-1.22.0/bin/sumo.exe"
+  sumo_gui_bin: "E:/Program Files/sumo-1.22.0/bin/sumo-gui.exe"
+  netconvert_bin: "E:/Program Files/sumo-1.22.0/bin/netconvert.exe"
+  auto_build_network: true
+  force_mock: false
+  use_gui: false
+  step_length: 0.1
+  episode_steps: 300
+  history_steps: 10
+  future_steps: 20
+  normal_episodes: 200
+  risky_episodes: 200
+  risk_event_prob: 0.35
+  random_seed: 42
+  ego_vehicle_id: "ego"
+  collision_action: "teleport"
+  collision_stoptime: 1.0
+  collision_check_junctions: true
+
+dataset:
+  raw_log_dir: "safe_rl_output/raw_logs"
+  dataset_dir: "safe_rl_output/datasets"
+  train_ratio: 0.8
+  val_ratio: 0.1
+  ttc_threshold: 2.0
+  lane_violation_margin: 0.2
+
+light_risk:
+  hidden_dim: 128
+  batch_size: 64
+  learning_rate: 0.001
+  weight_decay: 0.0001
+  epochs: 20
+
+world_model:
+  multimodal: 6
+  future_steps: 20
+  hidden_dim: 256
+  learning_rate: 0.0001
+  batch_size: 16
+  epochs: 20
+  uncertainty_weight: 0.1
+
+shield:
+  candidate_count: 7
+  coarse_top_k: 4
+  tail_quantile: 0.9
+  risk_threshold: 0.45
+  uncertainty_threshold: 0.35
+  uncertainty_weight: 0.2
+  fallback_action: "DECEL_KEEP"
+
+shield_sweep:
+  enabled: true
+  target_intervention_min: 0.05
+  target_intervention_max: 0.30
+  min_avg_speed: 10.0
+  variants:
+    - name: "A"
+      risk_threshold: 0.20
+      uncertainty_threshold: 0.60
+      coarse_top_k: 7
+    - name: "B"
+      risk_threshold: 0.25
+      uncertainty_threshold: 0.50
+      coarse_top_k: 6
+    - name: "C"
+      risk_threshold: 0.30
+      uncertainty_threshold: 0.45
+      coarse_top_k: 5
+
+ppo:
+  use_sb3: true
+  total_timesteps: 50000
+  learning_rate: 0.0003
+  gamma: 0.99
+  n_steps: 512
+  batch_size: 64
+  n_epochs: 10
+  intervene_penalty: 0.1
+  device: "cpu"
+
+distill:
+  trigger_buffer_size: 500
+  batch_size: 64
+  learning_rate: 0.0005
+  epochs: 10
+  interval_steps: 10000
+
+eval:
+  eval_episodes: 30
+  seed_list: [42, 123, 2024]
+  target_collision_reduction: 0.4
+  max_efficiency_drop: 0.1
+
+tensorboard:
+  enabled: true
+  root_dir: "safe_rl_output/tensorboard"
+  run_name: "shield_sweep"
+  flush_secs: 10

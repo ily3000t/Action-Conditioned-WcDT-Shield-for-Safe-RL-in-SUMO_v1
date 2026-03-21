@@ -1,4 +1,4 @@
-﻿# SAFE_RL 模块速查说明
+# SAFE_RL 模块速查说明
 
 这份文档是 `safe_rl/` 目录内部的速查版说明。
 
@@ -73,6 +73,13 @@ python safe_rl_main.py --config safe_rl/config/debug_stage3_sumo.yaml --stage st
 ```bash
 python safe_rl_main.py --config safe_rl/config/shield_sanity.yaml --stage stage4 --run-id exp_001
 python safe_rl_main.py --config safe_rl/config/shield_sanity.yaml --stage stage5 --run-id exp_001
+```
+
+### 4.5 Shield sweep
+
+```bash
+python safe_rl_main.py --config safe_rl/config/shield_sweep.yaml --stage stage4 --run-id 20260320_210439
+python safe_rl_main.py --config safe_rl/config/shield_sweep.yaml --stage stage5 --run-id 20260320_210439
 ```
 
 ## 5. 当前评估口径
