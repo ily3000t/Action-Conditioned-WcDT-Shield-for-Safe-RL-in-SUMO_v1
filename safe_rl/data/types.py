@@ -127,6 +127,13 @@ class EpisodeSummary:
     mean_raw_risk: float = 0.0
     mean_final_risk: float = 0.0
     mean_risk_reduction: float = 0.0
+    replacement_count: int = 0
+    replacement_same_as_raw_count: int = 0
+    fallback_action_count: int = 0
+    shield_called_steps: int = 0
+    shield_candidate_evaluated_steps: int = 0
+    shield_blocked_steps: int = 0
+    shield_replaced_steps: int = 0
 
 
 def dataclass_to_dict(value: Any) -> Any:
@@ -137,4 +144,3 @@ def dataclass_to_dict(value: Any) -> Any:
     if isinstance(value, dict):
         return {k: dataclass_to_dict(v) for k, v in value.items()}
     return value
-

@@ -61,7 +61,15 @@ class SafetyShield:
             )
 
         raw_eval = evaluations[policy_action]
-        if raw_eval.fine_risk <= self.config.risk_threshold and raw_eval.uncertainty <= self.config.uncertainty_threshold:
+        shield_blocked = raw_eval.fine_risk > self.config.risk_threshold or raw_eval.uncertainty > self.config.uncertainty_threshold
+        common_meta = {
+            "candidate_count": int(len(candidates)),
+            "evaluated_candidate_count": int(len(evaluations)),
+            "shield_blocked": bool(shield_blocked),
+            "raw_world_prediction": raw_eval.world_prediction,
+        }
+
+        if not shield_blocked:
             return ShieldDecision(
                 raw_action=policy_action,
                 final_action=policy_action,
@@ -71,7 +79,9 @@ class SafetyShield:
                 risk_final=raw_eval.fine_risk,
                 candidate_risks={k: v.fine_risk for k, v in evaluations.items()},
                 meta={
-                    "raw_world_prediction": raw_eval.world_prediction,
+                    **common_meta,
+                    "fallback_used": False,
+                    "replacement_happened": False,
                     "final_world_prediction": raw_eval.world_prediction,
                 },
             )
@@ -84,16 +94,19 @@ class SafetyShield:
         if safe_candidates:
             safe_candidates.sort(key=lambda ev: (action_distance(policy_action, ev.action_id), ev.fine_risk))
             selected = safe_candidates[0]
+            replacement_happened = selected.action_id != policy_action
             return ShieldDecision(
                 raw_action=policy_action,
                 final_action=selected.action_id,
-                intervened=(selected.action_id != policy_action),
+                intervened=replacement_happened,
                 reason="risk_threshold_exceeded",
                 risk_raw=raw_eval.fine_risk,
                 risk_final=selected.fine_risk,
                 candidate_risks={k: v.fine_risk for k, v in evaluations.items()},
                 meta={
-                    "raw_world_prediction": raw_eval.world_prediction,
+                    **common_meta,
+                    "fallback_used": False,
+                    "replacement_happened": bool(replacement_happened),
                     "final_world_prediction": selected.world_prediction,
                 },
             )
@@ -102,10 +115,10 @@ class SafetyShield:
         if fallback in evaluations:
             fallback_eval = evaluations[fallback]
         else:
-            # Fallback was filtered out by coarse stage, use safest refined candidate.
             fallback_eval = sorted(evaluations.values(), key=lambda ev: ev.fine_risk)[0]
             fallback = fallback_eval.action_id
 
+        replacement_happened = fallback != policy_action
         return ShieldDecision(
             raw_action=policy_action,
             final_action=fallback,
@@ -115,7 +128,9 @@ class SafetyShield:
             risk_final=fallback_eval.fine_risk,
             candidate_risks={k: v.fine_risk for k, v in evaluations.items()},
             meta={
-                "raw_world_prediction": raw_eval.world_prediction,
+                **common_meta,
+                "fallback_used": True,
+                "replacement_happened": bool(replacement_happened),
                 "final_world_prediction": fallback_eval.world_prediction,
             },
         )

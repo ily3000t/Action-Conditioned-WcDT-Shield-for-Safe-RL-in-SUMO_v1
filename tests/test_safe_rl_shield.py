@@ -40,6 +40,10 @@ def test_shield_replaces_high_risk_action():
     assert decision.intervened is True
     assert decision.final_action != 4
     assert decision.risk_final <= decision.risk_raw
+    assert decision.meta["candidate_count"] == 7
+    assert decision.meta["evaluated_candidate_count"] >= 1
+    assert decision.meta["replacement_happened"] is True
+    assert decision.meta["fallback_used"] is False
 
 
 def test_shield_passes_safe_action():
@@ -50,3 +54,5 @@ def test_shield_passes_safe_action():
     decision = shield.select_action(_history_scene(), 4)
     assert decision.intervened is False
     assert decision.final_action == 4
+    assert decision.meta["replacement_happened"] is False
+    assert decision.meta["fallback_used"] is False

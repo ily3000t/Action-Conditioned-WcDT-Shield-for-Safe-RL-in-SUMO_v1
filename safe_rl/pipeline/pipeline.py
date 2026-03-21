@@ -62,6 +62,8 @@ class SafeRLPipeline:
         self.stage2_training_report_path: Optional[Path] = None
         self.stage3_runtime_config_path: Optional[Path] = None
         self.stage3_session_events_path: Optional[Path] = None
+        self.stage4_buffer_report_path: Optional[Path] = None
+        self.stage5_paired_episode_results_path: Optional[Path] = None
 
         self.manifest: Dict = {}
 
@@ -157,6 +159,8 @@ class SafeRLPipeline:
         self.stage2_training_report_path = self.reports_dir / "stage2_training_report.json"
         self.stage3_runtime_config_path = self.reports_dir / "stage3_runtime_config.json"
         self.stage3_session_events_path = self.reports_dir / "stage3_session_events.json"
+        self.stage4_buffer_report_path = self.reports_dir / "stage4_buffer_report.json"
+        self.stage5_paired_episode_results_path = self.reports_dir / "stage5_paired_episode_results.json"
 
         if self.manifest_path.exists():
             with self.manifest_path.open("r", encoding="utf-8") as f:
@@ -188,6 +192,8 @@ class SafeRLPipeline:
                 "stage2_training_report": str(self.stage2_training_report_path),
                 "stage3_runtime_config_report": str(self.stage3_runtime_config_path),
                 "stage3_session_events_report": str(self.stage3_session_events_path),
+                "stage4_buffer_report": str(self.stage4_buffer_report_path),
+                "stage5_paired_episode_results": str(self.stage5_paired_episode_results_path),
                 "sumo_logs_dir": str(self.sumo_logs_dir),
                 "tensorboard_root": str(self.tensorboard_root),
             }
@@ -463,6 +469,7 @@ class SafeRLPipeline:
         light_predictor, world_predictor = self._build_predictors_from_saved_models()
         shield = SafetyShield(config=self.config.shield, light_predictor=light_predictor, world_predictor=world_predictor)
         policy = self._load_policy_artifact()
+        policy_meta = self._read_policy_artifact_meta()
 
         intervention_buffer = self.collect_interventions(
             stage_config,
@@ -472,11 +479,15 @@ class SafeRLPipeline:
             tb_writer=tb_manager.get_writer("buffer"),
         )
         stats = intervention_buffer.stats()
-
-        return {
+        buffer_metadata = self._build_stage4_buffer_metadata(stage_config, policy_meta)
+        stage4_report = {
+            **buffer_metadata,
             "buffer_path": str(self.buffer_path),
             "buffer_stats": stats,
         }
+        self._write_json(self.stage4_buffer_report_path, stage4_report)
+
+        return stage4_report
 
     def _run_stage5(self, tb_manager: TensorboardManager) -> Dict:
         print("[Pipeline] stage5: distill and evaluate", flush=True)
@@ -490,6 +501,7 @@ class SafeRLPipeline:
         light_predictor, world_predictor = self._build_predictors_from_saved_models()
         shield = SafetyShield(config=self.config.shield, light_predictor=light_predictor, world_predictor=world_predictor)
         shielded_policy = self._load_policy_artifact()
+        policy_meta = self._read_policy_artifact_meta()
 
         buffer = InterventionBuffer(capacity=max(10000, self.config.distill.trigger_buffer_size * 4))
         buffer.load(str(self.buffer_path))
@@ -520,14 +532,17 @@ class SafeRLPipeline:
             tb_writer=tb_manager.get_writer("eval"),
         )
         buffer_stats = buffer.stats()
+        buffer_metadata = self._load_stage4_buffer_report() or self._build_stage4_buffer_metadata(stage_config, policy_meta)
         evaluation["intervention_buffer"] = buffer_stats
+        evaluation.update(buffer_metadata)
+        evaluation["performance_passed"] = bool(evaluation.get("acceptance_passed", False))
+        evaluation["acceptance_passed"] = bool(evaluation["performance_passed"])
+        evaluation["attribution_passed"] = self._compute_attribution_passed(evaluation.get("system_shielded", {}))
         evaluation["sanity_check_passed"] = self._compute_sanity_check_passed(
             shielded_metrics=evaluation.get("system_shielded", {}),
             buffer_stats=buffer_stats,
         )
-        evaluation["shield_contribution_validated"] = self._compute_shield_contribution_validated(
-            evaluation.get("system_shielded", {})
-        )
+        evaluation["shield_contribution_validated"] = bool(evaluation["attribution_passed"])
         evaluation["conclusion_text"] = self._build_evaluation_conclusion(evaluation)
         self._save_report(evaluation)
         return evaluation
@@ -759,17 +774,30 @@ class SafeRLPipeline:
 
         world_metrics = evaluator.evaluate_world_model(world_predictor, test_samples[: min(200, len(test_samples))])
 
+        paired_episode_results = self._build_paired_episode_results(
+            baseline_metrics.get("episode_details", []),
+            shielded_metrics.get("episode_details", []),
+            scenario_source=str(stage_config.sim.sumo_cfg),
+            risky_mode=True,
+        )
+        self._write_json(self.stage5_paired_episode_results_path, {"pairs": paired_episode_results})
+
         result = {
             "comparison_mode": "same_policy_shield_off_vs_on",
             "policy_source": str(self.policy_meta_path),
             "paired_eval": True,
+            "paired_risky_mode": True,
+            "paired_scenario_source": str(stage_config.sim.sumo_cfg),
             "evaluation_seeds": eval_seeds,
             "world_model": world_metrics,
             "system_baseline": baseline_metrics,
             "system_shielded": shielded_metrics,
             "delta": delta,
             "acceptance_passed": acceptance,
-            "shield_contribution_validated": self._compute_shield_contribution_validated(shielded_metrics),
+            "performance_passed": bool(acceptance),
+            "attribution_passed": self._compute_attribution_passed(shielded_metrics),
+            "shield_contribution_validated": self._compute_attribution_passed(shielded_metrics),
+            "stage5_paired_episode_results_path": str(self.stage5_paired_episode_results_path),
         }
 
         if tb_writer is not None:
@@ -812,28 +840,96 @@ class SafeRLPipeline:
             return [base_seed + i for i in range(max(0, episodes))]
         return [configured[i % len(configured)] for i in range(max(0, episodes))]
 
-    def _compute_shield_contribution_validated(self, shielded_metrics: Dict[str, Any]) -> bool:
+    def _compute_attribution_passed(self, shielded_metrics: Dict[str, Any]) -> bool:
         intervention_rate = float(shielded_metrics.get("intervention_rate", 0.0))
         mean_risk_reduction = float(shielded_metrics.get("mean_risk_reduction", 0.0))
-        return intervention_rate > 0.0 and mean_risk_reduction > 0.0
+        replacement_count = float(shielded_metrics.get("replacement_count", 0.0))
+        return intervention_rate > 0.0 and mean_risk_reduction > 0.0 and replacement_count > 0.0
+
+    def _compute_shield_contribution_validated(self, shielded_metrics: Dict[str, Any]) -> bool:
+        return self._compute_attribution_passed(shielded_metrics)
 
     def _compute_sanity_check_passed(self, shielded_metrics: Dict[str, Any], buffer_stats: Dict[str, Any]) -> bool:
         intervention_rate = float(shielded_metrics.get("intervention_rate", 0.0))
         mean_raw_risk = float(shielded_metrics.get("mean_raw_risk", 0.0))
         mean_final_risk = float(shielded_metrics.get("mean_final_risk", 0.0))
         buffer_size = float(buffer_stats.get("size", 0.0))
-        return intervention_rate > 0.0 and mean_final_risk < mean_raw_risk and buffer_size > 0.0
+        replacement_count = float(shielded_metrics.get("replacement_count", 0.0))
+        return intervention_rate > 0.0 and mean_final_risk < mean_raw_risk and buffer_size > 0.0 and replacement_count > 0.0
+
+    def _read_policy_artifact_meta(self) -> Dict[str, Any]:
+        self._require_files("policy_meta", [self.policy_meta_path])
+        with self.policy_meta_path.open("r", encoding="utf-8") as f:
+            return json.load(f)
+
+    def _build_stage4_buffer_metadata(self, stage_config: SafeRLConfig, policy_meta: Dict[str, Any]) -> Dict[str, Any]:
+        return {
+            "buffer_policy_source": str(self.policy_meta_path),
+            "buffer_policy_type": str(policy_meta.get("policy_type", "")),
+            "buffer_eval_seeds": self._resolve_eval_seeds(stage_config.eval.eval_episodes),
+            "buffer_risky_mode": True,
+            "buffer_scenario_source": str(stage_config.sim.sumo_cfg),
+        }
+
+    def _load_stage4_buffer_report(self) -> Optional[Dict[str, Any]]:
+        if self.stage4_buffer_report_path is None or not self.stage4_buffer_report_path.exists():
+            return None
+        with self.stage4_buffer_report_path.open("r", encoding="utf-8") as f:
+            return json.load(f)
+
+    def _build_paired_episode_results(
+        self,
+        baseline_details: Sequence[Dict[str, Any]],
+        shielded_details: Sequence[Dict[str, Any]],
+        scenario_source: str,
+        risky_mode: bool,
+    ) -> List[Dict[str, Any]]:
+        pair_count = min(len(baseline_details), len(shielded_details))
+        results: List[Dict[str, Any]] = []
+        for idx in range(pair_count):
+            baseline = dict(baseline_details[idx])
+            shielded = dict(shielded_details[idx])
+            results.append(
+                {
+                    "pair_index": idx,
+                    "seed": shielded.get("seed", baseline.get("seed")),
+                    "risky_mode": bool(shielded.get("risky_mode", baseline.get("risky_mode", risky_mode))),
+                    "scenario_source": str(shielded.get("scenario_source", baseline.get("scenario_source", scenario_source))),
+                    "baseline_episode_id": str(baseline.get("episode_id", "")),
+                    "shielded_episode_id": str(shielded.get("episode_id", "")),
+                    "baseline_collision": bool(int(baseline.get("collisions", 0)) > 0),
+                    "shielded_collision": bool(int(shielded.get("collisions", 0)) > 0),
+                    "baseline_reward": float(baseline.get("mean_reward", 0.0)),
+                    "shielded_reward": float(shielded.get("mean_reward", 0.0)),
+                    "baseline_raw_risk": float(baseline.get("mean_raw_risk", 0.0)),
+                    "shielded_raw_risk": float(shielded.get("mean_raw_risk", 0.0)),
+                    "shielded_final_risk": float(shielded.get("mean_final_risk", 0.0)),
+                    "intervention_count": int(shielded.get("interventions", 0)),
+                    "replacement_count": int(shielded.get("replacement_count", 0)),
+                    "replacement_same_as_raw_count": int(shielded.get("replacement_same_as_raw_count", 0)),
+                    "fallback_action_count": int(shielded.get("fallback_action_count", 0)),
+                    "mean_risk_reduction": float(shielded.get("mean_risk_reduction", 0.0)),
+                }
+            )
+        return results
 
     def _build_evaluation_conclusion(self, evaluation: Dict[str, Any]) -> str:
-        shielded = evaluation.get("system_shielded", {})
-        intervention_rate = float(shielded.get("intervention_rate", 0.0))
-        mean_risk_reduction = float(shielded.get("mean_risk_reduction", 0.0))
-        if intervention_rate <= 0.0 or mean_risk_reduction <= 0.0:
+        performance_passed = bool(evaluation.get("performance_passed", False))
+        attribution_passed = bool(evaluation.get("attribution_passed", False))
+        if performance_passed and attribution_passed:
             return (
-                "Current gains come mainly from the policy itself rather than independently validated shield replacements; "
-                "next we should inspect shield thresholds, action replacement, and intervention logging."
+                "The engineering loop and the shield attribution checks both passed; "
+                "the current run shows a measurable safety contribution from shield action replacement."
             )
-        return "The current run shows an observable independent shield contribution with positive risk reduction from action replacement."
+        if performance_passed and not attribution_passed:
+            return (
+                "The system-level performance passed, but shield attribution is still not independently validated; "
+                "current gains are more safely attributed to the learned policy than to confirmed shield replacements."
+            )
+        return (
+            "Neither the performance gate nor the shield attribution gate fully passed; "
+            "the next step should focus on shield thresholds, replacement execution, and intervention logging."
+        )
 
     def _save_report(self, report: Dict):
         self.report_path.parent.mkdir(parents=True, exist_ok=True)

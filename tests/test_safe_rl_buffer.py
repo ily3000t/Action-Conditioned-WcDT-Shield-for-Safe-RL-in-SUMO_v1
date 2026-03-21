@@ -55,3 +55,34 @@ def test_intervention_buffer_push_sample_save_load():
     loaded.load(str(save_path))
     assert len(loaded) == 1
     assert loaded.all_records()[0].final_action == 1
+
+
+
+def test_intervention_buffer_stats_include_replacement_diagnostics():
+    buffer = InterventionBuffer(capacity=10)
+    buffer.push(
+        InterventionRecord(
+            history_scene=[_dummy_scene(0)],
+            raw_action=4,
+            final_action=1,
+            raw_risk=0.8,
+            final_risk=0.3,
+            reason="risk_threshold_exceeded",
+        )
+    )
+    buffer.push(
+        InterventionRecord(
+            history_scene=[_dummy_scene(1)],
+            raw_action=4,
+            final_action=4,
+            raw_risk=0.7,
+            final_risk=0.4,
+            reason="all_candidates_high_risk_or_uncertain",
+        )
+    )
+
+    stats = buffer.stats()
+    assert stats["size"] == 2.0
+    assert stats["replacement_count"] == 1.0
+    assert stats["replacement_same_as_raw_count"] == 1.0
+    assert stats["fallback_action_count"] == 1.0

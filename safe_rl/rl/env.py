@@ -165,6 +165,8 @@ class SafeDrivingEnv(BaseEnv):
             "risky_mode": risky_mode,
             "episode_id": episode_id,
             "sumo_log_path": str(diagnostics.get("runtime_log_path") or self.backend.runtime_log_path),
+            "scenario_source": str(self.sim_config.sumo_cfg),
+            "reset_seed": None if seed is None else int(seed),
         }
         return observation, info
 
@@ -197,7 +199,16 @@ class SafeDrivingEnv(BaseEnv):
 
         reward = float(result.task_reward - self.ppo_config.intervene_penalty * float(decision.intervened))
 
+        shield_called = self.shield is not None
+        replacement_happened = bool(decision.final_action != raw_action)
+        fallback_used = bool(decision.meta.get("fallback_used", False))
+        evaluated_candidate_count = int(decision.meta.get("evaluated_candidate_count", len(decision.candidate_risks)))
+        shield_blocked = bool(decision.meta.get("shield_blocked", shield_called and decision.reason != "raw_action_safe"))
+        replacement_same_as_raw = int(bool(decision.intervened and decision.final_action == raw_action))
+
         info = {
+            "raw_action": raw_action,
+            "final_action": decision.final_action,
             "risk_raw": decision.risk_raw,
             "risk_final": decision.risk_final,
             "intervened": decision.intervened,
@@ -213,6 +224,17 @@ class SafeDrivingEnv(BaseEnv):
             "ego_speed": float(result.info.get("ego_speed", 0.0)),
             "episode_id": self._current_episode_record.get("episode_id", "") if self._current_episode_record else "",
             "risky_mode": bool(self._current_episode_record.get("risky_mode", False)) if self._current_episode_record else False,
+            "scenario_source": str(self.sim_config.sumo_cfg),
+            "replacement_happened": replacement_happened,
+            "fallback_used": fallback_used,
+            "evaluated_candidate_count": evaluated_candidate_count,
+            "shield_called_steps": int(shield_called),
+            "shield_candidate_evaluated_steps": int(shield_called and evaluated_candidate_count > 0),
+            "shield_blocked_steps": int(shield_blocked),
+            "shield_replaced_steps": int(replacement_happened),
+            "replacement_count": int(replacement_happened),
+            "replacement_same_as_raw_count": replacement_same_as_raw,
+            "fallback_action_count": int(fallback_used),
             "terminated_by_sumo": bool(result.info.get("terminated_by_sumo", False)),
             "termination_reason": str(result.info.get("termination_reason", "")),
             "sumo_exception_type": str(result.info.get("sumo_exception_type", "")),

@@ -15,7 +15,16 @@ def summarize_episode(episode_id: str, step_infos: List[dict], rewards: List[flo
     mean_reward = float(np.mean(rewards)) if rewards else 0.0
     mean_raw_risk = float(np.mean([float(info.get("risk_raw", 0.0)) for info in step_infos])) if step_infos else 0.0
     mean_final_risk = float(np.mean([float(info.get("risk_final", 0.0)) for info in step_infos])) if step_infos else 0.0
-    mean_risk_reduction = float(np.mean([float(info.get("risk_raw", 0.0)) - float(info.get("risk_final", 0.0)) for info in step_infos])) if step_infos else 0.0
+    mean_risk_reduction = float(
+        np.mean([float(info.get("risk_raw", 0.0)) - float(info.get("risk_final", 0.0)) for info in step_infos])
+    ) if step_infos else 0.0
+    replacement_count = sum(int(bool(info.get("replacement_happened", False))) for info in step_infos)
+    replacement_same_as_raw_count = sum(int(info.get("replacement_same_as_raw_count", 0)) for info in step_infos)
+    fallback_action_count = sum(int(info.get("fallback_action_count", 0)) for info in step_infos)
+    shield_called_steps = sum(int(info.get("shield_called_steps", 0)) for info in step_infos)
+    shield_candidate_evaluated_steps = sum(int(info.get("shield_candidate_evaluated_steps", 0)) for info in step_infos)
+    shield_blocked_steps = sum(int(info.get("shield_blocked_steps", 0)) for info in step_infos)
+    shield_replaced_steps = sum(int(info.get("shield_replaced_steps", 0)) for info in step_infos)
     success = collisions == 0 and steps > 0
     return EpisodeSummary(
         episode_id=episode_id,
@@ -28,6 +37,13 @@ def summarize_episode(episode_id: str, step_infos: List[dict], rewards: List[flo
         mean_raw_risk=mean_raw_risk,
         mean_final_risk=mean_final_risk,
         mean_risk_reduction=mean_risk_reduction,
+        replacement_count=replacement_count,
+        replacement_same_as_raw_count=replacement_same_as_raw_count,
+        fallback_action_count=fallback_action_count,
+        shield_called_steps=shield_called_steps,
+        shield_candidate_evaluated_steps=shield_candidate_evaluated_steps,
+        shield_blocked_steps=shield_blocked_steps,
+        shield_replaced_steps=shield_replaced_steps,
     )
 
 
@@ -43,6 +59,13 @@ def aggregate_episode_summaries(summaries: List[EpisodeSummary]) -> Dict[str, fl
             "mean_raw_risk": 0.0,
             "mean_final_risk": 0.0,
             "mean_risk_reduction": 0.0,
+            "replacement_count": 0.0,
+            "replacement_same_as_raw_count": 0.0,
+            "fallback_action_count": 0.0,
+            "shield_called_steps": 0.0,
+            "shield_candidate_evaluated_steps": 0.0,
+            "shield_blocked_steps": 0.0,
+            "shield_replaced_steps": 0.0,
         }
 
     episodes = len(summaries)
@@ -54,6 +77,13 @@ def aggregate_episode_summaries(summaries: List[EpisodeSummary]) -> Dict[str, fl
     mean_raw_risk = float(np.mean([s.mean_raw_risk for s in summaries]))
     mean_final_risk = float(np.mean([s.mean_final_risk for s in summaries]))
     mean_risk_reduction = float(np.mean([s.mean_risk_reduction for s in summaries]))
+    replacement_count = float(sum(s.replacement_count for s in summaries))
+    replacement_same_as_raw_count = float(sum(s.replacement_same_as_raw_count for s in summaries))
+    fallback_action_count = float(sum(s.fallback_action_count for s in summaries))
+    shield_called_steps = float(sum(s.shield_called_steps for s in summaries))
+    shield_candidate_evaluated_steps = float(sum(s.shield_candidate_evaluated_steps for s in summaries))
+    shield_blocked_steps = float(sum(s.shield_blocked_steps for s in summaries))
+    shield_replaced_steps = float(sum(s.shield_replaced_steps for s in summaries))
     return {
         "episodes": float(episodes),
         "collision_rate": collision_rate,
@@ -64,6 +94,13 @@ def aggregate_episode_summaries(summaries: List[EpisodeSummary]) -> Dict[str, fl
         "mean_raw_risk": mean_raw_risk,
         "mean_final_risk": mean_final_risk,
         "mean_risk_reduction": mean_risk_reduction,
+        "replacement_count": replacement_count,
+        "replacement_same_as_raw_count": replacement_same_as_raw_count,
+        "fallback_action_count": fallback_action_count,
+        "shield_called_steps": shield_called_steps,
+        "shield_candidate_evaluated_steps": shield_candidate_evaluated_steps,
+        "shield_blocked_steps": shield_blocked_steps,
+        "shield_replaced_steps": shield_replaced_steps,
     }
 
 

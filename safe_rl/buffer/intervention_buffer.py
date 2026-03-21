@@ -40,15 +40,24 @@ class InterventionBuffer:
                 "mean_raw_risk": 0.0,
                 "mean_final_risk": 0.0,
                 "mean_risk_reduction": 0.0,
+                "replacement_count": 0.0,
+                "replacement_same_as_raw_count": 0.0,
+                "fallback_action_count": 0.0,
             }
         raw = [record.raw_risk for record in self._records]
         final = [record.final_risk for record in self._records]
         reduction = [r - f for r, f in zip(raw, final)]
+        replacement_count = float(sum(1 for record in self._records if int(record.final_action) != int(record.raw_action)))
+        replacement_same_as_raw_count = float(sum(1 for record in self._records if int(record.final_action) == int(record.raw_action)))
+        fallback_action_count = float(sum(1 for record in self._records if str(record.reason) == "all_candidates_high_risk_or_uncertain"))
         return {
             "size": float(total),
             "mean_raw_risk": float(sum(raw) / total),
             "mean_final_risk": float(sum(final) / total),
             "mean_risk_reduction": float(sum(reduction) / total),
+            "replacement_count": replacement_count,
+            "replacement_same_as_raw_count": replacement_same_as_raw_count,
+            "fallback_action_count": fallback_action_count,
         }
 
     def save(self, path: str):

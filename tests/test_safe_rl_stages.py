@@ -1,10 +1,11 @@
 import json
 import uuid
-from types import SimpleNamespace
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
+from safe_rl.buffer import InterventionBuffer
 from safe_rl.config.config import SafeRLConfig
 from safe_rl.pipeline.pipeline import SafeRLPipeline
 from safe_rl.rl.ppo import HeuristicPolicy
@@ -40,10 +41,12 @@ def test_cli_stage_requires_run_id_for_single_stage():
         parse_args(["--stage", "stage2"])
 
 
+
 def test_cli_stage_all_allows_missing_run_id():
     args = parse_args(["--stage", "all"])
     assert args.stage == "all"
     assert args.run_id is None
+
 
 
 def test_stage4_missing_dependencies_fails_fast():
@@ -53,6 +56,7 @@ def test_stage4_missing_dependencies_fails_fast():
 
     with pytest.raises(FileNotFoundError):
         pipeline.run(stage="stage4", run_id=run_id)
+
 
 
 def test_stage1_creates_manifest_and_datasets():
@@ -76,6 +80,7 @@ def test_stage1_creates_manifest_and_datasets():
     assert Path(result["stage1"]["warning_summary_report"]).exists()
 
 
+
 def test_policy_artifact_heuristic_roundtrip():
     config = _tiny_config()
     pipeline = SafeRLPipeline(config)
@@ -87,6 +92,7 @@ def test_policy_artifact_heuristic_roundtrip():
 
     loaded_policy = pipeline._load_policy_artifact()
     assert isinstance(loaded_policy, HeuristicPolicy)
+
 
 
 def test_run_scoped_runtime_log_dir_and_report_paths():
@@ -102,6 +108,9 @@ def test_run_scoped_runtime_log_dir_and_report_paths():
     assert pipeline.warning_summary_report_path.name == "warning_summary.json"
     assert pipeline.stage3_runtime_config_path.name == "stage3_runtime_config.json"
     assert pipeline.stage3_session_events_path.name == "stage3_session_events.json"
+    assert pipeline.stage4_buffer_report_path.name == "stage4_buffer_report.json"
+    assert pipeline.stage5_paired_episode_results_path.name == "stage5_paired_episode_results.json"
+
 
 
 def test_stage3_writes_runtime_and_incremental_session_reports():
@@ -137,6 +146,32 @@ def test_stage3_writes_runtime_and_incremental_session_reports():
     assert "episode_completed" in event_names
     assert any(event.get("source") == "env" for event in session_payload["events"])
     assert any(event.get("episode_id", "").startswith("stage3_train_ep_") for event in session_payload["events"])
+
+
+
+def test_stage4_result_includes_buffer_policy_metadata(monkeypatch):
+    config = _tiny_config()
+    config.eval.eval_episodes = 2
+    config.eval.seed_list = [11, 22]
+    pipeline = SafeRLPipeline(config)
+    run_id = f"ut_stage4_meta_{uuid.uuid4().hex[:8]}"
+    pipeline._prepare_run_context(stage="stage4", run_id=run_id)
+    pipeline.models_dir.mkdir(parents=True, exist_ok=True)
+    pipeline.light_model_path.touch()
+    pipeline.world_model_path.touch()
+    pipeline._save_policy_artifact(HeuristicPolicy())
+    pipeline._build_predictors_from_saved_models = lambda: (None, None)
+
+    buffer = InterventionBuffer()
+    pipeline.collect_interventions = lambda *args, **kwargs: buffer
+
+    result = pipeline.run(stage="stage4", run_id=run_id)["stage4"]
+    assert result["buffer_policy_source"].endswith("policy_meta.json")
+    assert result["buffer_policy_type"] == "heuristic"
+    assert result["buffer_eval_seeds"] == [11, 22]
+    assert result["buffer_risky_mode"] is True
+    assert result["buffer_scenario_source"] == config.sim.sumo_cfg
+    assert Path(pipeline.stage4_buffer_report_path).exists()
 
 
 
@@ -192,6 +227,12 @@ def test_evaluate_uses_same_policy_for_shield_off_on_and_shared_seeds(monkeypatc
                     "avg_speed": 10.0,
                     "mean_reward": 1.0,
                     "success_rate": 0.5,
+                    "replacement_count": 0.0,
+                    "episode_details": [
+                        {"episode_id": "base_ep_0", "seed": 5, "risky_mode": True, "scenario_source": config.sim.sumo_cfg, "collisions": 1, "mean_reward": 1.0, "mean_raw_risk": 0.6, "interventions": 0, "replacement_count": 0, "replacement_same_as_raw_count": 0, "fallback_action_count": 0, "mean_risk_reduction": 0.0},
+                        {"episode_id": "base_ep_1", "seed": 9, "risky_mode": True, "scenario_source": config.sim.sumo_cfg, "collisions": 0, "mean_reward": 1.1, "mean_raw_risk": 0.5, "interventions": 0, "replacement_count": 0, "replacement_same_as_raw_count": 0, "fallback_action_count": 0, "mean_risk_reduction": 0.0},
+                        {"episode_id": "base_ep_2", "seed": 5, "risky_mode": True, "scenario_source": config.sim.sumo_cfg, "collisions": 0, "mean_reward": 0.9, "mean_raw_risk": 0.4, "interventions": 0, "replacement_count": 0, "replacement_same_as_raw_count": 0, "fallback_action_count": 0, "mean_risk_reduction": 0.0},
+                    ],
                 }
             return {
                 "collision_rate": 0.1,
@@ -202,6 +243,12 @@ def test_evaluate_uses_same_policy_for_shield_off_on_and_shared_seeds(monkeypatc
                 "avg_speed": 11.0,
                 "mean_reward": 1.5,
                 "success_rate": 0.7,
+                "replacement_count": 2.0,
+                "episode_details": [
+                    {"episode_id": "shield_ep_0", "seed": 5, "risky_mode": True, "scenario_source": config.sim.sumo_cfg, "collisions": 0, "mean_reward": 1.5, "mean_raw_risk": 0.7, "mean_final_risk": 0.4, "interventions": 2, "replacement_count": 1, "replacement_same_as_raw_count": 0, "fallback_action_count": 0, "mean_risk_reduction": 0.3},
+                    {"episode_id": "shield_ep_1", "seed": 9, "risky_mode": True, "scenario_source": config.sim.sumo_cfg, "collisions": 0, "mean_reward": 1.6, "mean_raw_risk": 0.6, "mean_final_risk": 0.5, "interventions": 1, "replacement_count": 1, "replacement_same_as_raw_count": 0, "fallback_action_count": 1, "mean_risk_reduction": 0.1},
+                    {"episode_id": "shield_ep_2", "seed": 5, "risky_mode": True, "scenario_source": config.sim.sumo_cfg, "collisions": 0, "mean_reward": 1.4, "mean_raw_risk": 0.5, "mean_final_risk": 0.4, "interventions": 0, "replacement_count": 0, "replacement_same_as_raw_count": 0, "fallback_action_count": 0, "mean_risk_reduction": 0.1},
+                ],
             }
 
         def compare_baseline_and_shielded(self, baseline, shielded):
@@ -247,5 +294,97 @@ def test_evaluate_uses_same_policy_for_shield_off_on_and_shared_seeds(monkeypatc
     assert calls[1]["seeds"] == [5, 9, 5]
     assert result["comparison_mode"] == "same_policy_shield_off_vs_on"
     assert result["paired_eval"] is True
+    assert result["paired_risky_mode"] is True
+    assert result["paired_scenario_source"] == config.sim.sumo_cfg
     assert result["policy_source"].endswith("policy_meta.json")
     assert result["shield_contribution_validated"] is True
+    assert result["attribution_passed"] is True
+    assert Path(result["stage5_paired_episode_results_path"]).exists()
+    paired_payload = json.loads(Path(result["stage5_paired_episode_results_path"]).read_text(encoding="utf-8"))
+    assert len(paired_payload["pairs"]) == 3
+    assert paired_payload["pairs"][0]["baseline_episode_id"] == "base_ep_0"
+    assert paired_payload["pairs"][0]["shielded_episode_id"] == "shield_ep_0"
+    assert paired_payload["pairs"][0]["replacement_count"] == 1
+
+
+
+def test_attribution_passed_requires_real_action_replacement(monkeypatch):
+    config = _tiny_config()
+    config.eval.eval_episodes = 1
+    pipeline = SafeRLPipeline(config)
+    run_id = f"ut_attr_{uuid.uuid4().hex[:8]}"
+    pipeline._prepare_run_context(stage="stage5", run_id=run_id)
+
+    class _DummyBackend:
+        def start(self):
+            return None
+
+        def close(self):
+            return None
+
+    class _DummyEnv:
+        def close(self):
+            return None
+
+    class _CaptureEvaluator:
+        def __init__(self, cfg):
+            _ = cfg
+
+        def evaluate_policy(self, env, policy, episodes, risky_mode=True, tb_writer=None, tb_prefix="", seeds=None):
+            _ = (env, policy, episodes, risky_mode, tb_writer, seeds)
+            if tb_prefix == "baseline":
+                return {
+                    "collision_rate": 0.2,
+                    "intervention_rate": 0.0,
+                    "mean_risk_reduction": 0.0,
+                    "mean_raw_risk": 0.6,
+                    "mean_final_risk": 0.6,
+                    "avg_speed": 10.0,
+                    "mean_reward": 1.0,
+                    "success_rate": 0.5,
+                    "replacement_count": 0.0,
+                    "episode_details": [{"episode_id": "base_ep", "seed": 7, "risky_mode": True, "scenario_source": config.sim.sumo_cfg, "collisions": 0, "mean_reward": 1.0, "mean_raw_risk": 0.6, "interventions": 0, "replacement_count": 0, "replacement_same_as_raw_count": 0, "fallback_action_count": 0, "mean_risk_reduction": 0.0}],
+                }
+            return {
+                "collision_rate": 0.1,
+                "intervention_rate": 0.5,
+                "mean_risk_reduction": 0.2,
+                "mean_raw_risk": 0.7,
+                "mean_final_risk": 0.5,
+                "avg_speed": 11.0,
+                "mean_reward": 1.5,
+                "success_rate": 0.7,
+                "replacement_count": 0.0,
+                "replacement_same_as_raw_count": 2.0,
+                "episode_details": [{"episode_id": "shield_ep", "seed": 7, "risky_mode": True, "scenario_source": config.sim.sumo_cfg, "collisions": 0, "mean_reward": 1.5, "mean_raw_risk": 0.7, "mean_final_risk": 0.5, "interventions": 2, "replacement_count": 0, "replacement_same_as_raw_count": 2, "fallback_action_count": 0, "mean_risk_reduction": 0.2}],
+            }
+
+        def compare_baseline_and_shielded(self, baseline, shielded):
+            _ = (baseline, shielded)
+            return {"collision_reduction": 0.5, "efficiency_drop": -0.1}
+
+        def evaluate_acceptance(self, delta_metrics):
+            _ = delta_metrics
+            return True
+
+        def evaluate_world_model(self, world_predictor, samples):
+            _ = (world_predictor, samples)
+            return {"traj_ade": 0.0, "risk_acc": 1.0, "risk_mae": 0.0}
+
+    monkeypatch.setattr("safe_rl.pipeline.pipeline.create_backend", lambda _sim_config: _DummyBackend())
+    monkeypatch.setattr("safe_rl.pipeline.pipeline.SafeRLEvaluator", _CaptureEvaluator)
+    monkeypatch.setattr("safe_rl.rl.env.create_env", lambda *_args, **_kwargs: _DummyEnv())
+
+    result = pipeline.evaluate(
+        stage_config=config,
+        shield=SimpleNamespace(name="shield"),
+        shielded_policy=object(),
+        world_predictor=None,
+        test_samples=[],
+        distilled_policy=None,
+        tb_writer=None,
+    )
+
+    assert result["performance_passed"] is True
+    assert result["attribution_passed"] is False
+    assert result["shield_contribution_validated"] is False

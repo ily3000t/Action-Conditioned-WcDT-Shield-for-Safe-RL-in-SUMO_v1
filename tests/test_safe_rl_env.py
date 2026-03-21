@@ -76,7 +76,13 @@ def test_env_reset_sets_episode_context_and_records_episode_prefix():
 
     assert backend.contexts == [("stage3_train_ep_000001", True)]
     assert reset_info["episode_id"] == "stage3_train_ep_000001"
+    assert reset_info["scenario_source"] == "scenarios/highway_merge/highway_merge.sumocfg"
     assert step_info["episode_id"] == "stage3_train_ep_000001"
+    assert step_info["raw_action"] == 4
+    assert step_info["final_action"] == 4
+    assert step_info["replacement_happened"] is False
+    assert step_info["shield_called_steps"] == 0
+    assert step_info["replacement_count"] == 0
     assert terminated is True
     assert truncated is False
 

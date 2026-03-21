@@ -33,7 +33,11 @@ class _FakeEvalEnv:
         self.reset_seeds.append(seed)
         self.episode_idx += 1
         self.step_idx = 0
-        return 0.0, {}
+        return 0.0, {
+            "episode_id": f"eval_ep_{self.episode_idx:04d}",
+            "risky_mode": True,
+            "scenario_source": "scenarios/highway_merge/highway_merge.sumocfg",
+        }
 
     def step(self, action):
         _ = action
@@ -72,6 +76,7 @@ def test_stage3_telemetry_tracker_logs_stability_and_risk():
     assert writer.values_for("risk/episode_mean_reduction")[-1] == 0.5
 
 
+
 def test_buffer_telemetry_tracker_logs_process_metrics():
     writer = _FakeWriter()
     tracker = BufferTelemetryTracker(writer)
@@ -99,6 +104,7 @@ def test_buffer_telemetry_tracker_logs_process_metrics():
             "mean_raw_risk": 0.9,
             "mean_final_risk": 0.4,
             "mean_risk_reduction": 0.5,
+            "replacement_count": 1.0,
         },
     )
     tracker.on_episode_end("buffer_ep_1")
@@ -111,12 +117,47 @@ def test_buffer_telemetry_tracker_logs_process_metrics():
     assert writer.values_for("buffer/episode_mean_risk_reduction")[-1] == 0.5
 
 
+
 def test_evaluator_aggregates_risk_metrics_for_shielded_policy():
     env = _FakeEvalEnv(
         episodes=[
             [
-                {"collision": False, "intervened": True, "ego_speed": 10.0, "risk_raw": 0.8, "risk_final": 0.3, "reward": 1.0},
-                {"collision": False, "intervened": False, "ego_speed": 12.0, "risk_raw": 0.6, "risk_final": 0.4, "reward": 2.0},
+                {
+                    "collision": False,
+                    "intervened": True,
+                    "ego_speed": 10.0,
+                    "risk_raw": 0.8,
+                    "risk_final": 0.3,
+                    "reward": 1.0,
+                    "raw_action": 4,
+                    "final_action": 1,
+                    "replacement_happened": True,
+                    "replacement_count": 1,
+                    "replacement_same_as_raw_count": 0,
+                    "fallback_action_count": 0,
+                    "shield_called_steps": 1,
+                    "shield_candidate_evaluated_steps": 1,
+                    "shield_blocked_steps": 1,
+                    "shield_replaced_steps": 1,
+                },
+                {
+                    "collision": False,
+                    "intervened": False,
+                    "ego_speed": 12.0,
+                    "risk_raw": 0.6,
+                    "risk_final": 0.4,
+                    "reward": 2.0,
+                    "raw_action": 2,
+                    "final_action": 2,
+                    "replacement_happened": False,
+                    "replacement_count": 0,
+                    "replacement_same_as_raw_count": 0,
+                    "fallback_action_count": 0,
+                    "shield_called_steps": 1,
+                    "shield_candidate_evaluated_steps": 1,
+                    "shield_blocked_steps": 0,
+                    "shield_replaced_steps": 0,
+                },
             ]
         ]
     )
@@ -127,13 +168,36 @@ def test_evaluator_aggregates_risk_metrics_for_shielded_policy():
     assert metrics["mean_raw_risk"] == 0.7
     assert metrics["mean_final_risk"] == 0.35
     assert metrics["mean_risk_reduction"] == 0.35
+    assert metrics["replacement_count"] == 1.0
+    assert metrics["episode_details"][0]["replacement_count"] == 1
+    assert metrics["episode_details"][0]["scenario_source"].endswith("highway_merge.sumocfg")
+
 
 
 def test_evaluator_uses_proxy_risk_for_baseline_policy():
     env = _FakeEvalEnv(
         episodes=[
             [
-                {"collision": False, "intervened": False, "ego_speed": 10.0, "risk_raw": 0.0, "risk_final": 0.0, "min_distance": 5.0, "ttc": 2.0, "reward": 1.0},
+                {
+                    "collision": False,
+                    "intervened": False,
+                    "ego_speed": 10.0,
+                    "risk_raw": 0.0,
+                    "risk_final": 0.0,
+                    "min_distance": 5.0,
+                    "ttc": 2.0,
+                    "reward": 1.0,
+                    "raw_action": 4,
+                    "final_action": 4,
+                    "replacement_happened": False,
+                    "replacement_count": 0,
+                    "replacement_same_as_raw_count": 0,
+                    "fallback_action_count": 0,
+                    "shield_called_steps": 0,
+                    "shield_candidate_evaluated_steps": 0,
+                    "shield_blocked_steps": 0,
+                    "shield_replaced_steps": 0,
+                },
             ]
         ]
     )
@@ -146,16 +210,17 @@ def test_evaluator_uses_proxy_risk_for_baseline_policy():
     assert metrics["mean_risk_reduction"] == 0.0
 
 
+
 def test_evaluator_passes_paired_seeds_to_env_reset():
     env = _FakeEvalEnv(
         episodes=[
-            [{"collision": False, "intervened": False, "ego_speed": 8.0, "risk_raw": 0.4, "risk_final": 0.4, "reward": 1.0}],
-            [{"collision": False, "intervened": True, "ego_speed": 9.0, "risk_raw": 0.7, "risk_final": 0.2, "reward": 2.0}],
+            [{"collision": False, "intervened": False, "ego_speed": 8.0, "risk_raw": 0.4, "risk_final": 0.4, "reward": 1.0, "raw_action": 0, "final_action": 0, "replacement_happened": False, "replacement_count": 0, "replacement_same_as_raw_count": 0, "fallback_action_count": 0, "shield_called_steps": 0, "shield_candidate_evaluated_steps": 0, "shield_blocked_steps": 0, "shield_replaced_steps": 0}],
+            [{"collision": False, "intervened": True, "ego_speed": 9.0, "risk_raw": 0.7, "risk_final": 0.2, "reward": 2.0, "raw_action": 4, "final_action": 1, "replacement_happened": True, "replacement_count": 1, "replacement_same_as_raw_count": 0, "fallback_action_count": 0, "shield_called_steps": 1, "shield_candidate_evaluated_steps": 1, "shield_blocked_steps": 1, "shield_replaced_steps": 1}],
         ]
     )
     evaluator = SafeRLEvaluator(EvalConfig())
 
-    evaluator.evaluate_policy(
+    metrics = evaluator.evaluate_policy(
         env,
         _FakePolicy(),
         episodes=2,
@@ -166,3 +231,4 @@ def test_evaluator_passes_paired_seeds_to_env_reset():
     )
 
     assert env.reset_seeds == [11, 22]
+    assert [detail["seed"] for detail in metrics["episode_details"]] == [11, 22]

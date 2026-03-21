@@ -10,6 +10,7 @@ from safe_rl.eval.metrics import (
     aggregate_episode_summaries,
     compare_system_metrics,
     summarize_episode,
+    summary_to_dict,
 )
 
 
@@ -68,13 +69,14 @@ class SafeRLEvaluator:
         seeds: Optional[Sequence[int]] = None,
     ) -> Dict[str, float]:
         summaries = []
+        episode_details = []
         prefix = (tb_prefix or "policy").strip("/")
         is_baseline = prefix == "baseline"
         for i in range(episodes):
             seed = None
             if seeds is not None and i < len(seeds):
                 seed = int(seeds[i])
-            obs, _ = env.reset(seed=seed, options={"risky_mode": risky_mode})
+            obs, reset_info = env.reset(seed=seed, options={"risky_mode": risky_mode})
             step_infos = []
             rewards = []
             done = False
@@ -86,8 +88,18 @@ class SafeRLEvaluator:
                 rewards.append(float(reward))
                 done = terminated or truncated
 
-            summary = summarize_episode(f"eval_{i:04d}", step_infos, rewards)
+            episode_id = str(reset_info.get("episode_id", f"eval_{i:04d}"))
+            summary = summarize_episode(episode_id, step_infos, rewards)
             summaries.append(summary)
+            episode_details.append(
+                {
+                    **summary_to_dict(summary),
+                    "seed": None if seed is None else int(seed),
+                    "risky_mode": bool(reset_info.get("risky_mode", risky_mode)),
+                    "scenario_source": str(reset_info.get("scenario_source", "")),
+                    "episode_id": episode_id,
+                }
+            )
 
             if tb_writer is not None:
                 tb_writer.add_scalar(f"{prefix}/episode_reward", float(summary.mean_reward), i)
@@ -99,8 +111,11 @@ class SafeRLEvaluator:
                 tb_writer.add_scalar(f"{prefix}/episode_mean_raw_risk", float(summary.mean_raw_risk), i)
                 tb_writer.add_scalar(f"{prefix}/episode_mean_final_risk", float(summary.mean_final_risk), i)
                 tb_writer.add_scalar(f"{prefix}/episode_mean_risk_reduction", float(summary.mean_risk_reduction), i)
+                tb_writer.add_scalar(f"{prefix}/episode_replacement_count", float(summary.replacement_count), i)
+                tb_writer.add_scalar(f"{prefix}/episode_fallback_action_count", float(summary.fallback_action_count), i)
 
         aggregated = aggregate_episode_summaries(summaries)
+        aggregated["episode_details"] = episode_details
         if tb_writer is not None:
             tb_writer.add_scalar(f"{prefix}/summary_collision_rate", float(aggregated.get("collision_rate", 0.0)), 0)
             tb_writer.add_scalar(f"{prefix}/summary_intervention_rate", float(aggregated.get("intervention_rate", 0.0)), 0)
@@ -110,6 +125,7 @@ class SafeRLEvaluator:
             tb_writer.add_scalar(f"{prefix}/summary_mean_raw_risk", float(aggregated.get("mean_raw_risk", 0.0)), 0)
             tb_writer.add_scalar(f"{prefix}/summary_mean_final_risk", float(aggregated.get("mean_final_risk", 0.0)), 0)
             tb_writer.add_scalar(f"{prefix}/summary_mean_risk_reduction", float(aggregated.get("mean_risk_reduction", 0.0)), 0)
+            tb_writer.add_scalar(f"{prefix}/summary_replacement_count", float(aggregated.get("replacement_count", 0.0)), 0)
         return aggregated
 
     def compare_baseline_and_shielded(self, baseline: Dict[str, float], shielded: Dict[str, float]) -> Dict[str, float]:
