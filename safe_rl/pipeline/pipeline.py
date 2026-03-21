@@ -519,7 +519,16 @@ class SafeRLPipeline:
             distilled_policy=distilled_policy,
             tb_writer=tb_manager.get_writer("eval"),
         )
-        evaluation["intervention_buffer"] = buffer.stats()
+        buffer_stats = buffer.stats()
+        evaluation["intervention_buffer"] = buffer_stats
+        evaluation["sanity_check_passed"] = self._compute_sanity_check_passed(
+            shielded_metrics=evaluation.get("system_shielded", {}),
+            buffer_stats=buffer_stats,
+        )
+        evaluation["shield_contribution_validated"] = self._compute_shield_contribution_validated(
+            evaluation.get("system_shielded", {})
+        )
+        evaluation["conclusion_text"] = self._build_evaluation_conclusion(evaluation)
         self._save_report(evaluation)
         return evaluation
 
@@ -654,8 +663,9 @@ class SafeRLPipeline:
         telemetry = BufferTelemetryTracker(tb_writer)
         buffer = InterventionBuffer(capacity=max(10000, stage_config.distill.trigger_buffer_size * 4))
 
-        for _ in range(stage_config.eval.eval_episodes):
-            obs, _ = env.reset(options={"risky_mode": True})
+        eval_seeds = self._resolve_eval_seeds(stage_config.eval.eval_episodes)
+        for episode_index in range(stage_config.eval.eval_episodes):
+            obs, _ = env.reset(seed=eval_seeds[episode_index], options={"risky_mode": True})
             done = False
             last_episode_id = ""
             while not done:
@@ -700,9 +710,9 @@ class SafeRLPipeline:
         tb_writer=None,
     ) -> Dict:
         from safe_rl.rl.env import create_env
-        from safe_rl.rl.ppo import HeuristicPolicy
 
         evaluator = SafeRLEvaluator(stage_config.eval)
+        eval_seeds = self._resolve_eval_seeds(stage_config.eval.eval_episodes)
 
         baseline_backend = create_backend(stage_config.sim)
         baseline_backend.start()
@@ -713,14 +723,14 @@ class SafeRLPipeline:
             shield=None,
             episode_prefix="stage5_eval_baseline",
         )
-        baseline_policy = HeuristicPolicy()
         baseline_metrics = evaluator.evaluate_policy(
             env=baseline_env,
-            policy=baseline_policy,
+            policy=shielded_policy,
             episodes=stage_config.eval.eval_episodes,
             risky_mode=True,
             tb_writer=tb_writer,
             tb_prefix="baseline",
+            seeds=eval_seeds,
         )
         baseline_env.close()
 
@@ -740,6 +750,7 @@ class SafeRLPipeline:
             risky_mode=True,
             tb_writer=tb_writer,
             tb_prefix="shielded",
+            seeds=eval_seeds,
         )
         shield_env.close()
 
@@ -749,17 +760,23 @@ class SafeRLPipeline:
         world_metrics = evaluator.evaluate_world_model(world_predictor, test_samples[: min(200, len(test_samples))])
 
         result = {
+            "comparison_mode": "same_policy_shield_off_vs_on",
+            "policy_source": str(self.policy_meta_path),
+            "paired_eval": True,
+            "evaluation_seeds": eval_seeds,
             "world_model": world_metrics,
             "system_baseline": baseline_metrics,
             "system_shielded": shielded_metrics,
             "delta": delta,
             "acceptance_passed": acceptance,
+            "shield_contribution_validated": self._compute_shield_contribution_validated(shielded_metrics),
         }
 
         if tb_writer is not None:
             tb_writer.add_scalar("summary/collision_reduction", float(delta.get("collision_reduction", 0.0)), 0)
             tb_writer.add_scalar("summary/efficiency_drop", float(delta.get("efficiency_drop", 0.0)), 0)
             tb_writer.add_scalar("summary/acceptance_passed", float(bool(acceptance)), 0)
+            tb_writer.add_scalar("summary/shield_contribution_validated", float(result["shield_contribution_validated"]), 0)
             tb_writer.add_scalar("world_model/traj_ade", float(world_metrics.get("traj_ade", 0.0)), 0)
             tb_writer.add_scalar("world_model/risk_acc", float(world_metrics.get("risk_acc", 0.0)), 0)
             tb_writer.add_scalar("world_model/risk_mae", float(world_metrics.get("risk_mae", 0.0)), 0)
@@ -781,11 +798,42 @@ class SafeRLPipeline:
                 risky_mode=True,
                 tb_writer=tb_writer,
                 tb_prefix="distilled",
+                seeds=eval_seeds,
             )
             distill_env.close()
             result["system_distilled"] = distilled_metrics
 
         return result
+
+    def _resolve_eval_seeds(self, episodes: int) -> List[int]:
+        configured = [int(seed) for seed in self.config.eval.seed_list]
+        if not configured:
+            base_seed = int(self.config.sim.random_seed)
+            return [base_seed + i for i in range(max(0, episodes))]
+        return [configured[i % len(configured)] for i in range(max(0, episodes))]
+
+    def _compute_shield_contribution_validated(self, shielded_metrics: Dict[str, Any]) -> bool:
+        intervention_rate = float(shielded_metrics.get("intervention_rate", 0.0))
+        mean_risk_reduction = float(shielded_metrics.get("mean_risk_reduction", 0.0))
+        return intervention_rate > 0.0 and mean_risk_reduction > 0.0
+
+    def _compute_sanity_check_passed(self, shielded_metrics: Dict[str, Any], buffer_stats: Dict[str, Any]) -> bool:
+        intervention_rate = float(shielded_metrics.get("intervention_rate", 0.0))
+        mean_raw_risk = float(shielded_metrics.get("mean_raw_risk", 0.0))
+        mean_final_risk = float(shielded_metrics.get("mean_final_risk", 0.0))
+        buffer_size = float(buffer_stats.get("size", 0.0))
+        return intervention_rate > 0.0 and mean_final_risk < mean_raw_risk and buffer_size > 0.0
+
+    def _build_evaluation_conclusion(self, evaluation: Dict[str, Any]) -> str:
+        shielded = evaluation.get("system_shielded", {})
+        intervention_rate = float(shielded.get("intervention_rate", 0.0))
+        mean_risk_reduction = float(shielded.get("mean_risk_reduction", 0.0))
+        if intervention_rate <= 0.0 or mean_risk_reduction <= 0.0:
+            return (
+                "Current gains come mainly from the policy itself rather than independently validated shield replacements; "
+                "next we should inspect shield thresholds, action replacement, and intervention logging."
+            )
+        return "The current run shows an observable independent shield contribution with positive risk reduction from action replacement."
 
     def _save_report(self, report: Dict):
         self.report_path.parent.mkdir(parents=True, exist_ok=True)

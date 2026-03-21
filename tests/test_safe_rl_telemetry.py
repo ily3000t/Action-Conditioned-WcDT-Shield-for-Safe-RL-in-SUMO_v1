@@ -26,9 +26,11 @@ class _FakeEvalEnv:
         self.episodes = episodes
         self.episode_idx = -1
         self.step_idx = 0
+        self.reset_seeds = []
 
-    def reset(self, options=None):
+    def reset(self, seed=None, options=None):
         _ = options
+        self.reset_seeds.append(seed)
         self.episode_idx += 1
         self.step_idx = 0
         return 0.0, {}
@@ -142,3 +144,25 @@ def test_evaluator_uses_proxy_risk_for_baseline_policy():
     assert metrics["mean_raw_risk"] > 0.0
     assert metrics["mean_final_risk"] == metrics["mean_raw_risk"]
     assert metrics["mean_risk_reduction"] == 0.0
+
+
+def test_evaluator_passes_paired_seeds_to_env_reset():
+    env = _FakeEvalEnv(
+        episodes=[
+            [{"collision": False, "intervened": False, "ego_speed": 8.0, "risk_raw": 0.4, "risk_final": 0.4, "reward": 1.0}],
+            [{"collision": False, "intervened": True, "ego_speed": 9.0, "risk_raw": 0.7, "risk_final": 0.2, "reward": 2.0}],
+        ]
+    )
+    evaluator = SafeRLEvaluator(EvalConfig())
+
+    evaluator.evaluate_policy(
+        env,
+        _FakePolicy(),
+        episodes=2,
+        risky_mode=True,
+        tb_writer=None,
+        tb_prefix="shielded",
+        seeds=[11, 22],
+    )
+
+    assert env.reset_seeds == [11, 22]

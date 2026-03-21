@@ -1,5 +1,6 @@
 import json
 import uuid
+from types import SimpleNamespace
 from pathlib import Path
 
 import pytest
@@ -136,3 +137,115 @@ def test_stage3_writes_runtime_and_incremental_session_reports():
     assert "episode_completed" in event_names
     assert any(event.get("source") == "env" for event in session_payload["events"])
     assert any(event.get("episode_id", "").startswith("stage3_train_ep_") for event in session_payload["events"])
+
+
+
+def test_evaluate_uses_same_policy_for_shield_off_on_and_shared_seeds(monkeypatch):
+    config = _tiny_config()
+    config.eval.eval_episodes = 3
+    config.eval.seed_list = [5, 9]
+    pipeline = SafeRLPipeline(config)
+    run_id = f"ut_eval_{uuid.uuid4().hex[:8]}"
+    pipeline._prepare_run_context(stage="stage5", run_id=run_id)
+
+    class _DummyBackend:
+        def start(self):
+            return None
+
+        def close(self):
+            return None
+
+    class _DummyEnv:
+        def __init__(self, prefix, shield):
+            self.prefix = prefix
+            self.shield = shield
+
+        def close(self):
+            return None
+
+    class _CaptureEvaluator:
+        instance = None
+
+        def __init__(self, cfg):
+            _ = cfg
+            self.calls = []
+            _CaptureEvaluator.instance = self
+
+        def evaluate_policy(self, env, policy, episodes, risky_mode=True, tb_writer=None, tb_prefix="", seeds=None):
+            self.calls.append(
+                {
+                    "env": env,
+                    "policy": policy,
+                    "episodes": episodes,
+                    "risky_mode": risky_mode,
+                    "tb_prefix": tb_prefix,
+                    "seeds": list(seeds or []),
+                }
+            )
+            if tb_prefix == "baseline":
+                return {
+                    "collision_rate": 0.2,
+                    "intervention_rate": 0.0,
+                    "mean_risk_reduction": 0.0,
+                    "mean_raw_risk": 0.6,
+                    "mean_final_risk": 0.6,
+                    "avg_speed": 10.0,
+                    "mean_reward": 1.0,
+                    "success_rate": 0.5,
+                }
+            return {
+                "collision_rate": 0.1,
+                "intervention_rate": 0.3,
+                "mean_risk_reduction": 0.2,
+                "mean_raw_risk": 0.7,
+                "mean_final_risk": 0.5,
+                "avg_speed": 11.0,
+                "mean_reward": 1.5,
+                "success_rate": 0.7,
+            }
+
+        def compare_baseline_and_shielded(self, baseline, shielded):
+            _ = (baseline, shielded)
+            return {"collision_reduction": 0.5, "efficiency_drop": -0.1}
+
+        def evaluate_acceptance(self, delta_metrics):
+            _ = delta_metrics
+            return True
+
+        def evaluate_world_model(self, world_predictor, samples):
+            _ = (world_predictor, samples)
+            return {"traj_ade": 0.0, "risk_acc": 1.0, "risk_mae": 0.0}
+
+    def _fake_create_backend(_sim_config):
+        return _DummyBackend()
+
+    def _fake_create_env(_backend, _sim_config, _ppo_config, shield=None, episode_prefix=""):
+        return _DummyEnv(episode_prefix, shield)
+
+    monkeypatch.setattr("safe_rl.pipeline.pipeline.create_backend", _fake_create_backend)
+    monkeypatch.setattr("safe_rl.pipeline.pipeline.SafeRLEvaluator", _CaptureEvaluator)
+    monkeypatch.setattr("safe_rl.rl.env.create_env", _fake_create_env)
+
+    policy = object()
+    result = pipeline.evaluate(
+        stage_config=config,
+        shield=SimpleNamespace(name="shield"),
+        shielded_policy=policy,
+        world_predictor=None,
+        test_samples=[],
+        distilled_policy=None,
+        tb_writer=None,
+    )
+
+    calls = _CaptureEvaluator.instance.calls
+    assert len(calls) == 2
+    assert calls[0]["tb_prefix"] == "baseline"
+    assert calls[1]["tb_prefix"] == "shielded"
+    assert calls[0]["policy"] is policy
+    assert calls[1]["policy"] is policy
+    assert calls[0]["seeds"] == [5, 9, 5]
+    assert calls[1]["seeds"] == [5, 9, 5]
+    assert result["comparison_mode"] == "same_policy_shield_off_vs_on"
+    assert result["paired_eval"] is True
+    assert result["policy_source"].endswith("policy_meta.json")
+    assert result["shield_contribution_validated"] is True

@@ -1,0 +1,18 @@
+shield:
+  candidate_count: 7
+  coarse_top_k: 7
+  tail_quantile: 0.9
+  risk_threshold: 0.05
+  uncertainty_threshold: 1.0
+  uncertainty_weight: 0.2
+  fallback_action: "DECEL_KEEP"
+
+eval:
+  eval_episodes: 10
+  seed_list: [42, 123, 2024]
+
+tensorboard:
+  enabled: true
+  root_dir: "safe_rl_output/tensorboard"
+  run_name: "shield_sanity"
+  flush_secs: 10

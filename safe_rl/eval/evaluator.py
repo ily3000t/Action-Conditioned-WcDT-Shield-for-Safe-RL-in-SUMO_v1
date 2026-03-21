@@ -1,4 +1,4 @@
-from typing import Dict, Sequence
+from typing import Dict, Optional, Sequence
 
 import numpy as np
 
@@ -57,12 +57,24 @@ class SafeRLEvaluator:
             "risk_mae": float(np.mean(risk_mae)) if risk_mae else 0.0,
         }
 
-    def evaluate_policy(self, env, policy, episodes: int, risky_mode: bool = True, tb_writer=None, tb_prefix: str = "") -> Dict[str, float]:
+    def evaluate_policy(
+        self,
+        env,
+        policy,
+        episodes: int,
+        risky_mode: bool = True,
+        tb_writer=None,
+        tb_prefix: str = "",
+        seeds: Optional[Sequence[int]] = None,
+    ) -> Dict[str, float]:
         summaries = []
         prefix = (tb_prefix or "policy").strip("/")
         is_baseline = prefix == "baseline"
         for i in range(episodes):
-            obs, _ = env.reset(options={"risky_mode": risky_mode})
+            seed = None
+            if seeds is not None and i < len(seeds):
+                seed = int(seeds[i])
+            obs, _ = env.reset(seed=seed, options={"risky_mode": risky_mode})
             step_infos = []
             rewards = []
             done = False

@@ -53,3 +53,11 @@ def test_debug_stage3_config_is_real_debug_profile():
     assert config.ppo.total_timesteps == 1024
     assert config.ppo.n_steps == 128
     assert config.eval.eval_episodes == 2
+
+
+def test_shield_sanity_config_uses_aggressive_thresholds():
+    config = load_safe_rl_config("safe_rl/config/shield_sanity.yaml")
+    assert config.shield.risk_threshold == 0.05
+    assert config.shield.uncertainty_threshold == 1.0
+    assert config.shield.coarse_top_k == 7
+    assert config.eval.eval_episodes == 10
