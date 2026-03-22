@@ -849,3 +849,45 @@ tensorboard --logdir safe_rl_output/runs --port 6006
 ```bash
 pytest tests -q
 ```
+
+## Shield Trace C1/C2
+
+用于固定 `run_id=20260320_210439`，只重跑 `stage5` 做轻量 trace 调参，不重训 `stage1~4`。
+
+运行命令：
+
+```bash
+python safe_rl_main.py --config safe_rl/config/shield_trace_c1.yaml --stage stage5 --run-id 20260320_210439
+python safe_rl_main.py --config safe_rl/config/shield_trace_c2.yaml --stage stage5 --run-id 20260320_210439
+```
+
+配置区别：
+
+- `shield_trace_c1.yaml`
+  - `replacement_min_risk_margin = 0.08`
+  - `raw_passthrough_risk_threshold = 0.24`
+- `shield_trace_c2.yaml`
+  - `replacement_min_risk_margin = 0.10`
+  - `raw_passthrough_risk_threshold = 0.25`
+
+输出目录：
+
+- `safe_rl_output/runs/20260320_210439/reports/shield_trace_c1/`
+- `safe_rl_output/runs/20260320_210439/reports/shield_trace_c2/`
+- `safe_rl_output/runs/20260320_210439/reports/shield_trace_tuning_summary.json`
+
+`shield_trace_tuning_summary.json` 会汇总：
+
+- `C_baseline`
+- `C1`
+- `C2`
+
+重点比较字段：
+
+- `regression_pair_count`
+- `mean_intervention_count`
+- `mean_risk_reduction`
+- `mean_reward_gap_to_baseline_policy`
+- `mean_replacement_count`
+- `mean_fallback_action_count`
+- `all_pairs_collision_free`

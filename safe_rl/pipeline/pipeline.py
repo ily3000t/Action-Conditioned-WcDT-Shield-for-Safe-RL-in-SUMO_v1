@@ -68,6 +68,7 @@ class SafeRLPipeline:
         self.shield_sweep_summary_path: Optional[Path] = None
         self.shield_trace_dir: Optional[Path] = None
         self.shield_trace_summary_path: Optional[Path] = None
+        self.shield_trace_tuning_summary_path: Optional[Path] = None
 
         self.manifest: Dict = {}
 
@@ -168,6 +169,7 @@ class SafeRLPipeline:
         self.shield_sweep_summary_path = self.reports_dir / "shield_sweep_summary.json"
         self.shield_trace_dir = self.reports_dir / str(self.config.shield_trace.trace_dir_name)
         self.shield_trace_summary_path = self.shield_trace_dir / "trace_summary.json"
+        self.shield_trace_tuning_summary_path = self.reports_dir / "shield_trace_tuning_summary.json"
 
         if self.manifest_path.exists():
             with self.manifest_path.open("r", encoding="utf-8") as f:
@@ -203,6 +205,7 @@ class SafeRLPipeline:
                 "stage5_paired_episode_results": str(self.stage5_paired_episode_results_path),
                 "shield_sweep_summary_report": str(self.shield_sweep_summary_path),
                 "shield_trace_summary_report": str(self.shield_trace_summary_path),
+                "shield_trace_tuning_summary_report": str(self.shield_trace_tuning_summary_path),
                 "sumo_logs_dir": str(self.sumo_logs_dir),
                 "tensorboard_root": str(self.tensorboard_root),
             }
@@ -842,6 +845,10 @@ class SafeRLPipeline:
         if trace_payload is not None:
             result["shield_trace_summary_path"] = str(trace_payload["trace_summary_path"])
             result["shield_trace"] = trace_payload["summary"]
+            tuning_payload = self._write_shield_trace_tuning_summary()
+            if tuning_payload is not None:
+                result["shield_trace_tuning_summary_path"] = str(tuning_payload["summary_path"])
+                result["shield_trace_tuning_summary"] = tuning_payload["summary"]
 
         if tb_writer is not None:
             tb_writer.add_scalar("summary/collision_reduction", float(delta.get("collision_reduction", 0.0)), 0)
@@ -1329,7 +1336,7 @@ class SafeRLPipeline:
         trace_dir.mkdir(parents=True, exist_ok=True)
         pair_count = min(len(baseline_details), len(shielded_details))
         summary = {
-            "variant_name": "C",
+            "variant_name": self._shield_trace_variant_name(str(stage_config.shield_trace.trace_dir_name)),
             "run_id": str(self.run_id or ""),
             "seeds": [],
             "regression_pair_count": 0,
@@ -1371,6 +1378,102 @@ class SafeRLPipeline:
         self._write_json(self.shield_trace_summary_path, summary)
         self.manifest.setdefault("artifact_paths", {})["shield_trace_summary_report"] = str(self.shield_trace_summary_path)
         return {"trace_summary_path": self.shield_trace_summary_path, "summary": summary}
+
+    def _write_shield_trace_tuning_summary(self) -> Optional[Dict[str, Any]]:
+        if self.reports_dir is None or self.shield_trace_tuning_summary_path is None:
+            return None
+
+        trace_dirs = sorted(
+            path for path in self.reports_dir.glob("shield_trace*")
+            if path.is_dir() and (path / "trace_summary.json").exists()
+        )
+        if not trace_dirs:
+            return None
+
+        variants: List[Dict[str, Any]] = []
+        for trace_dir in trace_dirs:
+            entry = self._build_shield_trace_tuning_entry(trace_dir)
+            if entry is not None:
+                variants.append(entry)
+
+        if not variants:
+            return None
+
+        order = {"C_baseline": 0, "C1": 1, "C2": 2}
+        variants.sort(key=lambda item: (order.get(str(item.get("variant_name", "")), 99), str(item.get("variant_name", ""))))
+
+        summary = {
+            "run_id": str(self.run_id or ""),
+            "baseline_available": any(item["variant_name"] == "C_baseline" for item in variants),
+            "variants": variants,
+        }
+        self._write_json(self.shield_trace_tuning_summary_path, summary)
+        self.manifest.setdefault("artifact_paths", {})["shield_trace_tuning_summary_report"] = str(self.shield_trace_tuning_summary_path)
+        return {"summary_path": self.shield_trace_tuning_summary_path, "summary": summary}
+
+    def _build_shield_trace_tuning_entry(self, trace_dir: Path) -> Optional[Dict[str, Any]]:
+        trace_summary_path = trace_dir / "trace_summary.json"
+        if not trace_summary_path.exists():
+            return None
+
+        trace_summary = self._read_json(trace_summary_path)
+        pair_paths = [Path(path) for path in list(trace_summary.get("pair_files", []) or []) if Path(path).exists()]
+        if not pair_paths:
+            pair_paths = sorted(trace_dir.glob("pair_*_seed_*.json"))
+
+        pair_payloads = [self._read_json(path) for path in pair_paths if path.exists()]
+        if pair_payloads:
+            mean_intervention_count = sum(int(item.get("intervention_count", 0)) for item in pair_payloads) / len(pair_payloads)
+            mean_risk_reduction = sum(float(item.get("mean_risk_reduction", 0.0)) for item in pair_payloads) / len(pair_payloads)
+            reward_deltas = [
+                float(item.get("shielded_reward", 0.0)) - float(item.get("baseline_reward", 0.0))
+                for item in pair_payloads
+            ]
+            mean_reward_gap = sum(reward_deltas) / len(reward_deltas)
+            mean_replacement_count = sum(int(item.get("replacement_count", 0)) for item in pair_payloads) / len(pair_payloads)
+            mean_fallback_count = sum(int(item.get("fallback_action_count", 0)) for item in pair_payloads) / len(pair_payloads)
+            all_pairs_collision_free = all(
+                not bool(item.get("baseline_collision", False)) and not bool(item.get("shielded_collision", False))
+                for item in pair_payloads
+            )
+        else:
+            mean_intervention_count = 0.0
+            mean_risk_reduction = 0.0
+            reward_deltas = []
+            mean_reward_gap = 0.0
+            mean_replacement_count = 0.0
+            mean_fallback_count = 0.0
+            all_pairs_collision_free = False
+
+        return {
+            "variant_name": self._shield_trace_variant_name(trace_dir.name),
+            "trace_dir_name": trace_dir.name,
+            "trace_summary_path": str(trace_summary_path),
+            "pair_count": len(pair_payloads),
+            "seeds": list(trace_summary.get("seeds", [])),
+            "regression_pair_count": int(trace_summary.get("regression_pair_count", 0)),
+            "mean_intervention_count": float(mean_intervention_count),
+            "mean_risk_reduction": float(mean_risk_reduction),
+            "mean_reward_gap_to_baseline_policy": float(mean_reward_gap),
+            "mean_replacement_count": float(mean_replacement_count),
+            "mean_fallback_action_count": float(mean_fallback_count),
+            "all_pairs_collision_free": bool(all_pairs_collision_free),
+            "all_pairs_reward_delta": reward_deltas,
+        }
+
+    def _shield_trace_variant_name(self, trace_dir_name: str) -> str:
+        normalized = str(trace_dir_name or "").strip().lower()
+        if normalized == "shield_trace":
+            return "C_baseline"
+        if normalized == "shield_trace_c1":
+            return "C1"
+        if normalized == "shield_trace_c2":
+            return "C2"
+        return str(trace_dir_name or "trace")
+
+    def _read_json(self, path: Path) -> Dict[str, Any]:
+        with path.open("r", encoding="utf-8") as f:
+            return json.load(f)
 
     def _build_trace_pair_payload(
         self,

@@ -715,7 +715,7 @@ def test_stage5_trace_writes_pair_files_and_summary(monkeypatch):
 
     assert Path(result["shield_trace_summary_path"]).exists()
     trace_summary = json.loads(Path(result["shield_trace_summary_path"]).read_text(encoding="utf-8"))
-    assert trace_summary["variant_name"] == "C"
+    assert trace_summary["variant_name"] == "C_baseline"
     assert trace_summary["regression_pair_count"] == 1
     assert trace_summary["pairs_with_lane_change_replacement"] == 1
     assert trace_summary["pairs_with_merge_guard_triggered"] == 1
@@ -728,3 +728,81 @@ def test_stage5_trace_writes_pair_files_and_summary(monkeypatch):
     assert pair_payload["collision_step_shielded"] == 1
     assert pair_payload["replacement_count"] == 1
     assert pair_payload["aligned_steps"][0]["shielded"]["chosen_candidate_index"] == 1
+    assert Path(result["shield_trace_tuning_summary_path"]).exists()
+    tuning_summary = json.loads(Path(result["shield_trace_tuning_summary_path"]).read_text(encoding="utf-8"))
+    assert tuning_summary["baseline_available"] is True
+    assert tuning_summary["variants"][0]["variant_name"] == "C_baseline"
+
+
+def test_shield_trace_tuning_summary_aggregates_baseline_and_c1():
+    config = _tiny_config()
+    config.shield_trace.enabled = True
+    config.shield_trace.trace_dir_name = "shield_trace_c1"
+
+    pipeline = SafeRLPipeline(config)
+    run_id = f"ut_trace_tuning_{uuid.uuid4().hex[:8]}"
+    pipeline._prepare_run_context(stage="stage5", run_id=run_id)
+
+    assert pipeline.reports_dir is not None
+    baseline_dir = pipeline.reports_dir / "shield_trace"
+    current_dir = pipeline.reports_dir / "shield_trace_c1"
+    baseline_dir.mkdir(parents=True, exist_ok=True)
+    current_dir.mkdir(parents=True, exist_ok=True)
+
+    baseline_pair_path = baseline_dir / "pair_00_seed_42.json"
+    current_pair_path = current_dir / "pair_00_seed_42.json"
+    baseline_pair = {
+        "seed": 42,
+        "baseline_collision": False,
+        "shielded_collision": False,
+        "baseline_reward": 0.30,
+        "shielded_reward": 0.24,
+        "intervention_count": 150,
+        "replacement_count": 150,
+        "fallback_action_count": 0,
+        "mean_risk_reduction": 0.05,
+    }
+    current_pair = {
+        "seed": 42,
+        "baseline_collision": False,
+        "shielded_collision": False,
+        "baseline_reward": 0.30,
+        "shielded_reward": 0.27,
+        "intervention_count": 90,
+        "replacement_count": 90,
+        "fallback_action_count": 0,
+        "mean_risk_reduction": 0.03,
+    }
+    pipeline._write_json(baseline_pair_path, baseline_pair)
+    pipeline._write_json(current_pair_path, current_pair)
+    pipeline._write_json(
+        baseline_dir / "trace_summary.json",
+        {
+            "variant_name": "C",
+            "seeds": [42],
+            "regression_pair_count": 0,
+            "pair_files": [str(baseline_pair_path)],
+        },
+    )
+    pipeline._write_json(
+        current_dir / "trace_summary.json",
+        {
+            "variant_name": "C1",
+            "seeds": [42],
+            "regression_pair_count": 0,
+            "pair_files": [str(current_pair_path)],
+        },
+    )
+
+    payload = pipeline._write_shield_trace_tuning_summary()
+    assert payload is not None
+    assert Path(payload["summary_path"]).exists()
+
+    summary = json.loads(Path(payload["summary_path"]).read_text(encoding="utf-8"))
+    assert summary["baseline_available"] is True
+    by_name = {entry["variant_name"]: entry for entry in summary["variants"]}
+    assert by_name["C_baseline"]["mean_intervention_count"] == 150.0
+    assert by_name["C_baseline"]["mean_reward_gap_to_baseline_policy"] == pytest.approx(-0.06)
+    assert by_name["C1"]["mean_intervention_count"] == 90.0
+    assert by_name["C1"]["mean_reward_gap_to_baseline_policy"] == pytest.approx(-0.03)
+
