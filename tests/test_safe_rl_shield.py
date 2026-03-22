@@ -85,6 +85,7 @@ def test_shield_blocks_replacement_without_margin():
     assert decision.intervened is False
     assert decision.reason == "replacement_blocked_by_constraint"
     assert decision.meta["constraint_reason"] == "blocked_by_margin"
+    assert any(item["constraint_reason"] == "blocked_by_margin" for item in decision.meta["candidate_evaluations"])
 
 
 def test_shield_marks_raw_passthrough_for_low_risk_action():
@@ -95,6 +96,7 @@ def test_shield_marks_raw_passthrough_for_low_risk_action():
     decision = shield.select_action(_history_scene(), 4)
     assert decision.final_action == 4
     assert decision.intervened is False
+    assert decision.meta["replacement_happened"] is False
     assert decision.meta["constraint_reason"] == "raw_passthrough"
 
 

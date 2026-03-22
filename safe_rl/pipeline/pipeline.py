@@ -832,6 +832,7 @@ class SafeRLPipeline:
             "paired_risky_mode": True,
             "paired_scenario_source": str(stage_config.sim.sumo_cfg),
             "evaluation_seeds": eval_seeds,
+            "effective_shield_config": self._effective_shield_config(stage_config),
             "world_model": world_metrics,
             "system_baseline": baseline_metrics,
             "system_shielded": shielded_metrics,
@@ -1339,11 +1340,16 @@ class SafeRLPipeline:
             "variant_name": self._shield_trace_variant_name(str(stage_config.shield_trace.trace_dir_name)),
             "run_id": str(self.run_id or ""),
             "seeds": [],
+            "effective_shield_config": self._effective_shield_config(stage_config),
             "regression_pair_count": 0,
             "pairs_with_lane_change_replacement": 0,
             "pairs_with_merge_guard_triggered": 0,
             "pairs_with_fallback": 0,
             "pairs_with_collision_after_replacement": 0,
+            "blocked_by_margin_count": 0,
+            "raw_passthrough_count": 0,
+            "merge_lateral_guard_block_count": 0,
+            "candidate_selected_count": 0,
             "pair_files": [],
         }
 
@@ -1374,6 +1380,10 @@ class SafeRLPipeline:
                 summary["pairs_with_fallback"] += 1
             if pair_payload["collision_after_replacement"]:
                 summary["pairs_with_collision_after_replacement"] += 1
+            summary["blocked_by_margin_count"] += int(pair_payload.get("blocked_by_margin_count", 0))
+            summary["raw_passthrough_count"] += int(pair_payload.get("raw_passthrough_count", 0))
+            summary["merge_lateral_guard_block_count"] += int(pair_payload.get("merge_lateral_guard_block_count", 0))
+            summary["candidate_selected_count"] += int(pair_payload.get("candidate_selected_count", 0))
 
         self._write_json(self.shield_trace_summary_path, summary)
         self.manifest.setdefault("artifact_paths", {})["shield_trace_summary_report"] = str(self.shield_trace_summary_path)
@@ -1399,7 +1409,7 @@ class SafeRLPipeline:
         if not variants:
             return None
 
-        order = {"C_baseline": 0, "C1": 1, "C2": 2}
+        order = {"C_baseline": 0, "C1": 1, "C2": 2, "C_strong": 3}
         variants.sort(key=lambda item: (order.get(str(item.get("variant_name", "")), 99), str(item.get("variant_name", ""))))
 
         summary = {
@@ -1451,7 +1461,12 @@ class SafeRLPipeline:
             "trace_summary_path": str(trace_summary_path),
             "pair_count": len(pair_payloads),
             "seeds": list(trace_summary.get("seeds", [])),
+            "effective_shield_config": dict(trace_summary.get("effective_shield_config", {})),
             "regression_pair_count": int(trace_summary.get("regression_pair_count", 0)),
+            "blocked_by_margin_count": int(trace_summary.get("blocked_by_margin_count", 0)),
+            "raw_passthrough_count": int(trace_summary.get("raw_passthrough_count", 0)),
+            "merge_lateral_guard_block_count": int(trace_summary.get("merge_lateral_guard_block_count", 0)),
+            "candidate_selected_count": int(trace_summary.get("candidate_selected_count", 0)),
             "mean_intervention_count": float(mean_intervention_count),
             "mean_risk_reduction": float(mean_risk_reduction),
             "mean_reward_gap_to_baseline_policy": float(mean_reward_gap),
@@ -1469,7 +1484,19 @@ class SafeRLPipeline:
             return "C1"
         if normalized == "shield_trace_c2":
             return "C2"
+        if normalized == "shield_trace_c_strong":
+            return "C_strong"
         return str(trace_dir_name or "trace")
+
+    def _effective_shield_config(self, stage_config: SafeRLConfig) -> Dict[str, float]:
+        return {
+            "risk_threshold": float(stage_config.shield.risk_threshold),
+            "uncertainty_threshold": float(stage_config.shield.uncertainty_threshold),
+            "replacement_min_risk_margin": float(stage_config.shield.replacement_min_risk_margin),
+            "raw_passthrough_risk_threshold": float(stage_config.shield.raw_passthrough_risk_threshold),
+            "effective_raw_passthrough_threshold": float(min(float(stage_config.shield.risk_threshold), float(stage_config.shield.raw_passthrough_risk_threshold))),
+            "merge_override_margin": float(stage_config.shield.merge_override_margin),
+        }
 
     def _read_json(self, path: Path) -> Dict[str, Any]:
         with path.open("r", encoding="utf-8") as f:
@@ -1497,6 +1524,28 @@ class SafeRLPipeline:
             for item in shielded_steps
         )
         regression_pair = bool(not bool(int(baseline.get("collisions", 0)) > 0) and bool(int(shielded.get("collisions", 0)) > 0))
+        blocked_by_margin_count = sum(
+            1
+            for item in shielded_steps
+            if str(item.get("constraint_reason", "")) == "blocked_by_margin"
+            or any(str(candidate.get("constraint_reason", "")) == "blocked_by_margin" for candidate in list(item.get("candidate_evaluations", []) or []))
+        )
+        raw_passthrough_count = sum(
+            1
+            for item in shielded_steps
+            if str(item.get("constraint_reason", "")) == "raw_passthrough" and not bool(item.get("replacement_happened", False))
+        )
+        merge_lateral_guard_block_count = sum(
+            1
+            for item in shielded_steps
+            if str(item.get("constraint_reason", "")) == "merge_lateral_guard"
+            or any(str(candidate.get("constraint_reason", "")) == "merge_lateral_guard" for candidate in list(item.get("candidate_evaluations", []) or []))
+        )
+        candidate_selected_count = sum(
+            1
+            for item in shielded_steps
+            if bool(item.get("replacement_happened", False)) and not bool(item.get("fallback_used", False))
+        )
 
         return {
             "pair_index": int(pair_index),
@@ -1517,6 +1566,10 @@ class SafeRLPipeline:
             "replacement_same_as_raw_count": int(shielded.get("replacement_same_as_raw_count", 0)),
             "fallback_action_count": int(shielded.get("fallback_action_count", 0)),
             "mean_risk_reduction": float(shielded.get("mean_risk_reduction", 0.0)),
+            "blocked_by_margin_count": int(blocked_by_margin_count),
+            "raw_passthrough_count": int(raw_passthrough_count),
+            "merge_lateral_guard_block_count": int(merge_lateral_guard_block_count),
+            "candidate_selected_count": int(candidate_selected_count),
             "first_replacement_step": int(first_replacement_step),
             "collision_step_baseline": int(collision_step_baseline),
             "collision_step_shielded": int(collision_step_shielded),

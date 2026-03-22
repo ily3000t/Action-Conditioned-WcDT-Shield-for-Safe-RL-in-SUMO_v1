@@ -140,7 +140,7 @@ tensorboard --logdir safe_rl_output/runs --port 6006
 - Stage 1 为什么 warning 多：看 `warning_summary.json`
 - buffer 为什么是 0：看 `stage4_buffer_report.json`
 
-## Shield Trace C1/C2
+## Shield Trace C1/C2/C_strong
 
 这是只重跑 `stage5` 的轻量调参入口，用来比较 C 基线、C1、C2 三组 trace 结果。
 
@@ -149,6 +149,7 @@ tensorboard --logdir safe_rl_output/runs --port 6006
 ```bash
 python safe_rl_main.py --config safe_rl/config/shield_trace_c1.yaml --stage stage5 --run-id 20260320_210439
 python safe_rl_main.py --config safe_rl/config/shield_trace_c2.yaml --stage stage5 --run-id 20260320_210439
+python safe_rl_main.py --config safe_rl/config/shield_trace_c_strong.yaml --stage stage5 --run-id 20260320_210439
 ```
 
 结果总表：
@@ -157,7 +158,11 @@ python safe_rl_main.py --config safe_rl/config/shield_trace_c2.yaml --stage stag
 
 总表重点字段：
 
-- `regression_pair_count`
+- `effective_shield_config`
+- `blocked_by_margin_count`
+- `raw_passthrough_count`
+- `merge_lateral_guard_block_count`
+- `candidate_selected_count`
 - `mean_intervention_count`
 - `mean_risk_reduction`
 - `mean_reward_gap_to_baseline_policy`

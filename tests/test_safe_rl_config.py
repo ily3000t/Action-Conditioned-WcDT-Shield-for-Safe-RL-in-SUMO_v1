@@ -103,3 +103,10 @@ def test_shield_trace_c2_config_loads():
     assert config.shield_trace.trace_dir_name == "shield_trace_c2"
     assert config.eval.seed_list == [42, 123, 2024]
 
+def test_shield_trace_c_strong_config_loads():
+    config = load_safe_rl_config("safe_rl/config/shield_trace_c_strong.yaml")
+    assert config.shield.replacement_min_risk_margin == 0.15
+    assert config.shield.raw_passthrough_risk_threshold == 0.30
+    assert config.shield_trace.trace_dir_name == "shield_trace_c_strong"
+    assert config.eval.seed_list == [42, 123, 2024]
+
