@@ -14,6 +14,8 @@ def test_default_config_loads():
     assert config.sim.runtime_log_dir
     assert config.sim.collision_action == "teleport"
     assert config.sim.collision_check_junctions is True
+    assert config.shield.replacement_min_risk_margin == 0.05
+    assert config.shield.protect_merge_lateral_decisions is True
 
 
 def test_tensorboard_config_override():
@@ -75,3 +77,13 @@ def test_shield_sweep_config_loads_default_variants():
         ("B", 0.25, 0.50, 6),
         ("C", 0.30, 0.45, 5),
     ]
+
+
+def test_shield_trace_c_config_loads():
+    config = load_safe_rl_config("safe_rl/config/shield_trace_c.yaml")
+    assert config.shield.risk_threshold == 0.30
+    assert config.shield.uncertainty_threshold == 0.45
+    assert config.shield.coarse_top_k == 5
+    assert config.shield_trace.enabled is True
+    assert config.shield_trace.seed_list == [42, 123, 2024]
+    assert config.eval.eval_episodes == 3

@@ -4,10 +4,11 @@ from typing import Any, Callable, Dict, List, Optional
 import numpy as np
 
 from safe_rl.config.config import PPOConfig, SimConfig
-from safe_rl.data.risk import compute_min_distance, compute_min_ttc, detect_collision
+from safe_rl.data.risk import compute_min_distance, compute_min_ttc, detect_collision, get_ego_vehicle
 from safe_rl.data.types import SceneState, ShieldDecision
 from safe_rl.models.features import BASE_FEATURE_DIM, encode_history
 from safe_rl.shield.safety_shield import SafetyShield
+from safe_rl.sim.actions import action_name, decode_action
 from safe_rl.sim import ISumoBackend
 
 try:
@@ -205,15 +206,23 @@ class SafeDrivingEnv(BaseEnv):
         evaluated_candidate_count = int(decision.meta.get("evaluated_candidate_count", len(decision.candidate_risks)))
         shield_blocked = bool(decision.meta.get("shield_blocked", shield_called and decision.reason != "raw_action_safe"))
         replacement_same_as_raw = int(bool(decision.intervened and decision.final_action == raw_action))
+        ego_vehicle = get_ego_vehicle(result.scene)
+        ego_lane_index = int(getattr(ego_vehicle, "lane_id", 0))
+        raw_action_type = str(decision.meta.get("raw_action_type", action_name(raw_action)))
+        final_action_type = str(decision.meta.get("final_action_type", action_name(decision.final_action)))
+        lane_change_involved = bool(decision.meta.get("lane_change_involved", decode_action(raw_action).lateral != 0 or decode_action(decision.final_action).lateral != 0))
 
         info = {
             "raw_action": raw_action,
             "final_action": decision.final_action,
+            "executed_action": decision.final_action,
             "risk_raw": decision.risk_raw,
             "risk_final": decision.risk_final,
+            "risk_reduction": float(decision.risk_raw - decision.risk_final),
             "intervened": decision.intervened,
             "intervention_reason": decision.reason,
             "candidate_risks": decision.candidate_risks,
+            "candidate_evaluations": decision.meta.get("candidate_evaluations", []),
             "task_reward": float(result.task_reward),
             "reward": reward,
             "collision": collision,
@@ -222,12 +231,21 @@ class SafeDrivingEnv(BaseEnv):
             "lane_violation": bool(result.info.get("lane_violation", False)),
             "shield_meta": decision.meta,
             "ego_speed": float(result.info.get("ego_speed", 0.0)),
+            "ego_lane_id": str(getattr(ego_vehicle, "lane_id", 0)),
+            "ego_lane_index": ego_lane_index,
             "episode_id": self._current_episode_record.get("episode_id", "") if self._current_episode_record else "",
             "risky_mode": bool(self._current_episode_record.get("risky_mode", False)) if self._current_episode_record else False,
             "scenario_source": str(self.sim_config.sumo_cfg),
             "replacement_happened": replacement_happened,
             "fallback_used": fallback_used,
             "evaluated_candidate_count": evaluated_candidate_count,
+            "chosen_candidate_index": int(decision.meta.get("chosen_candidate_index", -1)),
+            "chosen_candidate_rank_by_risk": int(decision.meta.get("chosen_candidate_rank_by_risk", -1)),
+            "raw_action_type": raw_action_type,
+            "final_action_type": final_action_type,
+            "lane_change_involved": lane_change_involved,
+            "constraint_reason": str(decision.meta.get("constraint_reason", "")),
+            "replacement_margin": float(decision.meta.get("replacement_margin", 0.0)),
             "shield_called_steps": int(shield_called),
             "shield_candidate_evaluated_steps": int(shield_called and evaluated_candidate_count > 0),
             "shield_blocked_steps": int(shield_blocked),

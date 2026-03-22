@@ -72,6 +72,10 @@ class ShieldConfig:
     uncertainty_threshold: float = 0.35
     uncertainty_weight: float = 0.2
     fallback_action: str = "DECEL_KEEP"
+    replacement_min_risk_margin: float = 0.05
+    raw_passthrough_risk_threshold: float = 0.20
+    protect_merge_lateral_decisions: bool = True
+    merge_override_margin: float = 0.12
 
 
 @dataclass
@@ -89,6 +93,14 @@ class ShieldSweepConfig:
     target_intervention_min: float = 0.05
     target_intervention_max: float = 0.30
     min_avg_speed: float = 10.0
+
+
+@dataclass
+class ShieldTraceConfig:
+    enabled: bool = False
+    seed_list: List[int] = field(default_factory=list)
+    save_pair_traces: bool = True
+    trace_dir_name: str = "shield_trace"
 
 
 @dataclass
@@ -137,6 +149,7 @@ class SafeRLConfig:
     world_model: WorldModelConfig = field(default_factory=WorldModelConfig)
     shield: ShieldConfig = field(default_factory=ShieldConfig)
     shield_sweep: ShieldSweepConfig = field(default_factory=ShieldSweepConfig)
+    shield_trace: ShieldTraceConfig = field(default_factory=ShieldTraceConfig)
     ppo: PPOConfig = field(default_factory=PPOConfig)
     distill: DistillConfig = field(default_factory=DistillConfig)
     eval: EvalConfig = field(default_factory=EvalConfig)
@@ -177,6 +190,8 @@ def load_safe_rl_config(path: Optional[str] = None) -> SafeRLConfig:
             variant = ShieldSweepVariant()
             _update_dataclass(variant, dict(item or {}))
             config.shield_sweep.variants.append(variant)
+    if "shield_trace" in data:
+        _update_dataclass(config.shield_trace, data["shield_trace"])
     if "ppo" in data:
         _update_dataclass(config.ppo, data["ppo"])
     if "distill" in data:

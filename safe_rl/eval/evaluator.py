@@ -1,4 +1,4 @@
-from typing import Dict, Optional, Sequence
+from typing import Any, Dict, List, Optional, Sequence
 
 import numpy as np
 
@@ -67,6 +67,7 @@ class SafeRLEvaluator:
         tb_writer=None,
         tb_prefix: str = "",
         seeds: Optional[Sequence[int]] = None,
+        collect_step_traces: bool = False,
     ) -> Dict[str, float]:
         summaries = []
         episode_details = []
@@ -91,15 +92,16 @@ class SafeRLEvaluator:
             episode_id = str(reset_info.get("episode_id", f"eval_{i:04d}"))
             summary = summarize_episode(episode_id, step_infos, rewards)
             summaries.append(summary)
-            episode_details.append(
-                {
-                    **summary_to_dict(summary),
-                    "seed": None if seed is None else int(seed),
-                    "risky_mode": bool(reset_info.get("risky_mode", risky_mode)),
-                    "scenario_source": str(reset_info.get("scenario_source", "")),
-                    "episode_id": episode_id,
-                }
-            )
+            detail = {
+                **summary_to_dict(summary),
+                "seed": None if seed is None else int(seed),
+                "risky_mode": bool(reset_info.get("risky_mode", risky_mode)),
+                "scenario_source": str(reset_info.get("scenario_source", "")),
+                "episode_id": episode_id,
+            }
+            if collect_step_traces:
+                detail["step_trace"] = [self._build_step_trace(step_index, item) for step_index, item in enumerate(step_infos)]
+            episode_details.append(detail)
 
             if tb_writer is not None:
                 tb_writer.add_scalar(f"{prefix}/episode_reward", float(summary.mean_reward), i)
@@ -153,3 +155,48 @@ class SafeRLEvaluator:
         distance_term = 1.0 if min_distance < 3.0 else max(0.0, 1.0 - min_distance / 30.0)
         ttc_term = 1.0 if min_ttc < 1.5 else max(0.0, 1.0 - min_ttc / 8.0)
         return float(max(distance_term, ttc_term))
+
+
+    def _build_step_trace(self, step_index: int, info: Dict[str, Any]) -> Dict[str, Any]:
+        candidate_evaluations = []
+        for item in list(info.get("candidate_evaluations", []) or []):
+            candidate_evaluations.append(
+                {
+                    "action_id": int(item.get("action_id", -1)),
+                    "action_type": str(item.get("action_type", "")),
+                    "distance_to_raw": int(item.get("distance_to_raw", 0)),
+                    "coarse_risk": float(item.get("coarse_risk", 0.0)),
+                    "fine_risk": None if item.get("fine_risk") is None else float(item.get("fine_risk", 0.0)),
+                    "uncertainty": None if item.get("uncertainty") is None else float(item.get("uncertainty", 0.0)),
+                    "selected": bool(item.get("selected", False)),
+                    "safe_under_threshold": bool(item.get("safe_under_threshold", False)),
+                    "evaluated": bool(item.get("evaluated", False)),
+                    "constraint_reason": str(item.get("constraint_reason", "")),
+                }
+            )
+
+        return {
+            "step_index": int(step_index),
+            "raw_action": int(info.get("raw_action", -1)),
+            "final_action": int(info.get("final_action", -1)),
+            "executed_action": int(info.get("executed_action", info.get("final_action", -1))),
+            "replacement_happened": bool(info.get("replacement_happened", False)),
+            "fallback_used": bool(info.get("fallback_used", False)),
+            "chosen_candidate_index": int(info.get("chosen_candidate_index", -1)),
+            "chosen_candidate_rank_by_risk": int(info.get("chosen_candidate_rank_by_risk", -1)),
+            "raw_risk": float(info.get("risk_raw", 0.0)),
+            "final_risk": float(info.get("risk_final", 0.0)),
+            "risk_reduction": float(info.get("risk_reduction", float(info.get("risk_raw", 0.0)) - float(info.get("risk_final", 0.0)))),
+            "candidate_evaluations": candidate_evaluations,
+            "raw_action_type": str(info.get("raw_action_type", "")),
+            "final_action_type": str(info.get("final_action_type", "")),
+            "lane_change_involved": bool(info.get("lane_change_involved", False)),
+            "ego_lane_id": str(info.get("ego_lane_id", "")),
+            "ego_lane_index": int(info.get("ego_lane_index", 0)),
+            "ego_speed": float(info.get("ego_speed", 0.0)),
+            "ttc": float(info.get("ttc", 0.0)),
+            "min_distance": float(info.get("min_distance", 0.0)),
+            "collision": bool(info.get("collision", False)),
+            "constraint_reason": str(info.get("constraint_reason", "")),
+            "replacement_margin": float(info.get("replacement_margin", 0.0)),
+        }

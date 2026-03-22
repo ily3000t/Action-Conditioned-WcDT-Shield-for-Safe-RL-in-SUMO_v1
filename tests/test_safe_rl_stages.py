@@ -587,3 +587,144 @@ def test_stage5_shield_sweep_writes_summary_and_variant_reports(monkeypatch):
         assert Path(entry["stage4_buffer_report_path"]).exists()
         assert Path(entry["stage5_report_path"]).exists()
         assert Path(entry["stage5_paired_episode_results_path"]).exists()
+
+
+def test_stage5_trace_writes_pair_files_and_summary(monkeypatch):
+    config = _tiny_config()
+    config.eval.eval_episodes = 3
+    config.eval.seed_list = [42, 123, 2024]
+    config.shield.risk_threshold = 0.30
+    config.shield.uncertainty_threshold = 0.45
+    config.shield.coarse_top_k = 5
+    config.shield_trace.enabled = True
+    config.shield_trace.seed_list = [42, 123, 2024]
+    config.shield_trace.trace_dir_name = "shield_trace"
+
+    pipeline = SafeRLPipeline(config)
+    run_id = f"ut_stage5_trace_{uuid.uuid4().hex[:8]}"
+    pipeline._prepare_run_context(stage="stage5", run_id=run_id)
+
+    class _DummyBackend:
+        def start(self):
+            return None
+
+        def close(self):
+            return None
+
+    class _DummyEnv:
+        def close(self):
+            return None
+
+    class _TraceEvaluator:
+        def __init__(self, cfg):
+            _ = cfg
+
+        def evaluate_policy(self, env, policy, episodes, risky_mode=True, tb_writer=None, tb_prefix="", seeds=None, collect_step_traces=False):
+            _ = (env, policy, episodes, risky_mode, tb_writer, collect_step_traces)
+            if tb_prefix == "baseline":
+                return {
+                    "collision_rate": 0.0,
+                    "intervention_rate": 0.0,
+                    "mean_risk_reduction": 0.0,
+                    "mean_raw_risk": 0.2,
+                    "mean_final_risk": 0.2,
+                    "avg_speed": 10.0,
+                    "mean_reward": 1.0,
+                    "success_rate": 1.0,
+                    "replacement_count": 0.0,
+                    "episode_details": [
+                        {
+                            "episode_id": "base_ep_0",
+                            "seed": 42,
+                            "risky_mode": True,
+                            "scenario_source": config.sim.sumo_cfg,
+                            "collisions": 0,
+                            "mean_reward": 1.0,
+                            "mean_raw_risk": 0.2,
+                            "mean_final_risk": 0.2,
+                            "interventions": 0,
+                            "replacement_count": 0,
+                            "replacement_same_as_raw_count": 0,
+                            "fallback_action_count": 0,
+                            "mean_risk_reduction": 0.0,
+                            "step_trace": [
+                                {"step_index": 0, "raw_action": 4, "final_action": 4, "executed_action": 4, "replacement_happened": False, "fallback_used": False, "chosen_candidate_index": -1, "chosen_candidate_rank_by_risk": -1, "raw_risk": 0.2, "final_risk": 0.2, "risk_reduction": 0.0, "candidate_evaluations": [], "raw_action_type": "KEEP_KEEP", "final_action_type": "KEEP_KEEP", "lane_change_involved": False, "ego_lane_id": "1", "ego_lane_index": 1, "ego_speed": 20.0, "ttc": 5.0, "min_distance": 12.0, "collision": False, "constraint_reason": "", "replacement_margin": 0.0},
+                                {"step_index": 1, "raw_action": 4, "final_action": 4, "executed_action": 4, "replacement_happened": False, "fallback_used": False, "chosen_candidate_index": -1, "chosen_candidate_rank_by_risk": -1, "raw_risk": 0.2, "final_risk": 0.2, "risk_reduction": 0.0, "candidate_evaluations": [], "raw_action_type": "KEEP_KEEP", "final_action_type": "KEEP_KEEP", "lane_change_involved": False, "ego_lane_id": "1", "ego_lane_index": 1, "ego_speed": 19.0, "ttc": 4.0, "min_distance": 10.0, "collision": False, "constraint_reason": "", "replacement_margin": 0.0},
+                            ],
+                        }
+                    ],
+                }
+            return {
+                "collision_rate": 1.0,
+                "intervention_rate": 1.0,
+                "mean_risk_reduction": 0.1,
+                "mean_raw_risk": 0.5,
+                "mean_final_risk": 0.4,
+                "avg_speed": 8.0,
+                "mean_reward": 0.5,
+                "success_rate": 0.0,
+                "replacement_count": 1.0,
+                "episode_details": [
+                    {
+                        "episode_id": "shield_ep_0",
+                        "seed": 42,
+                        "risky_mode": True,
+                        "scenario_source": config.sim.sumo_cfg,
+                        "collisions": 1,
+                        "mean_reward": 0.5,
+                        "mean_raw_risk": 0.5,
+                        "mean_final_risk": 0.4,
+                        "interventions": 1,
+                        "replacement_count": 1,
+                        "replacement_same_as_raw_count": 0,
+                        "fallback_action_count": 0,
+                        "mean_risk_reduction": 0.1,
+                        "step_trace": [
+                            {"step_index": 0, "raw_action": 3, "final_action": 4, "executed_action": 4, "replacement_happened": True, "fallback_used": False, "chosen_candidate_index": 1, "chosen_candidate_rank_by_risk": 0, "raw_risk": 0.5, "final_risk": 0.4, "risk_reduction": 0.1, "candidate_evaluations": [{"action_id": 3, "action_type": "KEEP_LEFT", "distance_to_raw": 0, "coarse_risk": 0.5, "fine_risk": 0.5, "uncertainty": 0.1, "selected": False, "safe_under_threshold": False, "evaluated": True, "constraint_reason": ""}, {"action_id": 4, "action_type": "KEEP_KEEP", "distance_to_raw": 1, "coarse_risk": 0.4, "fine_risk": 0.4, "uncertainty": 0.1, "selected": True, "safe_under_threshold": True, "evaluated": True, "constraint_reason": "merge_lateral_guard"}], "raw_action_type": "KEEP_LEFT", "final_action_type": "KEEP_KEEP", "lane_change_involved": True, "ego_lane_id": "1", "ego_lane_index": 1, "ego_speed": 18.0, "ttc": 2.0, "min_distance": 6.0, "collision": False, "constraint_reason": "merge_lateral_guard", "replacement_margin": 0.1},
+                            {"step_index": 1, "raw_action": 4, "final_action": 4, "executed_action": 4, "replacement_happened": False, "fallback_used": False, "chosen_candidate_index": 0, "chosen_candidate_rank_by_risk": 0, "raw_risk": 0.4, "final_risk": 0.4, "risk_reduction": 0.0, "candidate_evaluations": [], "raw_action_type": "KEEP_KEEP", "final_action_type": "KEEP_KEEP", "lane_change_involved": False, "ego_lane_id": "1", "ego_lane_index": 1, "ego_speed": 0.0, "ttc": 0.5, "min_distance": 0.5, "collision": True, "constraint_reason": "", "replacement_margin": 0.0},
+                        ],
+                    }
+                ],
+            }
+
+        def compare_baseline_and_shielded(self, baseline, shielded):
+            _ = (baseline, shielded)
+            return {"collision_reduction": -1.0, "efficiency_drop": 0.2}
+
+        def evaluate_acceptance(self, delta_metrics):
+            _ = delta_metrics
+            return False
+
+        def evaluate_world_model(self, world_predictor, samples):
+            _ = (world_predictor, samples)
+            return {"traj_ade": 0.0, "risk_acc": 1.0, "risk_mae": 0.0}
+
+    monkeypatch.setattr("safe_rl.pipeline.pipeline.create_backend", lambda _sim_config: _DummyBackend())
+    monkeypatch.setattr("safe_rl.pipeline.pipeline.SafeRLEvaluator", _TraceEvaluator)
+    monkeypatch.setattr("safe_rl.rl.env.create_env", lambda *_args, **_kwargs: _DummyEnv())
+
+    result = pipeline.evaluate(
+        stage_config=config,
+        shield=SimpleNamespace(name="shield"),
+        shielded_policy=object(),
+        world_predictor=None,
+        test_samples=[],
+        distilled_policy=None,
+        tb_writer=None,
+    )
+
+    assert Path(result["shield_trace_summary_path"]).exists()
+    trace_summary = json.loads(Path(result["shield_trace_summary_path"]).read_text(encoding="utf-8"))
+    assert trace_summary["variant_name"] == "C"
+    assert trace_summary["regression_pair_count"] == 1
+    assert trace_summary["pairs_with_lane_change_replacement"] == 1
+    assert trace_summary["pairs_with_merge_guard_triggered"] == 1
+
+    pair_path = Path(trace_summary["pair_files"][0])
+    assert pair_path.exists()
+    pair_payload = json.loads(pair_path.read_text(encoding="utf-8"))
+    assert pair_payload["regression_pair"] is True
+    assert pair_payload["first_replacement_step"] == 0
+    assert pair_payload["collision_step_shielded"] == 1
+    assert pair_payload["replacement_count"] == 1
+    assert pair_payload["aligned_steps"][0]["shielded"]["chosen_candidate_index"] == 1

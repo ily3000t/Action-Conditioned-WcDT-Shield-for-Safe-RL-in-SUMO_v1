@@ -1,4 +1,5 @@
 import copy
+import inspect
 import datetime as dt
 import json
 import time
@@ -65,6 +66,8 @@ class SafeRLPipeline:
         self.stage4_buffer_report_path: Optional[Path] = None
         self.stage5_paired_episode_results_path: Optional[Path] = None
         self.shield_sweep_summary_path: Optional[Path] = None
+        self.shield_trace_dir: Optional[Path] = None
+        self.shield_trace_summary_path: Optional[Path] = None
 
         self.manifest: Dict = {}
 
@@ -163,6 +166,8 @@ class SafeRLPipeline:
         self.stage4_buffer_report_path = self.reports_dir / "stage4_buffer_report.json"
         self.stage5_paired_episode_results_path = self.reports_dir / "stage5_paired_episode_results.json"
         self.shield_sweep_summary_path = self.reports_dir / "shield_sweep_summary.json"
+        self.shield_trace_dir = self.reports_dir / str(self.config.shield_trace.trace_dir_name)
+        self.shield_trace_summary_path = self.shield_trace_dir / "trace_summary.json"
 
         if self.manifest_path.exists():
             with self.manifest_path.open("r", encoding="utf-8") as f:
@@ -197,6 +202,7 @@ class SafeRLPipeline:
                 "stage4_buffer_report": str(self.stage4_buffer_report_path),
                 "stage5_paired_episode_results": str(self.stage5_paired_episode_results_path),
                 "shield_sweep_summary_report": str(self.shield_sweep_summary_path),
+                "shield_trace_summary_report": str(self.shield_trace_summary_path),
                 "sumo_logs_dir": str(self.sumo_logs_dir),
                 "tensorboard_root": str(self.tensorboard_root),
             }
@@ -749,7 +755,8 @@ class SafeRLPipeline:
         from safe_rl.rl.env import create_env
 
         evaluator = SafeRLEvaluator(stage_config.eval)
-        eval_seeds = self._resolve_eval_seeds(stage_config.eval.eval_episodes, eval_config=stage_config.eval)
+        trace_enabled = self._shield_trace_enabled(stage_config)
+        eval_seeds = self._resolve_stage5_eval_seeds(stage_config)
 
         baseline_backend = create_backend(stage_config.sim)
         baseline_backend.start()
@@ -760,7 +767,8 @@ class SafeRLPipeline:
             shield=None,
             episode_prefix="stage5_eval_baseline",
         )
-        baseline_metrics = evaluator.evaluate_policy(
+        baseline_metrics = self._evaluate_policy_with_trace_option(
+            evaluator=evaluator,
             env=baseline_env,
             policy=shielded_policy,
             episodes=stage_config.eval.eval_episodes,
@@ -768,6 +776,7 @@ class SafeRLPipeline:
             tb_writer=tb_writer,
             tb_prefix="baseline",
             seeds=eval_seeds,
+            collect_step_traces=trace_enabled,
         )
         baseline_env.close()
 
@@ -780,7 +789,8 @@ class SafeRLPipeline:
             shield=shield,
             episode_prefix="stage5_eval_shielded",
         )
-        shielded_metrics = evaluator.evaluate_policy(
+        shielded_metrics = self._evaluate_policy_with_trace_option(
+            evaluator=evaluator,
             env=shield_env,
             policy=shielded_policy,
             episodes=stage_config.eval.eval_episodes,
@@ -788,6 +798,7 @@ class SafeRLPipeline:
             tb_writer=tb_writer,
             tb_prefix="shielded",
             seeds=eval_seeds,
+            collect_step_traces=trace_enabled,
         )
         shield_env.close()
 
@@ -804,6 +815,12 @@ class SafeRLPipeline:
         )
         target_paired_results_path = paired_results_path or self.stage5_paired_episode_results_path
         self._write_json(target_paired_results_path, {"pairs": paired_episode_results})
+
+        trace_payload = self._write_shield_trace_outputs(
+            stage_config=stage_config,
+            baseline_details=baseline_metrics.get("episode_details", []),
+            shielded_details=shielded_metrics.get("episode_details", []),
+        ) if trace_enabled else None
 
         result = {
             "comparison_mode": "same_policy_shield_off_vs_on",
@@ -822,6 +839,9 @@ class SafeRLPipeline:
             "shield_contribution_validated": self._compute_attribution_passed(shielded_metrics),
             "stage5_paired_episode_results_path": str(target_paired_results_path),
         }
+        if trace_payload is not None:
+            result["shield_trace_summary_path"] = str(trace_payload["trace_summary_path"])
+            result["shield_trace"] = trace_payload["summary"]
 
         if tb_writer is not None:
             tb_writer.add_scalar("summary/collision_reduction", float(delta.get("collision_reduction", 0.0)), 0)
@@ -842,7 +862,8 @@ class SafeRLPipeline:
                 shield=shield,
                 episode_prefix="stage5_eval_distilled",
             )
-            distilled_metrics = evaluator.evaluate_policy(
+            distilled_metrics = self._evaluate_policy_with_trace_option(
+                evaluator=evaluator,
                 env=distill_env,
                 policy=distilled_policy,
                 episodes=stage_config.eval.eval_episodes,
@@ -850,6 +871,7 @@ class SafeRLPipeline:
                 tb_writer=tb_writer,
                 tb_prefix="distilled",
                 seeds=eval_seeds,
+                collect_step_traces=False,
             )
             distill_env.close()
             result["system_distilled"] = distilled_metrics
@@ -1256,6 +1278,200 @@ class SafeRLPipeline:
         target_path.parent.mkdir(parents=True, exist_ok=True)
         with target_path.open("w", encoding="utf-8") as f:
             json.dump(report, f, indent=2, ensure_ascii=False, default=str)
+
+
+    def _evaluate_policy_with_trace_option(
+        self,
+        evaluator,
+        env,
+        policy,
+        episodes: int,
+        risky_mode: bool,
+        tb_writer,
+        tb_prefix: str,
+        seeds: Sequence[int],
+        collect_step_traces: bool,
+    ) -> Dict[str, Any]:
+        kwargs = {
+            "env": env,
+            "policy": policy,
+            "episodes": episodes,
+            "risky_mode": risky_mode,
+            "tb_writer": tb_writer,
+            "tb_prefix": tb_prefix,
+            "seeds": seeds,
+        }
+        try:
+            signature = inspect.signature(evaluator.evaluate_policy)
+        except (TypeError, ValueError):
+            signature = None
+        if signature is None or "collect_step_traces" in signature.parameters:
+            kwargs["collect_step_traces"] = collect_step_traces
+        return evaluator.evaluate_policy(**kwargs)
+
+    def _shield_trace_enabled(self, stage_config: Optional[SafeRLConfig] = None) -> bool:
+        cfg = stage_config or self.config
+        return bool(getattr(cfg.shield_trace, "enabled", False))
+
+    def _resolve_stage5_eval_seeds(self, stage_config: SafeRLConfig) -> List[int]:
+        if self._shield_trace_enabled(stage_config) and getattr(stage_config.shield_trace, "seed_list", []):
+            configured = [int(seed) for seed in stage_config.shield_trace.seed_list]
+            return [configured[i % len(configured)] for i in range(max(0, stage_config.eval.eval_episodes))]
+        return self._resolve_eval_seeds(stage_config.eval.eval_episodes, eval_config=stage_config.eval)
+
+    def _write_shield_trace_outputs(
+        self,
+        stage_config: SafeRLConfig,
+        baseline_details: Sequence[Dict[str, Any]],
+        shielded_details: Sequence[Dict[str, Any]],
+    ) -> Dict[str, Any]:
+        trace_dir = self.shield_trace_dir or (self.reports_dir / str(stage_config.shield_trace.trace_dir_name))
+        trace_dir.mkdir(parents=True, exist_ok=True)
+        pair_count = min(len(baseline_details), len(shielded_details))
+        summary = {
+            "variant_name": "C",
+            "run_id": str(self.run_id or ""),
+            "seeds": [],
+            "regression_pair_count": 0,
+            "pairs_with_lane_change_replacement": 0,
+            "pairs_with_merge_guard_triggered": 0,
+            "pairs_with_fallback": 0,
+            "pairs_with_collision_after_replacement": 0,
+            "pair_files": [],
+        }
+
+        save_pair_traces = bool(getattr(stage_config.shield_trace, "save_pair_traces", True))
+        for pair_index in range(pair_count):
+            baseline = dict(baseline_details[pair_index])
+            shielded = dict(shielded_details[pair_index])
+            pair_payload = self._build_trace_pair_payload(
+                pair_index=pair_index,
+                baseline=baseline,
+                shielded=shielded,
+                scenario_source=str(stage_config.sim.sumo_cfg),
+                risky_mode=True,
+            )
+            seed_value = pair_payload["seed"]
+            pair_path = trace_dir / f"pair_{pair_index:02d}_seed_{seed_value}.json"
+            if save_pair_traces:
+                self._write_json(pair_path, pair_payload)
+                summary["pair_files"].append(str(pair_path))
+            summary["seeds"].append(seed_value)
+            if pair_payload["regression_pair"]:
+                summary["regression_pair_count"] += 1
+            if pair_payload["has_lane_change_replacement"]:
+                summary["pairs_with_lane_change_replacement"] += 1
+            if pair_payload["merge_guard_triggered"]:
+                summary["pairs_with_merge_guard_triggered"] += 1
+            if pair_payload["has_fallback"]:
+                summary["pairs_with_fallback"] += 1
+            if pair_payload["collision_after_replacement"]:
+                summary["pairs_with_collision_after_replacement"] += 1
+
+        self._write_json(self.shield_trace_summary_path, summary)
+        self.manifest.setdefault("artifact_paths", {})["shield_trace_summary_report"] = str(self.shield_trace_summary_path)
+        return {"trace_summary_path": self.shield_trace_summary_path, "summary": summary}
+
+    def _build_trace_pair_payload(
+        self,
+        pair_index: int,
+        baseline: Dict[str, Any],
+        shielded: Dict[str, Any],
+        scenario_source: str,
+        risky_mode: bool,
+    ) -> Dict[str, Any]:
+        baseline_steps = [self._normalize_trace_step(item) for item in list(baseline.get("step_trace", []) or [])]
+        shielded_steps = [self._normalize_trace_step(item) for item in list(shielded.get("step_trace", []) or [])]
+        aligned_steps = self._align_trace_steps(baseline_steps, shielded_steps)
+        first_replacement_step = self._first_matching_step(shielded_steps, lambda item: bool(item.get("replacement_happened", False)))
+        collision_step_baseline = self._first_matching_step(baseline_steps, lambda item: bool(item.get("collision", False)))
+        collision_step_shielded = self._first_matching_step(shielded_steps, lambda item: bool(item.get("collision", False)))
+        has_lane_change_replacement = any(bool(item.get("replacement_happened", False) and item.get("lane_change_involved", False)) for item in shielded_steps)
+        merge_guard_triggered = any(str(item.get("constraint_reason", "")) == "merge_lateral_guard" for item in shielded_steps)
+        has_fallback = any(bool(item.get("fallback_used", False)) for item in shielded_steps)
+        collision_after_replacement = collision_step_shielded >= 0 and any(
+            int(item.get("step_index", -1)) <= collision_step_shielded and bool(item.get("replacement_happened", False))
+            for item in shielded_steps
+        )
+        regression_pair = bool(not bool(int(baseline.get("collisions", 0)) > 0) and bool(int(shielded.get("collisions", 0)) > 0))
+
+        return {
+            "pair_index": int(pair_index),
+            "seed": int(shielded.get("seed", baseline.get("seed", -1))),
+            "risky_mode": bool(shielded.get("risky_mode", baseline.get("risky_mode", risky_mode))),
+            "scenario_source": str(shielded.get("scenario_source", baseline.get("scenario_source", scenario_source))),
+            "baseline_episode_id": str(baseline.get("episode_id", "")),
+            "shielded_episode_id": str(shielded.get("episode_id", "")),
+            "baseline_collision": bool(int(baseline.get("collisions", 0)) > 0),
+            "shielded_collision": bool(int(shielded.get("collisions", 0)) > 0),
+            "baseline_reward": float(baseline.get("mean_reward", 0.0)),
+            "shielded_reward": float(shielded.get("mean_reward", 0.0)),
+            "baseline_raw_risk": float(baseline.get("mean_raw_risk", 0.0)),
+            "shielded_raw_risk": float(shielded.get("mean_raw_risk", 0.0)),
+            "shielded_final_risk": float(shielded.get("mean_final_risk", 0.0)),
+            "intervention_count": int(shielded.get("interventions", 0)),
+            "replacement_count": int(shielded.get("replacement_count", 0)),
+            "replacement_same_as_raw_count": int(shielded.get("replacement_same_as_raw_count", 0)),
+            "fallback_action_count": int(shielded.get("fallback_action_count", 0)),
+            "mean_risk_reduction": float(shielded.get("mean_risk_reduction", 0.0)),
+            "first_replacement_step": int(first_replacement_step),
+            "collision_step_baseline": int(collision_step_baseline),
+            "collision_step_shielded": int(collision_step_shielded),
+            "regression_pair": regression_pair,
+            "has_lane_change_replacement": bool(has_lane_change_replacement),
+            "merge_guard_triggered": bool(merge_guard_triggered),
+            "has_fallback": bool(has_fallback),
+            "collision_after_replacement": bool(collision_after_replacement),
+            "baseline_steps": baseline_steps,
+            "shielded_steps": shielded_steps,
+            "aligned_steps": aligned_steps,
+        }
+
+    def _normalize_trace_step(self, step: Dict[str, Any]) -> Dict[str, Any]:
+        normalized = dict(step)
+        normalized.setdefault("step_index", 0)
+        normalized.setdefault("raw_action", -1)
+        normalized.setdefault("final_action", -1)
+        normalized.setdefault("executed_action", normalized.get("final_action", -1))
+        normalized.setdefault("replacement_happened", False)
+        normalized.setdefault("fallback_used", False)
+        normalized.setdefault("chosen_candidate_index", -1)
+        normalized.setdefault("chosen_candidate_rank_by_risk", -1)
+        normalized.setdefault("raw_risk", 0.0)
+        normalized.setdefault("final_risk", normalized.get("raw_risk", 0.0))
+        normalized.setdefault("risk_reduction", float(normalized.get("raw_risk", 0.0)) - float(normalized.get("final_risk", 0.0)))
+        normalized.setdefault("candidate_evaluations", [])
+        normalized.setdefault("raw_action_type", "")
+        normalized.setdefault("final_action_type", "")
+        normalized.setdefault("lane_change_involved", False)
+        normalized.setdefault("ego_lane_id", "")
+        normalized.setdefault("ego_lane_index", 0)
+        normalized.setdefault("ego_speed", 0.0)
+        normalized.setdefault("ttc", 0.0)
+        normalized.setdefault("min_distance", 0.0)
+        normalized.setdefault("collision", False)
+        normalized.setdefault("constraint_reason", "")
+        normalized.setdefault("replacement_margin", 0.0)
+        return normalized
+
+    def _align_trace_steps(self, baseline_steps: Sequence[Dict[str, Any]], shielded_steps: Sequence[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        aligned: List[Dict[str, Any]] = []
+        max_steps = max(len(baseline_steps), len(shielded_steps))
+        for idx in range(max_steps):
+            aligned.append(
+                {
+                    "step_index": idx,
+                    "baseline": baseline_steps[idx] if idx < len(baseline_steps) else None,
+                    "shielded": shielded_steps[idx] if idx < len(shielded_steps) else None,
+                }
+            )
+        return aligned
+
+    def _first_matching_step(self, steps: Sequence[Dict[str, Any]], predicate) -> int:
+        for item in steps:
+            if predicate(item):
+                return int(item.get("step_index", -1))
+        return -1
 
 
 def run_safe_rl_pipeline(config_path: Optional[str] = None, stage: str = "all", run_id: Optional[str] = None) -> Dict:
