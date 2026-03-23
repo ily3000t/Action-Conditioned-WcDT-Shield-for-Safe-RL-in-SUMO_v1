@@ -1,0 +1,28 @@
+shield:
+  candidate_count: 7
+  coarse_top_k: 5
+  tail_quantile: 0.9
+  risk_threshold: 0.30
+  uncertainty_threshold: 0.45
+  uncertainty_weight: 0.2
+  fallback_action: "DECEL_KEEP"
+  replacement_min_risk_margin: 0.10
+  raw_passthrough_risk_threshold: 0.24
+  protect_merge_lateral_decisions: true
+  merge_override_margin: 0.12
+
+shield_trace:
+  enabled: true
+  seed_list: [42, 123, 2024]
+  save_pair_traces: true
+  trace_dir_name: "shield_trace_d1"
+
+eval:
+  eval_episodes: 3
+  seed_list: [42, 123, 2024]
+
+tensorboard:
+  enabled: true
+  root_dir: "safe_rl_output/tensorboard"
+  run_name: "shield_trace_d1"
+  flush_secs: 10

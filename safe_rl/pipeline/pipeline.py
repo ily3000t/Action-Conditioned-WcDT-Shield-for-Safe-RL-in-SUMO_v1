@@ -1409,7 +1409,7 @@ class SafeRLPipeline:
         if not variants:
             return None
 
-        order = {"C_baseline": 0, "C1": 1, "C2": 2, "C_strong": 3}
+        order = {"C_baseline": 0, "C1": 1, "C2": 2, "D1": 3, "E1": 4, "E2": 5, "E3": 6, "D2": 7, "D3": 8, "C_strong": 9}
         variants.sort(key=lambda item: (order.get(str(item.get("variant_name", "")), 99), str(item.get("variant_name", ""))))
 
         summary = {
@@ -1484,6 +1484,18 @@ class SafeRLPipeline:
             return "C1"
         if normalized == "shield_trace_c2":
             return "C2"
+        if normalized == "shield_trace_d1":
+            return "D1"
+        if normalized == "shield_trace_e1":
+            return "E1"
+        if normalized == "shield_trace_e2":
+            return "E2"
+        if normalized == "shield_trace_e3":
+            return "E3"
+        if normalized == "shield_trace_d2":
+            return "D2"
+        if normalized == "shield_trace_d3":
+            return "D3"
         if normalized == "shield_trace_c_strong":
             return "C_strong"
         return str(trace_dir_name or "trace")

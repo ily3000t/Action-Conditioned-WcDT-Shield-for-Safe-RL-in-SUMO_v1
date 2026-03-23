@@ -884,3 +884,94 @@ def test_shield_trace_tuning_summary_supports_c_strong_variant():
     assert by_name["C_strong"]["merge_lateral_guard_block_count"] == 4
     assert by_name["C_strong"]["candidate_selected_count"] == 30
 
+
+
+def test_shield_trace_tuning_summary_supports_d_variants_in_order():
+    config = _tiny_config()
+    config.shield_trace.enabled = True
+    config.shield_trace.trace_dir_name = "shield_trace_d2"
+
+    pipeline = SafeRLPipeline(config)
+    run_id = f"ut_trace_d_order_{uuid.uuid4().hex[:8]}"
+    pipeline._prepare_run_context(stage="stage5", run_id=run_id)
+
+    assert pipeline.reports_dir is not None
+    variants = [
+        ("shield_trace", "C_baseline"),
+        ("shield_trace_c1", "C1"),
+        ("shield_trace_c2", "C2"),
+        ("shield_trace_d1", "D1"),
+        ("shield_trace_e1", "E1"),
+        ("shield_trace_e2", "E2"),
+        ("shield_trace_e3", "E3"),
+        ("shield_trace_d2", "D2"),
+        ("shield_trace_d3", "D3"),
+        ("shield_trace_c_strong", "C_strong"),
+    ]
+
+    for trace_dir_name, variant_name in variants:
+        trace_dir = pipeline.reports_dir / trace_dir_name
+        trace_dir.mkdir(parents=True, exist_ok=True)
+        pair_path = trace_dir / "pair_00_seed_42.json"
+        pipeline._write_json(
+            pair_path,
+            {
+                "seed": 42,
+                "baseline_collision": False,
+                "shielded_collision": False,
+                "intervention_count": 10,
+                "replacement_count": 10,
+                "fallback_action_count": 0,
+                "mean_risk_reduction": 0.01,
+                "baseline_reward": 0.2,
+                "shielded_reward": 0.19,
+                "blocked_by_margin_count": 1,
+                "raw_passthrough_count": 2,
+                "merge_lateral_guard_block_count": 3,
+                "candidate_selected_count": 4,
+            },
+        )
+        pipeline._write_json(
+            trace_dir / "trace_summary.json",
+            {
+                "variant_name": variant_name,
+                "seeds": [42],
+                "effective_shield_config": {
+                    "risk_threshold": 0.30,
+                    "uncertainty_threshold": 0.45,
+                    "replacement_min_risk_margin": 0.11,
+                    "raw_passthrough_risk_threshold": 0.25,
+                    "effective_raw_passthrough_threshold": 0.25,
+                    "merge_override_margin": 0.12,
+                },
+                "regression_pair_count": 0,
+                "blocked_by_margin_count": 1,
+                "raw_passthrough_count": 2,
+                "merge_lateral_guard_block_count": 3,
+                "candidate_selected_count": 4,
+                "pair_files": [str(pair_path)],
+            },
+        )
+
+    payload = pipeline._write_shield_trace_tuning_summary()
+    assert payload is not None
+    summary = json.loads(Path(payload["summary_path"]).read_text(encoding="utf-8"))
+    assert [entry["variant_name"] for entry in summary["variants"]] == [
+        "C_baseline",
+        "C1",
+        "C2",
+        "D1",
+        "E1",
+        "E2",
+        "E3",
+        "D2",
+        "D3",
+        "C_strong",
+    ]
+    by_name = {entry["variant_name"]: entry for entry in summary["variants"]}
+    assert by_name["D1"]["effective_shield_config"]["replacement_min_risk_margin"] == pytest.approx(0.11)
+    assert by_name["E1"]["raw_passthrough_count"] == 2
+    assert by_name["E2"]["candidate_selected_count"] == 4
+    assert by_name["E3"]["merge_lateral_guard_block_count"] == 3
+    assert by_name["D2"]["raw_passthrough_count"] == 2
+    assert by_name["D3"]["candidate_selected_count"] == 4

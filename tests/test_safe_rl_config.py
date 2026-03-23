@@ -110,3 +110,51 @@ def test_shield_trace_c_strong_config_loads():
     assert config.shield_trace.trace_dir_name == "shield_trace_c_strong"
     assert config.eval.seed_list == [42, 123, 2024]
 
+
+def test_shield_trace_d1_config_loads():
+    config = load_safe_rl_config("safe_rl/config/shield_trace_d1.yaml")
+    assert config.shield.replacement_min_risk_margin == 0.10
+    assert config.shield.raw_passthrough_risk_threshold == 0.24
+    assert config.shield_trace.trace_dir_name == "shield_trace_d1"
+    assert config.eval.seed_list == [42, 123, 2024]
+
+
+def test_shield_trace_d2_config_loads():
+    config = load_safe_rl_config("safe_rl/config/shield_trace_d2.yaml")
+    assert config.shield.replacement_min_risk_margin == 0.12
+    assert config.shield.raw_passthrough_risk_threshold == 0.26
+    assert config.shield_trace.trace_dir_name == "shield_trace_d2"
+    assert config.eval.seed_list == [42, 123, 2024]
+
+
+def test_shield_trace_d3_config_loads():
+    config = load_safe_rl_config("safe_rl/config/shield_trace_d3.yaml")
+    assert config.shield.replacement_min_risk_margin == 0.13
+    assert config.shield.raw_passthrough_risk_threshold == 0.28
+    assert config.shield_trace.trace_dir_name == "shield_trace_d3"
+    assert config.eval.seed_list == [42, 123, 2024]
+
+
+
+def test_shield_trace_e1_config_loads():
+    config = load_safe_rl_config("safe_rl/config/shield_trace_e1.yaml")
+    assert config.shield.replacement_min_risk_margin == 0.11
+    assert config.shield.raw_passthrough_risk_threshold == 0.24
+    assert config.shield_trace.trace_dir_name == "shield_trace_e1"
+    assert config.eval.seed_list == [42, 123, 2024]
+
+
+def test_shield_trace_e2_config_loads():
+    config = load_safe_rl_config("safe_rl/config/shield_trace_e2.yaml")
+    assert config.shield.replacement_min_risk_margin == 0.10
+    assert config.shield.raw_passthrough_risk_threshold == 0.25
+    assert config.shield_trace.trace_dir_name == "shield_trace_e2"
+    assert config.eval.seed_list == [42, 123, 2024]
+
+
+def test_shield_trace_e3_config_loads():
+    config = load_safe_rl_config("safe_rl/config/shield_trace_e3.yaml")
+    assert config.shield.replacement_min_risk_margin == 0.11
+    assert config.shield.raw_passthrough_risk_threshold == 0.25
+    assert config.shield_trace.trace_dir_name == "shield_trace_e3"
+    assert config.eval.seed_list == [42, 123, 2024]
