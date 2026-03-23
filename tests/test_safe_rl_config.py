@@ -182,3 +182,13 @@ def test_shield_trace_f3_config_loads():
     assert config.shield.raw_passthrough_risk_threshold == 0.24
     assert config.shield_trace.trace_dir_name == "shield_trace_f3"
     assert config.eval.seed_list == [42, 123, 2024]
+
+def test_risk_model_v2_defaults_enabled():
+    config = load_safe_rl_config()
+    assert config.light_risk.enable_v2 is True
+    assert config.light_risk.pair_finetune is True
+    assert config.light_risk.ranking_loss_weight == 1.0
+    assert config.world_model.enable_v2 is True
+    assert config.world_model.pair_finetune is True
+    assert config.world_model.stage5_pair_weight == 1.0
+    assert config.world_model.stage4_pair_weight == 0.5

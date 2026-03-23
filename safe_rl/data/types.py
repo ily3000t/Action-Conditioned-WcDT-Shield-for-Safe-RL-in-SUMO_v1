@@ -1,4 +1,4 @@
-from dataclasses import asdict, dataclass, field
+﻿from dataclasses import asdict, dataclass, field
 from typing import Any, Dict, List, Optional
 
 
@@ -54,12 +54,28 @@ class ActionConditionedSample:
 
 
 @dataclass
+class RiskPairSample:
+    history_scene: List[SceneState]
+    action_a: int
+    action_b: int
+    preferred_action: int
+    source: str
+    weight: float = 1.0
+    meta: Dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass
 class RiskPrediction:
     p_collision: float
     p_ttc: float
     p_lane_violation: float
     p_overall: float
     uncertainty: float
+    risk_score: Optional[float] = None
+
+    def __post_init__(self):
+        if self.risk_score is None:
+            self.risk_score = float(self.p_overall)
 
 
 @dataclass
@@ -134,6 +150,51 @@ class EpisodeSummary:
     shield_candidate_evaluated_steps: int = 0
     shield_blocked_steps: int = 0
     shield_replaced_steps: int = 0
+
+
+def vehicle_state_from_dict(value: Dict[str, Any]) -> VehicleState:
+    payload = dict(value or {})
+    return VehicleState(
+        vehicle_id=str(payload.get("vehicle_id", "")),
+        x=float(payload.get("x", 0.0)),
+        y=float(payload.get("y", 0.0)),
+        vx=float(payload.get("vx", 0.0)),
+        vy=float(payload.get("vy", 0.0)),
+        ax=float(payload.get("ax", 0.0)),
+        ay=float(payload.get("ay", 0.0)),
+        heading=float(payload.get("heading", 0.0)),
+        lane_id=int(payload.get("lane_id", 0)),
+        length=float(payload.get("length", 4.8)),
+        width=float(payload.get("width", 2.0)),
+    )
+
+
+def traffic_light_state_from_dict(value: Dict[str, Any]) -> TrafficLightState:
+    payload = dict(value or {})
+    return TrafficLightState(
+        light_id=str(payload.get("light_id", "")),
+        x=float(payload.get("x", 0.0)),
+        y=float(payload.get("y", 0.0)),
+        state=str(payload.get("state", "")),
+    )
+
+
+def scene_state_from_dict(value: Dict[str, Any]) -> SceneState:
+    payload = dict(value or {})
+    vehicles = [vehicle_state_from_dict(item) for item in list(payload.get("vehicles", []) or [])]
+    traffic_lights = [traffic_light_state_from_dict(item) for item in list(payload.get("traffic_lights", []) or [])]
+    lane_polylines = [list(polyline) for polyline in list(payload.get("lane_polylines", []) or [])]
+    return SceneState(
+        timestamp=float(payload.get("timestamp", 0.0)),
+        ego_id=str(payload.get("ego_id", "")),
+        vehicles=vehicles,
+        traffic_lights=traffic_lights,
+        lane_polylines=lane_polylines,
+    )
+
+
+def scene_state_list_from_dicts(values: List[Dict[str, Any]]) -> List[SceneState]:
+    return [scene_state_from_dict(value) for value in list(values or [])]
 
 
 def dataclass_to_dict(value: Any) -> Any:

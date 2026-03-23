@@ -4,7 +4,7 @@ import numpy as np
 
 from safe_rl.config.config import EvalConfig
 from safe_rl.data.risk import get_ego_vehicle
-from safe_rl.data.types import ActionConditionedSample
+from safe_rl.data.types import ActionConditionedSample, dataclass_to_dict
 from safe_rl.eval.metrics import (
     acceptance_passed,
     aggregate_episode_summaries,
@@ -79,6 +79,7 @@ class SafeRLEvaluator:
                 seed = int(seeds[i])
             obs, reset_info = env.reset(seed=seed, options={"risky_mode": risky_mode})
             step_infos = []
+            step_history_scenes = []
             rewards = []
             done = False
             while not done:
@@ -86,6 +87,10 @@ class SafeRLEvaluator:
                 obs, reward, terminated, truncated, info = env.step(action)
                 normalized_info = self._normalize_risk_info(info, is_baseline=is_baseline)
                 step_infos.append(normalized_info)
+                history_scene = []
+                if hasattr(env, "last_transition") and getattr(env, "last_transition", None) is not None:
+                    history_scene = env.last_transition.get("history_scene", [])
+                step_history_scenes.append(history_scene)
                 rewards.append(float(reward))
                 done = terminated or truncated
 
@@ -100,7 +105,11 @@ class SafeRLEvaluator:
                 "episode_id": episode_id,
             }
             if collect_step_traces:
-                detail["step_trace"] = [self._build_step_trace(step_index, item) for step_index, item in enumerate(step_infos)]
+                step_trace = []
+                for step_index, item in enumerate(step_infos):
+                    history_scene = step_history_scenes[step_index] if step_index < len(step_history_scenes) else None
+                    step_trace.append(self._build_step_trace(step_index, item, history_scene=history_scene))
+                detail["step_trace"] = step_trace
             episode_details.append(detail)
 
             if tb_writer is not None:
@@ -157,7 +166,7 @@ class SafeRLEvaluator:
         return float(max(distance_term, ttc_term))
 
 
-    def _build_step_trace(self, step_index: int, info: Dict[str, Any]) -> Dict[str, Any]:
+    def _build_step_trace(self, step_index: int, info: Dict[str, Any], history_scene=None) -> Dict[str, Any]:
         candidate_evaluations = []
         for item in list(info.get("candidate_evaluations", []) or []):
             candidate_evaluations.append(
@@ -175,8 +184,10 @@ class SafeRLEvaluator:
                 }
             )
 
+        history_scene_payload = dataclass_to_dict(history_scene) if history_scene is not None else []
         return {
             "step_index": int(step_index),
+            "history_scene": history_scene_payload,
             "raw_action": int(info.get("raw_action", -1)),
             "final_action": int(info.get("final_action", -1)),
             "executed_action": int(info.get("executed_action", info.get("final_action", -1))),
@@ -199,4 +210,6 @@ class SafeRLEvaluator:
             "collision": bool(info.get("collision", False)),
             "constraint_reason": str(info.get("constraint_reason", "")),
             "replacement_margin": float(info.get("replacement_margin", 0.0)),
+            "reward": float(info.get("reward", 0.0)),
+            "task_reward": float(info.get("task_reward", 0.0)),
         }

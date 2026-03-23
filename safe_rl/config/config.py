@@ -45,6 +45,13 @@ class DatasetConfig:
 
 @dataclass
 class LightRiskConfig:
+    enable_v2: bool = True
+    pair_finetune: bool = True
+    ranking_loss_weight: float = 1.0
+    spread_loss_weight: float = 0.2
+    stage5_pair_weight: float = 1.0
+    stage4_pair_weight: float = 0.5
+    pair_finetune_epochs: int = 3
     hidden_dim: int = 128
     batch_size: int = 64
     learning_rate: float = 1e-3
@@ -54,6 +61,13 @@ class LightRiskConfig:
 
 @dataclass
 class WorldModelConfig:
+    enable_v2: bool = True
+    pair_finetune: bool = True
+    ranking_loss_weight: float = 1.0
+    spread_loss_weight: float = 0.2
+    stage5_pair_weight: float = 1.0
+    stage4_pair_weight: float = 0.5
+    pair_finetune_epochs: int = 3
     multimodal: int = 6
     future_steps: int = 20
     hidden_dim: int = 256

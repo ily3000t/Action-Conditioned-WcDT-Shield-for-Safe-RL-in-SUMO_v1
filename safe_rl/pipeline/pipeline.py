@@ -1,4 +1,4 @@
-import copy
+﻿import copy
 import inspect
 import math
 import datetime as dt
@@ -13,7 +13,8 @@ from safe_rl.buffer import InterventionBuffer
 from safe_rl.config import SafeRLConfig, load_safe_rl_config
 from safe_rl.data.collector import SumoDataCollector
 from safe_rl.data.dataset_builder import ActionConditionedDatasetBuilder
-from safe_rl.data.types import InterventionRecord
+from safe_rl.data.pair_dataset import save_risk_pairs, summarize_pair_sources
+from safe_rl.data.types import InterventionRecord, RiskPairSample, scene_state_list_from_dicts
 from safe_rl.eval import SafeRLEvaluator
 from safe_rl.pipeline.session_event_logger import IncrementalSessionEventLogger
 from safe_rl.pipeline.telemetry import BufferTelemetryTracker, Stage3TelemetryTracker
@@ -63,6 +64,8 @@ class SafeRLPipeline:
         self.collector_failure_report_path: Optional[Path] = None
         self.warning_summary_report_path: Optional[Path] = None
         self.stage2_training_report_path: Optional[Path] = None
+        self.pairs_stage4_path: Optional[Path] = None
+        self.pairs_stage5_path: Optional[Path] = None
         self.stage3_runtime_config_path: Optional[Path] = None
         self.stage3_session_events_path: Optional[Path] = None
         self.stage4_buffer_report_path: Optional[Path] = None
@@ -165,6 +168,8 @@ class SafeRLPipeline:
         self.collector_failure_report_path = self.reports_dir / "collector_failures.json"
         self.warning_summary_report_path = self.reports_dir / "warning_summary.json"
         self.stage2_training_report_path = self.reports_dir / "stage2_training_report.json"
+        self.pairs_stage4_path = self.datasets_dir / "pairs_stage4.pkl"
+        self.pairs_stage5_path = self.datasets_dir / "pairs_stage5.pkl"
         self.stage3_runtime_config_path = self.reports_dir / "stage3_runtime_config.json"
         self.stage3_session_events_path = self.reports_dir / "stage3_session_events.json"
         self.stage4_buffer_report_path = self.reports_dir / "stage4_buffer_report.json"
@@ -203,6 +208,8 @@ class SafeRLPipeline:
                 "collector_failure_report": str(self.collector_failure_report_path),
                 "warning_summary_report": str(self.warning_summary_report_path),
                 "stage2_training_report": str(self.stage2_training_report_path),
+                "pairs_stage4": str(self.pairs_stage4_path),
+                "pairs_stage5": str(self.pairs_stage5_path),
                 "stage3_runtime_config_report": str(self.stage3_runtime_config_path),
                 "stage3_session_events_report": str(self.stage3_session_events_path),
                 "stage4_buffer_report": str(self.stage4_buffer_report_path),
@@ -291,6 +298,210 @@ class SafeRLPipeline:
         val_samples = ActionConditionedDatasetBuilder.load(str(self.val_pkl))
         test_samples = ActionConditionedDatasetBuilder.load(str(self.test_pkl))
         return train_samples, val_samples, test_samples
+
+    def _build_pair_datasets_for_stage2(self) -> Dict[str, Any]:
+        stage5_pairs, stage5_summary = self._build_stage5_pair_samples()
+        stage4_pairs, stage4_summary = self._build_stage4_pair_samples()
+        if stage5_pairs:
+            save_risk_pairs(str(self.pairs_stage5_path), stage5_pairs)
+        if stage4_pairs:
+            save_risk_pairs(str(self.pairs_stage4_path), stage4_pairs)
+        all_pairs = list(stage5_pairs) + list(stage4_pairs)
+        return {
+            "stage5_pairs": stage5_pairs,
+            "stage4_pairs": stage4_pairs,
+            "pair_source_counts": summarize_pair_sources(all_pairs),
+            "pair_source_weights": {
+                "stage5_trace_first_replacement": float(self.config.light_risk.stage5_pair_weight),
+                "stage4_buffer": float(self.config.light_risk.stage4_pair_weight),
+            },
+            "pair_dataset_paths": {
+                "stage5": str(self.pairs_stage5_path),
+                "stage4": str(self.pairs_stage4_path),
+            },
+            "generation_summary": {
+                "stage5": stage5_summary,
+                "stage4": stage4_summary,
+            },
+        }
+
+    def _build_stage5_pair_samples(self):
+        summary = {
+            "trace_dirs_seen": 0,
+            "pair_files_seen": 0,
+            "pairs_created": 0,
+            "skipped_missing_history": 0,
+            "skipped_no_replacement": 0,
+            "skipped_no_preference": 0,
+        }
+        pair_samples: List[RiskPairSample] = []
+        if self.reports_dir is None:
+            return pair_samples, summary
+
+        trace_dirs = sorted(
+            path for path in self.reports_dir.glob("shield_trace*")
+            if path.is_dir() and self._find_trace_summary_path(path) is not None
+        )
+        summary["trace_dirs_seen"] = len(trace_dirs)
+        for trace_dir in trace_dirs:
+            for pair_path in self._find_trace_pair_paths(trace_dir):
+                summary["pair_files_seen"] += 1
+                payload = self._read_json(pair_path)
+                sample, reason = self._stage5_pair_from_payload(payload)
+                if sample is None:
+                    if reason in summary:
+                        summary[reason] += 1
+                    continue
+                pair_samples.append(sample)
+                summary["pairs_created"] += 1
+        return pair_samples, summary
+
+    def _stage5_pair_from_payload(self, payload: Dict[str, Any]):
+        first_replacement_step = int(payload.get("first_replacement_step", -1))
+        if first_replacement_step < 0:
+            return None, "skipped_no_replacement"
+
+        shielded_steps = list(payload.get("shielded_steps", []) or [])
+        baseline_steps = list(payload.get("baseline_steps", []) or [])
+        if first_replacement_step >= len(shielded_steps):
+            return None, "skipped_no_replacement"
+        selected_step = dict(shielded_steps[first_replacement_step] or {})
+        history_scene_payload = list(selected_step.get("history_scene", []) or [])
+        if not history_scene_payload:
+            return None, "skipped_missing_history"
+
+        preferred_action = self._preferred_action_from_trace_suffix(
+            baseline_steps=baseline_steps[first_replacement_step:],
+            shielded_steps=shielded_steps[first_replacement_step:],
+            raw_action=int(selected_step.get("raw_action", -1)),
+            replaced_action=int(selected_step.get("final_action", -1)),
+        )
+        if preferred_action is None:
+            return None, "skipped_no_preference"
+
+        history_scene = scene_state_list_from_dicts(history_scene_payload)
+        raw_action = int(selected_step.get("raw_action", -1))
+        replaced_action = int(selected_step.get("final_action", -1))
+        baseline_suffix_target = self._trace_suffix_target(baseline_steps[first_replacement_step:])
+        shielded_suffix_target = self._trace_suffix_target(shielded_steps[first_replacement_step:])
+        baseline_collision = any(bool(step.get("collision", False)) for step in baseline_steps[first_replacement_step:])
+        shielded_collision = any(bool(step.get("collision", False)) for step in shielded_steps[first_replacement_step:])
+        reward_gap = float(self._trace_suffix_reward(shielded_steps[first_replacement_step:]) - self._trace_suffix_reward(baseline_steps[first_replacement_step:]))
+        hard_negative = bool((not baseline_collision and shielded_collision) or reward_gap < -0.05)
+        sample = RiskPairSample(
+            history_scene=history_scene,
+            action_a=raw_action,
+            action_b=replaced_action,
+            preferred_action=int(preferred_action),
+            source="stage5_trace_first_replacement",
+            weight=float(self.config.light_risk.stage5_pair_weight) * (2.0 if hard_negative else 1.0),
+            meta={
+                "pair_index": int(payload.get("pair_index", -1)),
+                "seed": int(payload.get("seed", -1)),
+                "first_replacement_step": int(first_replacement_step),
+                "target_risk_a": float(baseline_suffix_target),
+                "target_risk_b": float(shielded_suffix_target),
+                "hard_negative": hard_negative,
+                "baseline_collision": bool(baseline_collision),
+                "shielded_collision": bool(shielded_collision),
+                "reward_gap": reward_gap,
+                "source_path": str(payload.get("pair_path", "")),
+            },
+        )
+        return sample, ""
+
+    def _build_stage4_pair_samples(self):
+        summary = {
+            "records_seen": 0,
+            "pairs_created": 0,
+            "skipped_same_action": 0,
+            "skipped_equal_risk": 0,
+        }
+        pair_samples: List[RiskPairSample] = []
+        if self.buffer_path is None or not self.buffer_path.exists():
+            return pair_samples, summary
+
+        buffer = InterventionBuffer(capacity=max(10000, self.config.distill.trigger_buffer_size * 4))
+        buffer.load(str(self.buffer_path))
+        for record in buffer.all_records():
+            summary["records_seen"] += 1
+            if int(record.raw_action) == int(record.final_action):
+                summary["skipped_same_action"] += 1
+                continue
+            if abs(float(record.raw_risk) - float(record.final_risk)) <= 1e-8:
+                summary["skipped_equal_risk"] += 1
+                continue
+            preferred_action = int(record.final_action if float(record.final_risk) < float(record.raw_risk) else record.raw_action)
+            sample = RiskPairSample(
+                history_scene=list(record.history_scene),
+                action_a=int(record.raw_action),
+                action_b=int(record.final_action),
+                preferred_action=preferred_action,
+                source="stage4_buffer",
+                weight=float(self.config.light_risk.stage4_pair_weight),
+                meta={
+                    "target_risk_a": float(record.raw_risk),
+                    "target_risk_b": float(record.final_risk),
+                    "reason": str(record.reason),
+                    "episode_id": str(dict(record.meta or {}).get("episode_id", "")),
+                    "hard_negative": False,
+                },
+            )
+            pair_samples.append(sample)
+            summary["pairs_created"] += 1
+        return pair_samples, summary
+
+    def _preferred_action_from_trace_suffix(
+        self,
+        baseline_steps: Sequence[Dict[str, Any]],
+        shielded_steps: Sequence[Dict[str, Any]],
+        raw_action: int,
+        replaced_action: int,
+    ) -> Optional[int]:
+        baseline_collision = any(bool(step.get("collision", False)) for step in baseline_steps)
+        shielded_collision = any(bool(step.get("collision", False)) for step in shielded_steps)
+        if baseline_collision != shielded_collision:
+            return int(raw_action if not baseline_collision else replaced_action)
+
+        baseline_min_ttc = self._trace_suffix_min_metric(baseline_steps, "ttc", fallback=1e6, prefer_lower=False)
+        shielded_min_ttc = self._trace_suffix_min_metric(shielded_steps, "ttc", fallback=1e6, prefer_lower=False)
+        if abs(baseline_min_ttc - shielded_min_ttc) > 1e-6:
+            return int(raw_action if baseline_min_ttc > shielded_min_ttc else replaced_action)
+
+        baseline_min_distance = self._trace_suffix_min_metric(baseline_steps, "min_distance", fallback=1e6, prefer_lower=False)
+        shielded_min_distance = self._trace_suffix_min_metric(shielded_steps, "min_distance", fallback=1e6, prefer_lower=False)
+        if abs(baseline_min_distance - shielded_min_distance) > 1e-6:
+            return int(raw_action if baseline_min_distance > shielded_min_distance else replaced_action)
+
+        baseline_reward = self._trace_suffix_reward(baseline_steps)
+        shielded_reward = self._trace_suffix_reward(shielded_steps)
+        if abs(baseline_reward - shielded_reward) > 1e-6:
+            return int(raw_action if baseline_reward > shielded_reward else replaced_action)
+        return None
+
+    def _trace_suffix_target(self, steps: Sequence[Dict[str, Any]]) -> float:
+        if not steps:
+            return 0.0
+        min_distance = self._trace_suffix_min_metric(steps, "min_distance", fallback=30.0, prefer_lower=True)
+        min_ttc = self._trace_suffix_min_metric(steps, "ttc", fallback=8.0, prefer_lower=True)
+        collision = any(bool(step.get("collision", False)) for step in steps)
+        if collision:
+            return 1.0
+        distance_term = 1.0 if min_distance < 3.0 else max(0.0, 1.0 - min_distance / 30.0)
+        ttc_term = 1.0 if min_ttc < 1.5 else max(0.0, 1.0 - min_ttc / 8.0)
+        return float(max(distance_term, ttc_term))
+
+    def _trace_suffix_reward(self, steps: Sequence[Dict[str, Any]]) -> float:
+        if not steps:
+            return 0.0
+        values = [float(step.get("reward", 0.0)) for step in steps]
+        return float(sum(values) / max(1, len(values)))
+
+    def _trace_suffix_min_metric(self, steps: Sequence[Dict[str, Any]], key: str, fallback: float, prefer_lower: bool) -> float:
+        values = [float(step.get(key, fallback)) for step in steps if step.get(key) is not None]
+        if not values:
+            return float(fallback)
+        return float(min(values) if prefer_lower else max(values))
 
     def _build_predictors_from_saved_models(self):
         self._require_files("model_load", [self.light_model_path, self.world_model_path])
@@ -430,26 +641,43 @@ class SafeRLPipeline:
     def _run_stage2(self, tb_manager: TensorboardManager) -> Dict:
         print("[Pipeline] stage2: train light risk and world model", flush=True)
         self._require_files("stage2", [self.train_pkl, self.val_pkl, self.test_pkl])
-        train_samples, val_samples, _ = self._load_dataset_splits()
+        train_samples, val_samples, test_samples = self._load_dataset_splits()
+        pair_payload = self._build_pair_datasets_for_stage2()
 
-        light_predictor, world_predictor = self.train_models(
+        light_predictor, world_predictor, training_meta = self.train_models(
             train_samples,
             val_samples,
             model_dir=self.models_dir,
             tb_light_writer=tb_manager.get_writer("light_risk"),
             tb_world_writer=tb_manager.get_writer("world_model"),
+            stage5_pair_samples=pair_payload["stage5_pairs"],
+            stage4_pair_samples=pair_payload["stage4_pairs"],
         )
 
+        evaluator = SafeRLEvaluator(self.config.eval)
+        world_eval_metrics = evaluator.evaluate_world_model(world_predictor, test_samples)
         stage2_report = {
             "stage": "stage2",
             "run_id": self.run_id,
             "created_at": dt.datetime.now().isoformat(timespec="seconds"),
             "train_samples": len(train_samples),
             "val_samples": len(val_samples),
+            "test_samples": len(test_samples),
             "light_model": str(self.light_model_path),
             "world_model": str(self.world_model_path),
             "light_device": str(light_predictor.device),
             "world_device": str(world_predictor.device),
+            "light_model_variant": "v2",
+            "world_model_variant": "v2",
+            "pair_finetune_applied": bool(training_meta.get("pair_finetune_applied", False)),
+            "pair_source_counts": dict(pair_payload.get("pair_source_counts", {})),
+            "pair_source_weights": dict(pair_payload.get("pair_source_weights", {})),
+            "pair_dataset_paths": dict(pair_payload.get("pair_dataset_paths", {})),
+            "ranking_metrics": dict(training_meta.get("ranking_metrics", {})),
+            "world_eval_metrics": world_eval_metrics,
+            "pair_generation": dict(pair_payload.get("generation_summary", {})),
+            "light_training": dict(training_meta.get("light_training", {})),
+            "world_training": dict(training_meta.get("world_training", {})),
         }
         self._write_json(self.stage2_training_report_path, stage2_report)
 
@@ -458,6 +686,8 @@ class SafeRLPipeline:
             "world_model": str(self.world_model_path),
             "train_samples": len(train_samples),
             "val_samples": len(val_samples),
+            "test_samples": len(test_samples),
+            "pair_finetune_applied": bool(training_meta.get("pair_finetune_applied", False)),
             "training_report": str(self.stage2_training_report_path),
         }
 
@@ -582,7 +812,16 @@ class SafeRLPipeline:
         self._save_report(evaluation)
         return evaluation
 
-    def train_models(self, train_samples, val_samples, model_dir: Path, tb_light_writer=None, tb_world_writer=None):
+    def train_models(
+        self,
+        train_samples,
+        val_samples,
+        model_dir: Path,
+        tb_light_writer=None,
+        tb_world_writer=None,
+        stage5_pair_samples: Optional[Sequence[RiskPairSample]] = None,
+        stage4_pair_samples: Optional[Sequence[RiskPairSample]] = None,
+    ):
         try:
             from safe_rl.models.light_risk_model import LightRiskTrainer
             from safe_rl.models.world_model import WorldModelTrainer
@@ -593,9 +832,13 @@ class SafeRLPipeline:
             ) from exc
 
         model_dir.mkdir(parents=True, exist_ok=True)
+        stage5_pair_samples = list(stage5_pair_samples or [])
+        stage4_pair_samples = list(stage4_pair_samples or [])
+        all_pair_samples = stage5_pair_samples + stage4_pair_samples
 
         light_trainer = LightRiskTrainer(self.config.light_risk, seed=self.config.sim.random_seed)
         light_predictor = light_trainer.fit(train_samples, val_samples, tb_writer=tb_light_writer)
+        light_pair_metrics = light_trainer.fine_tune_pairs(all_pair_samples, tb_writer=tb_light_writer)
         light_trainer.save(str(self.light_model_path))
 
         world_trainer = WorldModelTrainer(
@@ -604,8 +847,19 @@ class SafeRLPipeline:
             seed=self.config.sim.random_seed,
         )
         world_predictor = world_trainer.fit(train_samples, val_samples, tb_writer=tb_world_writer)
+        world_pair_metrics = world_trainer.fine_tune_pairs(all_pair_samples, tb_writer=tb_world_writer)
         world_trainer.save(str(self.world_model_path))
-        return light_predictor, world_predictor
+
+        training_meta = {
+            "pair_finetune_applied": bool(all_pair_samples and (self.config.light_risk.pair_finetune or self.config.world_model.pair_finetune)),
+            "ranking_metrics": {
+                "light": light_pair_metrics,
+                "world": world_pair_metrics,
+            },
+            "light_training": dict(getattr(light_trainer, "last_train_report", {})),
+            "world_training": dict(getattr(world_trainer, "last_train_report", {})),
+        }
+        return light_predictor, world_predictor, training_meta
 
     def train_online_policy(self, stage_config: SafeRLConfig, shield, tb_writer=None):
         from safe_rl.rl.env import create_env
@@ -1876,6 +2130,8 @@ class SafeRLPipeline:
         normalized.setdefault("collision", False)
         normalized.setdefault("constraint_reason", "")
         normalized.setdefault("replacement_margin", 0.0)
+        normalized.setdefault("reward", 0.0)
+        normalized.setdefault("task_reward", 0.0)
         return normalized
 
     def _align_trace_steps(self, baseline_steps: Sequence[Dict[str, Any]], shielded_steps: Sequence[Dict[str, Any]]) -> List[Dict[str, Any]]:
@@ -1902,6 +2158,7 @@ def run_safe_rl_pipeline(config_path: Optional[str] = None, stage: str = "all", 
     config = load_safe_rl_config(config_path)
     pipeline = SafeRLPipeline(config)
     return pipeline.run(stage=stage, run_id=run_id)
+
 
 
 

@@ -1,4 +1,4 @@
-from dataclasses import dataclass
+﻿from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Protocol, Tuple
 
 from safe_rl.config.config import ShieldConfig
@@ -321,7 +321,7 @@ class SafetyShield:
         if self.light_predictor is None:
             return self._heuristic_risk(history_scene)
         prediction = self.light_predictor.predict(history_scene, action_id)
-        return float(prediction.p_overall)
+        return float(getattr(prediction, "risk_score", prediction.p_overall))
 
     def _fine_risk(self, history_scene: List[SceneState], action_id: int) -> Tuple[float, float, Optional[WorldPrediction]]:
         if self.world_predictor is None:
@@ -329,7 +329,7 @@ class SafetyShield:
             return risk, 0.0, None
 
         prediction = self.world_predictor.predict(history_scene, action_id)
-        modality_risks = [item.p_overall for item in prediction.modality_risk]
+        modality_risks = [float(getattr(item, "risk_score", item.p_overall)) for item in prediction.modality_risk]
         tail_risk = aggregate_tail_risk(
             modality_risks,
             quantile=self.config.tail_quantile,
@@ -346,3 +346,4 @@ class SafetyShield:
         distance_term = 1.0 if min_distance < 3.0 else max(0.0, 1.0 - min_distance / 30.0)
         ttc_term = 1.0 if min_ttc < 1.5 else max(0.0, 1.0 - min_ttc / 8.0)
         return max(distance_term, ttc_term)
+

@@ -1,3 +1,4 @@
+import pytest
 from safe_rl.config.config import ShieldConfig
 from safe_rl.data.types import RiskPrediction, SceneState, VehicleState, WorldPrediction
 from safe_rl.shield.risk_aggregator import aggregate_tail_risk
@@ -118,3 +119,25 @@ def test_shield_merge_guard_blocks_cross_lateral_replacement():
     assert decision.intervened is False
     assert decision.reason == "replacement_blocked_by_constraint"
     assert decision.meta["constraint_reason"] == "merge_lateral_guard"
+
+def test_shield_prefers_risk_score_over_p_overall():
+    class _ScoreBiasedLight:
+        def predict(self, history_scene, action_id):
+            _ = history_scene
+            if action_id == 4:
+                return RiskPrediction(0.1, 0.1, 0.1, 0.95, 0.05, risk_score=0.15)
+            return RiskPrediction(0.1, 0.1, 0.1, 0.05, 0.05, risk_score=0.85)
+
+    class _ScoreBiasedWorld:
+        def predict(self, history_scene, action_id):
+            _ = history_scene
+            score = 0.2 if action_id == 4 else 0.8
+            modality = [RiskPrediction(0.1, 0.1, 0.1, 0.99, 0.05, risk_score=score) for _ in range(6)]
+            return WorldPrediction(multimodal_future=None, modality_risk=modality, aggregated_risk=score, uncertainty=0.05)
+
+    config = ShieldConfig(risk_threshold=0.4, uncertainty_threshold=0.3, candidate_count=7, coarse_top_k=4)
+    shield = SafetyShield(config=config, light_predictor=_ScoreBiasedLight(), world_predictor=_ScoreBiasedWorld())
+
+    assert shield._coarse_risk(_history_scene(), 4) == 0.15
+    fine_risk, _, _ = shield._fine_risk(_history_scene(), 4)
+    assert fine_risk == pytest.approx(0.21)

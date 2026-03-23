@@ -1,10 +1,11 @@
-from safe_rl.data.risk import aggregate_future_risk, compute_min_distance, compute_min_ttc, detect_collision
+﻿from safe_rl.data.risk import aggregate_future_risk, compute_min_distance, compute_min_ttc, detect_collision
 from safe_rl.data.types import (
     ActionConditionedSample,
     EpisodeLog,
     EpisodeSummary,
     InterventionRecord,
     RiskLabels,
+    RiskPairSample,
     RiskPrediction,
     SceneState,
     ShieldDecision,
@@ -23,6 +24,7 @@ __all__ = [
     "EpisodeSummary",
     "InterventionRecord",
     "RiskLabels",
+    "RiskPairSample",
     "RiskPrediction",
     "SceneState",
     "ShieldDecision",

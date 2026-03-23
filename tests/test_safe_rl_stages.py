@@ -1096,3 +1096,156 @@ def test_shield_trace_tuning_summary_supports_d_variants_in_order():
     assert by_name["E3"]["merge_lateral_guard_block_count"] == 3
     assert by_name["D2"]["raw_passthrough_count"] == 2
     assert by_name["D3"]["candidate_selected_count"] == 4
+
+
+def test_stage2_pair_dataset_builder_uses_stage5_trace_and_stage4_buffer():
+    import json as _json
+
+    from safe_rl.data.types import InterventionRecord, SceneState, VehicleState, dataclass_to_dict
+
+    config = _tiny_config()
+    pipeline = SafeRLPipeline(config)
+    run_id = f"ut_stage2_pairs_{uuid.uuid4().hex[:8]}"
+    pipeline._prepare_run_context(stage="stage2", run_id=run_id)
+
+    history = [SceneState(timestamp=0.0, ego_id="ego", vehicles=[VehicleState("ego", 0.0, 4.0, 20.0, 0.0, 0.0, 0.0, 0.0, 1)])] * 2
+    trace_dir = pipeline.reports_dir / "shield_trace_d1"
+    trace_dir.mkdir(parents=True, exist_ok=True)
+    pair_path = trace_dir / "pair_00_seed_42.json"
+    pair_payload = {
+        "pair_index": 0,
+        "seed": 42,
+        "first_replacement_step": 0,
+        "baseline_steps": [
+            {
+                "step_index": 0,
+                "raw_action": 4,
+                "final_action": 4,
+                "history_scene": dataclass_to_dict(history),
+                "collision": False,
+                "ttc": 5.0,
+                "min_distance": 10.0,
+                "reward": 0.3,
+            }
+        ],
+        "shielded_steps": [
+            {
+                "step_index": 0,
+                "raw_action": 4,
+                "final_action": 3,
+                "history_scene": dataclass_to_dict(history),
+                "collision": True,
+                "ttc": 0.5,
+                "min_distance": 0.5,
+                "reward": -0.2,
+            }
+        ],
+    }
+    pipeline._write_json(pair_path, pair_payload)
+    pipeline._write_json(trace_dir / "trace_summary.json", {"variant_name": "D1", "pair_files": [str(pair_path)], "seeds": [42]})
+
+    buffer = InterventionBuffer()
+    buffer.push(
+        InterventionRecord(
+            history_scene=history,
+            raw_action=4,
+            final_action=3,
+            raw_risk=0.8,
+            final_risk=0.2,
+            reason="risk_threshold_exceeded",
+            meta={"episode_id": "ep_0"},
+        )
+    )
+    buffer.save(str(pipeline.buffer_path))
+
+    payload = pipeline._build_pair_datasets_for_stage2()
+    assert len(payload["stage5_pairs"]) == 1
+    assert len(payload["stage4_pairs"]) == 1
+    assert payload["stage5_pairs"][0].preferred_action == 4
+    assert payload["stage5_pairs"][0].meta["hard_negative"] is True
+    assert Path(payload["pair_dataset_paths"]["stage5"]).exists()
+    assert Path(payload["pair_dataset_paths"]["stage4"]).exists()
+
+
+
+def test_stage2_report_includes_pair_finetune_metadata(monkeypatch):
+    import pickle
+
+    from safe_rl.data.types import InterventionRecord, SceneState, VehicleState, dataclass_to_dict
+
+    config = _tiny_config()
+    pipeline = SafeRLPipeline(config)
+    run_id = f"ut_stage2_report_{uuid.uuid4().hex[:8]}"
+    pipeline._prepare_run_context(stage="stage2", run_id=run_id)
+    pipeline.datasets_dir.mkdir(parents=True, exist_ok=True)
+    pipeline.models_dir.mkdir(parents=True, exist_ok=True)
+    for path in [pipeline.train_pkl, pipeline.val_pkl, pipeline.test_pkl]:
+        with open(path, "wb") as f:
+            pickle.dump([], f)
+
+    history = [SceneState(timestamp=0.0, ego_id="ego", vehicles=[VehicleState("ego", 0.0, 4.0, 20.0, 0.0, 0.0, 0.0, 0.0, 1)])] * 2
+    buffer = InterventionBuffer()
+    buffer.push(
+        InterventionRecord(
+            history_scene=history,
+            raw_action=4,
+            final_action=3,
+            raw_risk=0.8,
+            final_risk=0.2,
+            reason="risk_threshold_exceeded",
+        )
+    )
+    buffer.save(str(pipeline.buffer_path))
+
+    trace_dir = pipeline.reports_dir / "shield_trace_d1"
+    trace_dir.mkdir(parents=True, exist_ok=True)
+    pair_path = trace_dir / "pair_00_seed_42.json"
+    pipeline._write_json(
+        pair_path,
+        {
+            "pair_index": 0,
+            "seed": 42,
+            "first_replacement_step": 0,
+            "baseline_steps": [{"step_index": 0, "raw_action": 4, "final_action": 4, "history_scene": dataclass_to_dict(history), "collision": False, "ttc": 5.0, "min_distance": 10.0, "reward": 0.3}],
+            "shielded_steps": [{"step_index": 0, "raw_action": 4, "final_action": 3, "history_scene": dataclass_to_dict(history), "collision": True, "ttc": 0.5, "min_distance": 0.5, "reward": -0.2}],
+        },
+    )
+    pipeline._write_json(trace_dir / "trace_summary.json", {"variant_name": "D1", "pair_files": [str(pair_path)], "seeds": [42]})
+
+    captured = {}
+
+    class _DummyPredictor:
+        def __init__(self):
+            self.device = "cpu"
+
+    class _DummyEvaluator:
+        def __init__(self, cfg):
+            _ = cfg
+
+        def evaluate_world_model(self, world_predictor, samples):
+            _ = (world_predictor, samples)
+            return {"traj_ade": 0.0, "risk_acc": 1.0, "risk_mae": 0.0}
+
+    def _fake_train_models(*args, stage5_pair_samples=None, stage4_pair_samples=None, **kwargs):
+        captured["stage5_pairs"] = len(stage5_pair_samples or [])
+        captured["stage4_pairs"] = len(stage4_pair_samples or [])
+        return _DummyPredictor(), _DummyPredictor(), {
+            "pair_finetune_applied": True,
+            "ranking_metrics": {"light": {"pair_ranking_accuracy": 1.0}, "world": {"pair_ranking_accuracy": 1.0}},
+            "light_training": {"variant": "v2"},
+            "world_training": {"variant": "v2"},
+        }
+
+    monkeypatch.setattr("safe_rl.pipeline.pipeline.SafeRLEvaluator", _DummyEvaluator)
+    pipeline.train_models = _fake_train_models
+
+    result = pipeline.run(stage="stage2", run_id=run_id)["stage2"]
+    report = json.loads(Path(result["training_report"]).read_text(encoding="utf-8"))
+
+    assert captured["stage5_pairs"] == 1
+    assert captured["stage4_pairs"] == 1
+    assert report["pair_finetune_applied"] is True
+    assert report["light_model_variant"] == "v2"
+    assert report["world_model_variant"] == "v2"
+    assert report["pair_source_counts"]["stage5_trace_first_replacement"] == 1
+    assert report["pair_source_counts"]["stage4_buffer"] == 1
