@@ -1,8 +1,10 @@
 import copy
 import inspect
+import math
 import datetime as dt
 import json
 import time
+from collections import Counter
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence
@@ -69,6 +71,7 @@ class SafeRLPipeline:
         self.shield_trace_dir: Optional[Path] = None
         self.shield_trace_summary_path: Optional[Path] = None
         self.shield_trace_tuning_summary_path: Optional[Path] = None
+        self.shield_margin_analysis_summary_path: Optional[Path] = None
 
         self.manifest: Dict = {}
 
@@ -170,6 +173,7 @@ class SafeRLPipeline:
         self.shield_trace_dir = self.reports_dir / str(self.config.shield_trace.trace_dir_name)
         self.shield_trace_summary_path = self.shield_trace_dir / "trace_summary.json"
         self.shield_trace_tuning_summary_path = self.reports_dir / "shield_trace_tuning_summary.json"
+        self.shield_margin_analysis_summary_path = self.reports_dir / "shield_margin_analysis_summary.json"
 
         if self.manifest_path.exists():
             with self.manifest_path.open("r", encoding="utf-8") as f:
@@ -206,6 +210,7 @@ class SafeRLPipeline:
                 "shield_sweep_summary_report": str(self.shield_sweep_summary_path),
                 "shield_trace_summary_report": str(self.shield_trace_summary_path),
                 "shield_trace_tuning_summary_report": str(self.shield_trace_tuning_summary_path),
+                "shield_margin_analysis_summary_report": str(self.shield_margin_analysis_summary_path),
                 "sumo_logs_dir": str(self.sumo_logs_dir),
                 "tensorboard_root": str(self.tensorboard_root),
             }
@@ -850,6 +855,10 @@ class SafeRLPipeline:
             if tuning_payload is not None:
                 result["shield_trace_tuning_summary_path"] = str(tuning_payload["summary_path"])
                 result["shield_trace_tuning_summary"] = tuning_payload["summary"]
+            margin_payload = self._write_shield_margin_analysis_summary()
+            if margin_payload is not None:
+                result["shield_margin_analysis_summary_path"] = str(margin_payload["summary_path"])
+                result["shield_margin_analysis_summary"] = margin_payload["summary"]
 
         if tb_writer is not None:
             tb_writer.add_scalar("summary/collision_reduction", float(delta.get("collision_reduction", 0.0)), 0)
@@ -1354,6 +1363,7 @@ class SafeRLPipeline:
         }
 
         save_pair_traces = bool(getattr(stage_config.shield_trace, "save_pair_traces", True))
+        pair_payloads: List[Dict[str, Any]] = []
         for pair_index in range(pair_count):
             baseline = dict(baseline_details[pair_index])
             shielded = dict(shielded_details[pair_index])
@@ -1366,6 +1376,7 @@ class SafeRLPipeline:
             )
             seed_value = pair_payload["seed"]
             pair_path = trace_dir / f"pair_{pair_index:02d}_seed_{seed_value}.json"
+            pair_payloads.append(pair_payload)
             if save_pair_traces:
                 self._write_json(pair_path, pair_payload)
                 summary["pair_files"].append(str(pair_path))
@@ -1385,8 +1396,24 @@ class SafeRLPipeline:
             summary["merge_lateral_guard_block_count"] += int(pair_payload.get("merge_lateral_guard_block_count", 0))
             summary["candidate_selected_count"] += int(pair_payload.get("candidate_selected_count", 0))
 
+        margin_analysis = self._ensure_trace_margin_analysis(
+            trace_dir=trace_dir,
+            trace_summary=summary,
+            pair_payloads=pair_payloads,
+        )
+        if margin_analysis is not None:
+            summary["margin_analysis_path"] = str(margin_analysis["analysis_path"])
+            summary["replacement_margin_stats"] = dict(margin_analysis["analysis"].get("replacement_margin_stats", {}))
+            summary["unique_margin_count"] = int(margin_analysis["analysis"].get("unique_margin_count", 0))
+            summary["margin_range"] = float(margin_analysis["analysis"].get("margin_range", 0.0))
+            summary["margin_near_threshold_band_count"] = int(margin_analysis["analysis"].get("margin_near_threshold_band_count", 0))
+            summary["margin_near_threshold_band_ratio"] = float(margin_analysis["analysis"].get("margin_near_threshold_band_ratio", 0.0))
+
         self._write_json(self.shield_trace_summary_path, summary)
-        self.manifest.setdefault("artifact_paths", {})["shield_trace_summary_report"] = str(self.shield_trace_summary_path)
+        artifact_paths = self.manifest.setdefault("artifact_paths", {})
+        artifact_paths["shield_trace_summary_report"] = str(self.shield_trace_summary_path)
+        if margin_analysis is not None:
+            artifact_paths[f"shield_margin_analysis_{self._sanitize_artifact_key(summary['variant_name'])}"] = str(margin_analysis["analysis_path"])
         return {"trace_summary_path": self.shield_trace_summary_path, "summary": summary}
 
     def _write_shield_trace_tuning_summary(self) -> Optional[Dict[str, Any]]:
@@ -1409,12 +1436,16 @@ class SafeRLPipeline:
         if not variants:
             return None
 
+        margin_summary_payload = self._write_shield_margin_analysis_summary(trace_dirs=trace_dirs, tuning_variants=variants)
+        margin_summary_path = margin_summary_payload["summary_path"] if margin_summary_payload is not None else None
+
         order = {"C_baseline": 0, "C1": 1, "C2": 2, "D1": 3, "E2": 4, "F1": 5, "F2": 6, "F3": 7, "E1": 8, "E3": 9, "D2": 10, "D3": 11, "C_strong": 12}
         variants.sort(key=lambda item: (order.get(str(item.get("variant_name", "")), 99), str(item.get("variant_name", ""))))
 
         summary = {
             "run_id": str(self.run_id or ""),
             "baseline_available": any(item["variant_name"] == "C_baseline" for item in variants),
+            "shield_margin_analysis_summary_path": str(margin_summary_path) if margin_summary_path is not None else "",
             "variants": variants,
         }
         self._write_json(self.shield_trace_tuning_summary_path, summary)
@@ -1455,10 +1486,21 @@ class SafeRLPipeline:
             mean_fallback_count = 0.0
             all_pairs_collision_free = False
 
+        margin_analysis = self._ensure_trace_margin_analysis(
+            trace_dir=trace_dir,
+            trace_summary=trace_summary,
+            pair_payloads=pair_payloads,
+            trace_summary_path=trace_summary_path,
+        )
+        margin_analysis_path = margin_analysis["analysis_path"] if margin_analysis is not None else None
+        margin_analysis_payload = margin_analysis["analysis"] if margin_analysis is not None else {}
+        replacement_margin_stats = dict(margin_analysis_payload.get("replacement_margin_stats", {}))
+
         return {
             "variant_name": self._shield_trace_variant_name(trace_dir.name),
             "trace_dir_name": trace_dir.name,
             "trace_summary_path": str(trace_summary_path),
+            "margin_analysis_path": str(margin_analysis_path) if margin_analysis_path is not None else "",
             "pair_count": len(pair_payloads),
             "seeds": list(trace_summary.get("seeds", [])),
             "effective_shield_config": dict(trace_summary.get("effective_shield_config", {})),
@@ -1474,7 +1516,197 @@ class SafeRLPipeline:
             "mean_fallback_action_count": float(mean_fallback_count),
             "all_pairs_collision_free": bool(all_pairs_collision_free),
             "all_pairs_reward_delta": reward_deltas,
+            "replacement_margin_mean": replacement_margin_stats.get("mean"),
+            "replacement_margin_stdev": replacement_margin_stats.get("stdev"),
+            "replacement_margin_min": replacement_margin_stats.get("min"),
+            "replacement_margin_max": replacement_margin_stats.get("max"),
+            "unique_margin_count": int(margin_analysis_payload.get("unique_margin_count", 0)),
+            "margin_near_threshold_band_ratio": float(margin_analysis_payload.get("margin_near_threshold_band_ratio", 0.0)),
         }
+
+    def _write_shield_margin_analysis_summary(
+        self,
+        trace_dirs: Optional[Sequence[Path]] = None,
+        tuning_variants: Optional[Sequence[Dict[str, Any]]] = None,
+    ) -> Optional[Dict[str, Any]]:
+        if self.reports_dir is None or self.shield_margin_analysis_summary_path is None:
+            return None
+
+        if trace_dirs is None:
+            trace_dirs = sorted(
+                path for path in self.reports_dir.glob("shield_trace*")
+                if path.is_dir() and self._find_trace_summary_path(path) is not None
+            )
+        if not trace_dirs:
+            return None
+
+        tuning_by_name = {str(item.get("variant_name", "")): item for item in list(tuning_variants or [])}
+        entries: List[Dict[str, Any]] = []
+        for trace_dir in trace_dirs:
+            tuning_entry = tuning_by_name.get(self._shield_trace_variant_name(trace_dir.name))
+            if tuning_entry is None:
+                tuning_entry = self._build_shield_trace_tuning_entry(trace_dir)
+            if tuning_entry is None:
+                continue
+            analysis_path = Path(str(tuning_entry.get("margin_analysis_path", ""))) if tuning_entry.get("margin_analysis_path") else None
+            if analysis_path is None or not analysis_path.exists():
+                continue
+            analysis = self._read_json(analysis_path)
+            stats = dict(analysis.get("replacement_margin_stats", {}))
+            entries.append({
+                "variant_name": str(tuning_entry.get("variant_name", self._shield_trace_variant_name(trace_dir.name))),
+                "trace_dir_name": str(tuning_entry.get("trace_dir_name", trace_dir.name)),
+                "margin_analysis_path": str(analysis_path),
+                "replacement_min_risk_margin": float(dict(tuning_entry.get("effective_shield_config", {})).get("replacement_min_risk_margin", 0.0)),
+                "replacement_step_count": int(analysis.get("replacement_step_count", 0)),
+                "replacement_margin_mean": stats.get("mean"),
+                "replacement_margin_stdev": stats.get("stdev"),
+                "replacement_margin_min": stats.get("min"),
+                "replacement_margin_max": stats.get("max"),
+                "unique_margin_count": int(analysis.get("unique_margin_count", 0)),
+                "margin_near_threshold_band_ratio": float(analysis.get("margin_near_threshold_band_ratio", 0.0)),
+                "candidate_selected_count": int(tuning_entry.get("candidate_selected_count", 0)),
+                "mean_intervention_count": float(tuning_entry.get("mean_intervention_count", 0.0)),
+                "mean_risk_reduction": float(tuning_entry.get("mean_risk_reduction", 0.0)),
+                "mean_reward_gap_to_baseline_policy": float(tuning_entry.get("mean_reward_gap_to_baseline_policy", 0.0)),
+            })
+
+        if not entries:
+            return None
+
+        order = {"D1": 0, "E2": 1, "F1": 2, "F2": 3, "F3": 4}
+        entries.sort(key=lambda item: (order.get(str(item.get("variant_name", "")), 99), str(item.get("variant_name", ""))))
+        summary = {
+            "run_id": str(self.run_id or ""),
+            "focus_variants": ["D1", "E2", "F1", "F2", "F3"],
+            "variants": entries,
+        }
+        self._write_json(self.shield_margin_analysis_summary_path, summary)
+        self.manifest.setdefault("artifact_paths", {})["shield_margin_analysis_summary_report"] = str(self.shield_margin_analysis_summary_path)
+        return {"summary_path": self.shield_margin_analysis_summary_path, "summary": summary}
+
+    def _ensure_trace_margin_analysis(
+        self,
+        trace_dir: Path,
+        trace_summary: Dict[str, Any],
+        pair_payloads: Sequence[Dict[str, Any]],
+        trace_summary_path: Optional[Path] = None,
+    ) -> Optional[Dict[str, Any]]:
+        if trace_summary_path is None:
+            trace_summary_path = self._find_trace_summary_path(trace_dir)
+        if trace_summary_path is None:
+            return None
+
+        analysis = self._build_trace_margin_analysis(
+            variant_name=self._shield_trace_variant_name(trace_dir.name),
+            seeds=list(trace_summary.get("seeds", [])),
+            effective_shield_config=dict(trace_summary.get("effective_shield_config", {})),
+            pair_payloads=pair_payloads,
+        )
+        analysis_path = trace_dir / "margin_analysis.json"
+        self._write_json(analysis_path, analysis)
+
+        trace_summary["margin_analysis_path"] = str(analysis_path)
+        trace_summary["replacement_margin_stats"] = dict(analysis.get("replacement_margin_stats", {}))
+        trace_summary["unique_margin_count"] = int(analysis.get("unique_margin_count", 0))
+        trace_summary["margin_range"] = float(analysis.get("margin_range", 0.0))
+        trace_summary["margin_near_threshold_band_count"] = int(analysis.get("margin_near_threshold_band_count", 0))
+        trace_summary["margin_near_threshold_band_ratio"] = float(analysis.get("margin_near_threshold_band_ratio", 0.0))
+        self._write_json(trace_summary_path, trace_summary)
+        self.manifest.setdefault("artifact_paths", {})[f"shield_margin_analysis_{self._sanitize_artifact_key(trace_dir.name)}"] = str(analysis_path)
+        return {"analysis_path": analysis_path, "analysis": analysis}
+
+    def _build_trace_margin_analysis(
+        self,
+        variant_name: str,
+        seeds: Sequence[Any],
+        effective_shield_config: Dict[str, Any],
+        pair_payloads: Sequence[Dict[str, Any]],
+    ) -> Dict[str, Any]:
+        replacement_steps: List[Dict[str, Any]] = []
+        for pair_payload in pair_payloads:
+            for step in list(pair_payload.get("shielded_steps", []) or []):
+                normalized = self._normalize_trace_step(step)
+                if bool(normalized.get("replacement_happened", False)) and not bool(normalized.get("fallback_used", False)):
+                    replacement_steps.append(normalized)
+
+        margins = [float(step.get("replacement_margin", 0.0)) for step in replacement_steps]
+        raw_risks = [float(step.get("raw_risk", 0.0)) for step in replacement_steps]
+        final_risks = [float(step.get("final_risk", 0.0)) for step in replacement_steps]
+        improvements = [float(step.get("risk_reduction", 0.0)) for step in replacement_steps]
+        raw_action_types = Counter(str(step.get("raw_action_type", "")) for step in replacement_steps if str(step.get("raw_action_type", "")))
+        selected_action_types = Counter(str(step.get("final_action_type", "")) for step in replacement_steps if str(step.get("final_action_type", "")))
+        chosen_rank_counts = Counter(str(int(step.get("chosen_candidate_rank_by_risk", -1))) for step in replacement_steps)
+
+        threshold = float(dict(effective_shield_config).get("replacement_min_risk_margin", 0.0))
+        margin_near_threshold_band_count = sum(1 for value in margins if abs(float(value) - threshold) <= 0.003)
+        unique_margin_count = len({round(float(value), 9) for value in margins}) if margins else 0
+        margin_stats = self._numeric_stats(margins)
+
+        return {
+            "variant_name": str(variant_name),
+            "run_id": str(self.run_id or ""),
+            "seeds": [int(seed) for seed in seeds],
+            "replacement_step_count": len(replacement_steps),
+            "replacement_margin_stats": margin_stats,
+            "selected_candidate_fine_risk_stats": self._numeric_stats(final_risks),
+            "raw_action_fine_risk_stats": self._numeric_stats(raw_risks),
+            "risk_improvement_stats": self._numeric_stats(improvements),
+            "selected_action_type_counts": dict(sorted(selected_action_types.items())),
+            "raw_action_type_counts": dict(sorted(raw_action_types.items())),
+            "chosen_candidate_rank_counts": dict(sorted(chosen_rank_counts.items(), key=lambda item: int(item[0]))),
+            "unique_margin_count": int(unique_margin_count),
+            "margin_range": float((max(margins) - min(margins)) if margins else 0.0),
+            "margin_near_threshold_band_count": int(margin_near_threshold_band_count),
+            "margin_near_threshold_band_ratio": float(margin_near_threshold_band_count / len(margins)) if margins else 0.0,
+        }
+
+    def _numeric_stats(self, values: Sequence[float]) -> Dict[str, Any]:
+        cleaned = [float(value) for value in values]
+        if not cleaned:
+            return {
+                "count": 0,
+                "min": None,
+                "p10": None,
+                "p25": None,
+                "p50": None,
+                "p75": None,
+                "p90": None,
+                "p95": None,
+                "max": None,
+                "mean": None,
+                "stdev": 0.0,
+            }
+
+        ordered = sorted(cleaned)
+        mean_value = sum(ordered) / len(ordered)
+        variance = sum((value - mean_value) ** 2 for value in ordered) / len(ordered)
+        return {
+            "count": len(ordered),
+            "min": ordered[0],
+            "p10": self._quantile(ordered, 0.10),
+            "p25": self._quantile(ordered, 0.25),
+            "p50": self._quantile(ordered, 0.50),
+            "p75": self._quantile(ordered, 0.75),
+            "p90": self._quantile(ordered, 0.90),
+            "p95": self._quantile(ordered, 0.95),
+            "max": ordered[-1],
+            "mean": mean_value,
+            "stdev": math.sqrt(variance),
+        }
+
+    def _quantile(self, ordered_values: Sequence[float], q: float) -> Optional[float]:
+        if not ordered_values:
+            return None
+        if len(ordered_values) == 1:
+            return float(ordered_values[0])
+        index = (len(ordered_values) - 1) * float(q)
+        lower = int(math.floor(index))
+        upper = int(math.ceil(index))
+        if lower == upper:
+            return float(ordered_values[lower])
+        weight = index - lower
+        return float(ordered_values[lower] * (1.0 - weight) + ordered_values[upper] * weight)
 
     def _find_trace_summary_path(self, trace_dir: Path) -> Optional[Path]:
         canonical = trace_dir / "trace_summary.json"

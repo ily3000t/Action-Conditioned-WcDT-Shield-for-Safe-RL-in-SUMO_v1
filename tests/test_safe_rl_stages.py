@@ -742,6 +742,15 @@ def test_stage5_trace_writes_pair_files_and_summary(monkeypatch):
     assert tuning_summary["baseline_available"] is True
     assert tuning_summary["variants"][0]["variant_name"] == "C_baseline"
     assert tuning_summary["variants"][0]["effective_shield_config"]["effective_raw_passthrough_threshold"] == pytest.approx(0.20)
+    assert Path(result["shield_margin_analysis_summary_path"]).exists()
+    margin_summary = json.loads(Path(result["shield_margin_analysis_summary_path"]).read_text(encoding="utf-8"))
+    assert margin_summary["variants"][0]["variant_name"] == "C_baseline"
+    assert margin_summary["variants"][0]["replacement_step_count"] == 1
+    assert margin_summary["variants"][0]["replacement_margin_mean"] == pytest.approx(0.1)
+    assert Path(trace_summary["margin_analysis_path"]).exists()
+    assert trace_summary["unique_margin_count"] == 1
+    assert trace_summary["replacement_margin_stats"]["mean"] == pytest.approx(0.1)
+    assert trace_summary["margin_near_threshold_band_ratio"] == pytest.approx(0.0)
 
 
 def test_shield_trace_tuning_summary_aggregates_baseline_and_c1():
@@ -915,6 +924,33 @@ def test_shield_trace_tuning_summary_supports_legacy_trace_file_names():
             "raw_passthrough_count": 1,
             "merge_lateral_guard_block_count": 2,
             "candidate_selected_count": 12,
+            "shielded_steps": [
+                {
+                    "step_index": 0,
+                    "raw_action": 3,
+                    "final_action": 4,
+                    "executed_action": 4,
+                    "replacement_happened": True,
+                    "fallback_used": False,
+                    "chosen_candidate_index": 1,
+                    "chosen_candidate_rank_by_risk": 0,
+                    "raw_risk": 0.302,
+                    "final_risk": 0.2,
+                    "risk_reduction": 0.102,
+                    "candidate_evaluations": [],
+                    "raw_action_type": "KEEP_LEFT",
+                    "final_action_type": "KEEP_KEEP",
+                    "lane_change_involved": True,
+                    "ego_lane_id": "1",
+                    "ego_lane_index": 1,
+                    "ego_speed": 18.0,
+                    "ttc": 3.0,
+                    "min_distance": 6.0,
+                    "collision": False,
+                    "constraint_reason": "",
+                    "replacement_margin": 0.102,
+                }
+            ],
         },
     )
     pipeline._write_json(
@@ -949,6 +985,17 @@ def test_shield_trace_tuning_summary_supports_legacy_trace_file_names():
     assert by_name["D1"]["raw_passthrough_count"] == 1
     assert by_name["D1"]["candidate_selected_count"] == 12
     assert by_name["D1"]["mean_intervention_count"] == 12.0
+    assert Path(by_name["D1"]["margin_analysis_path"]).exists()
+    assert by_name["D1"]["replacement_margin_mean"] == pytest.approx(0.102)
+    assert by_name["D1"]["unique_margin_count"] == 1
+
+    margin_summary_path = Path(summary["shield_margin_analysis_summary_path"])
+    assert margin_summary_path.exists()
+    margin_summary = json.loads(margin_summary_path.read_text(encoding="utf-8"))
+    margin_by_name = {entry["variant_name"]: entry for entry in margin_summary["variants"]}
+    assert margin_by_name["D1"]["replacement_step_count"] == 1
+    assert margin_by_name["D1"]["replacement_margin_mean"] == pytest.approx(0.102)
+    assert margin_by_name["D1"]["unique_margin_count"] == 1
 
 
 def test_shield_trace_tuning_summary_supports_d_variants_in_order():
