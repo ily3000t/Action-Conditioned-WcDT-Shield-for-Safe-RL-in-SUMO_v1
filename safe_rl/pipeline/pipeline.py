@@ -1395,7 +1395,7 @@ class SafeRLPipeline:
 
         trace_dirs = sorted(
             path for path in self.reports_dir.glob("shield_trace*")
-            if path.is_dir() and (path / "trace_summary.json").exists()
+            if path.is_dir() and self._find_trace_summary_path(path) is not None
         )
         if not trace_dirs:
             return None
@@ -1409,7 +1409,7 @@ class SafeRLPipeline:
         if not variants:
             return None
 
-        order = {"C_baseline": 0, "C1": 1, "C2": 2, "D1": 3, "E1": 4, "E2": 5, "E3": 6, "D2": 7, "D3": 8, "C_strong": 9}
+        order = {"C_baseline": 0, "C1": 1, "C2": 2, "D1": 3, "E2": 4, "F1": 5, "F2": 6, "F3": 7, "E1": 8, "E3": 9, "D2": 10, "D3": 11, "C_strong": 12}
         variants.sort(key=lambda item: (order.get(str(item.get("variant_name", "")), 99), str(item.get("variant_name", ""))))
 
         summary = {
@@ -1422,14 +1422,14 @@ class SafeRLPipeline:
         return {"summary_path": self.shield_trace_tuning_summary_path, "summary": summary}
 
     def _build_shield_trace_tuning_entry(self, trace_dir: Path) -> Optional[Dict[str, Any]]:
-        trace_summary_path = trace_dir / "trace_summary.json"
-        if not trace_summary_path.exists():
+        trace_summary_path = self._find_trace_summary_path(trace_dir)
+        if trace_summary_path is None:
             return None
 
         trace_summary = self._read_json(trace_summary_path)
         pair_paths = [Path(path) for path in list(trace_summary.get("pair_files", []) or []) if Path(path).exists()]
         if not pair_paths:
-            pair_paths = sorted(trace_dir.glob("pair_*_seed_*.json"))
+            pair_paths = self._find_trace_pair_paths(trace_dir)
 
         pair_payloads = [self._read_json(path) for path in pair_paths if path.exists()]
         if pair_payloads:
@@ -1476,6 +1476,24 @@ class SafeRLPipeline:
             "all_pairs_reward_delta": reward_deltas,
         }
 
+    def _find_trace_summary_path(self, trace_dir: Path) -> Optional[Path]:
+        canonical = trace_dir / "trace_summary.json"
+        if canonical.exists():
+            return canonical
+        legacy_candidates = sorted(trace_dir.glob("*trace_summary.json"))
+        if legacy_candidates:
+            return legacy_candidates[0]
+        return None
+
+    def _find_trace_pair_paths(self, trace_dir: Path) -> List[Path]:
+        canonical = sorted(trace_dir.glob("pair_*_seed_*.json"))
+        if canonical:
+            return canonical
+        legacy = sorted(trace_dir.glob("*pair_*seed_*.json"))
+        if legacy:
+            return legacy
+        return sorted(trace_dir.glob("*pair_*.json"))
+
     def _shield_trace_variant_name(self, trace_dir_name: str) -> str:
         normalized = str(trace_dir_name or "").strip().lower()
         if normalized == "shield_trace":
@@ -1490,6 +1508,12 @@ class SafeRLPipeline:
             return "E1"
         if normalized == "shield_trace_e2":
             return "E2"
+        if normalized == "shield_trace_f1":
+            return "F1"
+        if normalized == "shield_trace_f2":
+            return "F2"
+        if normalized == "shield_trace_f3":
+            return "F3"
         if normalized == "shield_trace_e3":
             return "E3"
         if normalized == "shield_trace_d2":

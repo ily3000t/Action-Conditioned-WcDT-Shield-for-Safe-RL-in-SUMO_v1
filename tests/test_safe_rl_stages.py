@@ -886,6 +886,71 @@ def test_shield_trace_tuning_summary_supports_c_strong_variant():
 
 
 
+def test_shield_trace_tuning_summary_supports_legacy_trace_file_names():
+    config = _tiny_config()
+    config.shield_trace.enabled = True
+    config.shield_trace.trace_dir_name = "shield_trace_d1"
+
+    pipeline = SafeRLPipeline(config)
+    run_id = f"ut_trace_legacy_{uuid.uuid4().hex[:8]}"
+    pipeline._prepare_run_context(stage="stage5", run_id=run_id)
+
+    assert pipeline.reports_dir is not None
+    legacy_dir = pipeline.reports_dir / "shield_trace_d1"
+    legacy_dir.mkdir(parents=True, exist_ok=True)
+    pair_path = legacy_dir / "d1pair_00_seed_42.json"
+    pipeline._write_json(
+        pair_path,
+        {
+            "seed": 42,
+            "baseline_collision": False,
+            "shielded_collision": False,
+            "intervention_count": 12,
+            "replacement_count": 12,
+            "fallback_action_count": 0,
+            "mean_risk_reduction": 0.02,
+            "baseline_reward": 0.20,
+            "shielded_reward": 0.18,
+            "blocked_by_margin_count": 3,
+            "raw_passthrough_count": 1,
+            "merge_lateral_guard_block_count": 2,
+            "candidate_selected_count": 12,
+        },
+    )
+    pipeline._write_json(
+        legacy_dir / "d1trace_summary.json",
+        {
+            "variant_name": "D1",
+            "seeds": [42],
+            "effective_shield_config": {
+                "risk_threshold": 0.30,
+                "uncertainty_threshold": 0.45,
+                "replacement_min_risk_margin": 0.10,
+                "raw_passthrough_risk_threshold": 0.24,
+                "effective_raw_passthrough_threshold": 0.24,
+                "merge_override_margin": 0.12,
+            },
+            "regression_pair_count": 0,
+            "blocked_by_margin_count": 3,
+            "raw_passthrough_count": 1,
+            "merge_lateral_guard_block_count": 2,
+            "candidate_selected_count": 12,
+            "pair_files": [str(pair_path)],
+        },
+    )
+
+    payload = pipeline._write_shield_trace_tuning_summary()
+    assert payload is not None
+    summary = json.loads(Path(payload["summary_path"]).read_text(encoding="utf-8"))
+    by_name = {entry["variant_name"]: entry for entry in summary["variants"]}
+    assert by_name["D1"]["trace_summary_path"].endswith("d1trace_summary.json")
+    assert by_name["D1"]["pair_count"] == 1
+    assert by_name["D1"]["blocked_by_margin_count"] == 3
+    assert by_name["D1"]["raw_passthrough_count"] == 1
+    assert by_name["D1"]["candidate_selected_count"] == 12
+    assert by_name["D1"]["mean_intervention_count"] == 12.0
+
+
 def test_shield_trace_tuning_summary_supports_d_variants_in_order():
     config = _tiny_config()
     config.shield_trace.enabled = True
@@ -901,8 +966,11 @@ def test_shield_trace_tuning_summary_supports_d_variants_in_order():
         ("shield_trace_c1", "C1"),
         ("shield_trace_c2", "C2"),
         ("shield_trace_d1", "D1"),
-        ("shield_trace_e1", "E1"),
         ("shield_trace_e2", "E2"),
+        ("shield_trace_f1", "F1"),
+        ("shield_trace_f2", "F2"),
+        ("shield_trace_f3", "F3"),
+        ("shield_trace_e1", "E1"),
         ("shield_trace_e3", "E3"),
         ("shield_trace_d2", "D2"),
         ("shield_trace_d3", "D3"),
@@ -961,8 +1029,11 @@ def test_shield_trace_tuning_summary_supports_d_variants_in_order():
         "C1",
         "C2",
         "D1",
-        "E1",
         "E2",
+        "F1",
+        "F2",
+        "F3",
+        "E1",
         "E3",
         "D2",
         "D3",
@@ -970,8 +1041,11 @@ def test_shield_trace_tuning_summary_supports_d_variants_in_order():
     ]
     by_name = {entry["variant_name"]: entry for entry in summary["variants"]}
     assert by_name["D1"]["effective_shield_config"]["replacement_min_risk_margin"] == pytest.approx(0.11)
-    assert by_name["E1"]["raw_passthrough_count"] == 2
     assert by_name["E2"]["candidate_selected_count"] == 4
+    assert by_name["F1"]["effective_shield_config"]["replacement_min_risk_margin"] == pytest.approx(0.11)
+    assert by_name["F2"]["raw_passthrough_count"] == 2
+    assert by_name["F3"]["merge_lateral_guard_block_count"] == 3
+    assert by_name["E1"]["raw_passthrough_count"] == 2
     assert by_name["E3"]["merge_lateral_guard_block_count"] == 3
     assert by_name["D2"]["raw_passthrough_count"] == 2
     assert by_name["D3"]["candidate_selected_count"] == 4
