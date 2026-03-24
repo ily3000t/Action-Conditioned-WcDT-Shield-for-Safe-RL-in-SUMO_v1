@@ -1,6 +1,6 @@
-﻿import random
+import random
 from dataclasses import dataclass
-from typing import Any, Dict, List, Optional, Sequence
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
 import torch
@@ -97,6 +97,7 @@ class LightRiskTrainer:
         self.bce = nn.BCEWithLogitsLoss()
         self.last_train_report: Dict[str, Any] = {}
         self.last_pair_metrics: Dict[str, float] = self._empty_pair_metrics()
+        self.last_pair_ft_report: Dict[str, Any] = {}
 
     def fit(
         self,
@@ -105,7 +106,13 @@ class LightRiskTrainer:
         tb_writer=None,
     ) -> LightRiskPredictor:
         if len(train_samples) == 0:
-            self.last_train_report = {"epochs": 0, "train_samples": 0, "val_samples": len(val_samples or [])}
+            self.last_train_report = {
+                "variant": "v2" if self.config.enable_v2 else "v1_compat",
+                "epochs": 0,
+                "train_samples": 0,
+                "val_samples": len(val_samples or []),
+                "epoch_metrics": [],
+            }
             return LightRiskPredictor(model=self.model.eval(), device=self.device)
 
         print(f"[LightRisk] start training on {self.device}, samples={len(train_samples)}")
@@ -198,9 +205,27 @@ class LightRiskTrainer:
         self.model.eval()
         return LightRiskPredictor(model=self.model, device=self.device)
 
-    def fine_tune_pairs(self, pair_samples: Sequence[RiskPairSample], tb_writer=None) -> Dict[str, float]:
+    def fine_tune_pairs(
+        self,
+        pair_samples: Sequence[RiskPairSample],
+        replay_samples: Optional[Sequence[ActionConditionedSample]] = None,
+        tb_writer=None,
+    ) -> Dict[str, float]:
+        before_pair_metrics = self.evaluate_pairs(pair_samples)
+        before_pointwise_metrics = self._evaluate_pointwise_samples(replay_samples or [])
+
         if not self.config.pair_finetune or len(pair_samples) == 0:
-            self.last_pair_metrics = self.evaluate_pairs(pair_samples)
+            self.last_pair_metrics = before_pair_metrics
+            self.last_pair_ft_report = {
+                "enabled": bool(self.config.pair_finetune),
+                "pair_count": int(len(pair_samples)),
+                "replay_sample_count": int(len(replay_samples or [])),
+                "before_pair_metrics": before_pair_metrics,
+                "after_pair_metrics": before_pair_metrics,
+                "before_pointwise_metrics": before_pointwise_metrics,
+                "after_pointwise_metrics": before_pointwise_metrics,
+                "epoch_metrics": [],
+            }
             return self.last_pair_metrics
 
         loader = DataLoader(
@@ -210,6 +235,9 @@ class LightRiskTrainer:
             drop_last=False,
             collate_fn=collate_risk_pairs,
         )
+        replay_loader = self._build_replay_loader(replay_samples or [])
+        replay_iter = iter(replay_loader) if replay_loader is not None else None
+
         optimizer = torch.optim.AdamW(
             self.model.parameters(),
             lr=self.config.learning_rate,
@@ -217,20 +245,79 @@ class LightRiskTrainer:
         )
         self.model.train()
         global_step = 0
+        epoch_metrics: List[Dict[str, float]] = []
         for epoch_idx in range(max(1, int(self.config.pair_finetune_epochs))):
+            epoch_total = 0.0
+            epoch_pointwise = 0.0
+            epoch_ranking = 0.0
+            epoch_spread = 0.0
+            epoch_steps = 0
             for batch in loader:
-                pair_loss, ranking_loss, spread_loss, regression_loss = self._compute_pair_losses(batch)
+                ranking_loss, spread_loss = self._compute_pair_losses(batch)
+                pointwise_total, _, _, _, replay_iter = self._compute_replay_losses(replay_iter, replay_loader)
+                total_loss = (
+                    float(self.config.pointwise_replay_weight) * pointwise_total
+                    + float(self.config.ranking_loss_weight) * ranking_loss
+                    + float(self.config.spread_loss_weight) * spread_loss
+                )
+
                 optimizer.zero_grad()
-                pair_loss.backward()
+                total_loss.backward()
                 optimizer.step()
+
+                step_total = float(total_loss.item())
+                step_pointwise = float(pointwise_total.item())
+                step_ranking = float(ranking_loss.item())
+                step_spread = float(spread_loss.item())
+                epoch_total += step_total
+                epoch_pointwise += step_pointwise
+                epoch_ranking += step_ranking
+                epoch_spread += step_spread
+                epoch_steps += 1
+
                 if tb_writer is not None:
-                    tb_writer.add_scalar("pair/loss_total", float(pair_loss.item()), global_step)
-                    tb_writer.add_scalar("pair/loss_ranking", float(ranking_loss.item()), global_step)
-                    tb_writer.add_scalar("pair/loss_spread", float(spread_loss.item()), global_step)
-                    tb_writer.add_scalar("pair/loss_regression", float(regression_loss.item()), global_step)
+                    tb_writer.add_scalar("loss/step_total", step_total, global_step)
+                    tb_writer.add_scalar("loss/step_pointwise", step_pointwise, global_step)
+                    tb_writer.add_scalar("loss/step_ranking", step_ranking, global_step)
+                    tb_writer.add_scalar("loss/step_spread", step_spread, global_step)
                 global_step += 1
+
+            if epoch_steps > 0:
+                epoch_summary = {
+                    "epoch": float(epoch_idx),
+                    "loss_total": epoch_total / epoch_steps,
+                    "loss_pointwise": epoch_pointwise / epoch_steps,
+                    "loss_ranking": epoch_ranking / epoch_steps,
+                    "loss_spread": epoch_spread / epoch_steps,
+                }
+                epoch_metrics.append(epoch_summary)
+                if tb_writer is not None:
+                    tb_writer.add_scalar("loss/epoch_total", epoch_summary["loss_total"], epoch_idx)
+                    tb_writer.add_scalar("loss/epoch_pointwise", epoch_summary["loss_pointwise"], epoch_idx)
+                    tb_writer.add_scalar("loss/epoch_ranking", epoch_summary["loss_ranking"], epoch_idx)
+                    tb_writer.add_scalar("loss/epoch_spread", epoch_summary["loss_spread"], epoch_idx)
+
         self.model.eval()
-        self.last_pair_metrics = self.evaluate_pairs(pair_samples)
+        after_pair_metrics = self.evaluate_pairs(pair_samples)
+        after_pointwise_metrics = self._evaluate_pointwise_samples(replay_samples or [])
+        self.last_pair_metrics = after_pair_metrics
+        self.last_pair_ft_report = {
+            "enabled": True,
+            "pair_count": int(len(pair_samples)),
+            "replay_sample_count": int(len(replay_samples or [])),
+            "before_pair_metrics": before_pair_metrics,
+            "after_pair_metrics": after_pair_metrics,
+            "before_pointwise_metrics": before_pointwise_metrics,
+            "after_pointwise_metrics": after_pointwise_metrics,
+            "epoch_metrics": epoch_metrics,
+        }
+        if tb_writer is not None:
+            tb_writer.add_scalar("summary/before_pair_ranking_accuracy", float(before_pair_metrics.get("pair_ranking_accuracy", 0.0)), 0)
+            tb_writer.add_scalar("summary/after_pair_ranking_accuracy", float(after_pair_metrics.get("pair_ranking_accuracy", 0.0)), 0)
+            tb_writer.add_scalar("summary/before_same_state_score_gap", float(before_pair_metrics.get("same_state_score_gap", 0.0)), 0)
+            tb_writer.add_scalar("summary/after_same_state_score_gap", float(after_pair_metrics.get("same_state_score_gap", 0.0)), 0)
+            tb_writer.add_scalar("summary/before_score_spread", float(before_pair_metrics.get("score_spread", 0.0)), 0)
+            tb_writer.add_scalar("summary/after_score_spread", float(after_pair_metrics.get("score_spread", 0.0)), 0)
         return self.last_pair_metrics
 
     @torch.no_grad()
@@ -248,11 +335,12 @@ class LightRiskTrainer:
         dataset = RiskPairDataset(pair_samples)
         loader = DataLoader(dataset, batch_size=self.config.batch_size, shuffle=False, drop_last=False, collate_fn=collate_risk_pairs)
         for batch in loader:
-            x_a, x_b, preferred_a, target_a, target_b, _, hard_negative = self._pair_batch_tensors(batch)
+            x_a, x_b, preferred_a, target_a, target_b, _, _, _ = self._pair_batch_tensors(batch)
             score_a = self.model(x_a)["risk_score"]
             score_b = self.model(x_b)["risk_score"]
             pred_pref_a = score_a <= score_b
             correct += int(torch.sum(pred_pref_a == preferred_a).item())
+            hard_negative = torch.tensor([bool(sample.meta.get("hard_negative", False)) for sample in batch], dtype=torch.bool, device=self.device)
             if hard_negative.any():
                 hard_correct += int(torch.sum((pred_pref_a == preferred_a) & hard_negative).item())
                 hard_total += int(torch.sum(hard_negative).item())
@@ -287,10 +375,10 @@ class LightRiskTrainer:
         overall_error = torch.abs(output["risk_score"] - y_score).detach()
         uncertainty_loss = torch.mean((output["uncertainty"] - overall_error) ** 2)
         total_loss = type_loss + score_loss + 0.1 * uncertainty_loss
-        return total_loss, type_loss, score_loss, uncertainty_loss
+        return total_loss, type_loss, score_loss, uncertainty_loss, replay_iter
 
     def _compute_pair_losses(self, batch: Sequence[RiskPairSample]):
-        x_a, x_b, preferred_a, target_a, target_b, weight, _ = self._pair_batch_tensors(batch)
+        x_a, x_b, preferred_a, target_a, target_b, weight, _, trusted_for_spread = self._pair_batch_tensors(batch)
         out_a = self.model(x_a)
         out_b = self.model(x_b)
         score_a = out_a["risk_score"]
@@ -299,24 +387,15 @@ class LightRiskTrainer:
         safer = torch.where(preferred_a, score_a, score_b)
         riskier = torch.where(preferred_a, score_b, score_a)
         ranking_loss = torch.relu(PAIR_RANK_MARGIN - (riskier - safer))
-        ranking_loss = torch.mean(ranking_loss * weight)
+        ranking_loss = torch.sum(ranking_loss * weight) / torch.clamp(torch.sum(weight), min=1.0)
 
         target_gap = torch.abs(target_a - target_b)
-        spread_mask = (target_gap > SPREAD_TARGET_DELTA).to(torch.float32)
+        spread_mask = ((target_gap > SPREAD_TARGET_DELTA) & trusted_for_spread).to(torch.float32)
         spread_gap = torch.abs(score_a - score_b)
         spread_loss = torch.relu(SPREAD_MIN_GAP - spread_gap) * spread_mask
-        spread_denom = torch.clamp(torch.sum(spread_mask), min=1.0)
+        spread_denom = torch.clamp(torch.sum(spread_mask * weight), min=1.0)
         spread_loss = torch.sum(spread_loss * weight) / spread_denom
-
-        regression_loss = 0.5 * (self.huber(score_a, target_a) + self.huber(score_b, target_b))
-        regression_loss = torch.mean(regression_loss * weight)
-
-        total_loss = (
-            float(self.config.ranking_loss_weight) * ranking_loss
-            + float(self.config.spread_loss_weight) * spread_loss
-            + 0.1 * regression_loss
-        )
-        return total_loss, ranking_loss, spread_loss, regression_loss
+        return ranking_loss, spread_loss
 
     def _pair_batch_tensors(self, batch: Sequence[RiskPairSample]):
         x_a = []
@@ -326,6 +405,7 @@ class LightRiskTrainer:
         target_b = []
         weight = []
         hard_negative = []
+        trusted_for_spread = []
         for sample in batch:
             x_a.append(history_action_feature(sample.history_scene, sample.action_a))
             x_b.append(history_action_feature(sample.history_scene, sample.action_b))
@@ -334,6 +414,7 @@ class LightRiskTrainer:
             target_b.append(float(sample.meta.get("target_risk_b", 0.0)))
             weight.append(float(sample.weight))
             hard_negative.append(bool(sample.meta.get("hard_negative", False)))
+            trusted_for_spread.append(bool(sample.meta.get("trusted_for_spread", False)))
         return (
             torch.tensor(np.array(x_a), dtype=torch.float32, device=self.device),
             torch.tensor(np.array(x_b), dtype=torch.float32, device=self.device),
@@ -342,7 +423,42 @@ class LightRiskTrainer:
             torch.tensor(target_b, dtype=torch.float32, device=self.device),
             torch.tensor(weight, dtype=torch.float32, device=self.device),
             torch.tensor(hard_negative, dtype=torch.bool, device=self.device),
+            torch.tensor(trusted_for_spread, dtype=torch.bool, device=self.device),
         )
+
+    def _build_replay_loader(self, replay_samples: Sequence[ActionConditionedSample]):
+        samples = list(replay_samples or [])
+        if not samples:
+            return None
+        return DataLoader(
+            _LightRiskDataset(samples),
+            batch_size=self.config.batch_size,
+            shuffle=True,
+            drop_last=False,
+        )
+
+    def _next_replay_batch(self, replay_iter, replay_loader):
+        if replay_loader is None:
+            return None, replay_iter
+        try:
+            batch = next(replay_iter)
+        except StopIteration:
+            replay_iter = iter(replay_loader)
+            batch = next(replay_iter)
+        return batch, replay_iter
+
+    def _compute_replay_losses(self, replay_iter, replay_loader) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, Any]:
+        zero = torch.tensor(0.0, dtype=torch.float32, device=self.device)
+        batch, replay_iter = self._next_replay_batch(replay_iter, replay_loader)
+        if batch is None:
+            return zero, zero, zero, zero, replay_iter
+        x, y_types, y_score = batch
+        x = x.to(self.device).to(torch.float32)
+        y_types = y_types.to(self.device).to(torch.float32)
+        y_score = y_score.to(self.device).to(torch.float32).squeeze(-1)
+        output = self.model(x)
+        total_loss, type_loss, score_loss, uncertainty_loss = self._compute_pointwise_losses(output, y_types, y_score)
+        return total_loss, type_loss, score_loss, uncertainty_loss, replay_iter
 
     @torch.no_grad()
     def _evaluate(self, samples: Sequence[ActionConditionedSample]):
@@ -381,6 +497,27 @@ class LightRiskTrainer:
 
         denom = max(1, steps)
         return total_sum / denom, type_sum / denom, score_sum / denom, uncertainty_sum / denom
+
+    def _evaluate_pointwise_samples(self, samples: Sequence[ActionConditionedSample]) -> Dict[str, float]:
+        if not samples:
+            return self._empty_pointwise_metrics()
+        total, type_loss, score_loss, uncertainty_loss = self._evaluate(samples)
+        return {
+            "sample_count": float(len(samples)),
+            "loss_total": float(total),
+            "loss_type": float(type_loss),
+            "loss_score": float(score_loss),
+            "loss_uncertainty": float(uncertainty_loss),
+        }
+
+    def _empty_pointwise_metrics(self) -> Dict[str, float]:
+        return {
+            "sample_count": 0.0,
+            "loss_total": 0.0,
+            "loss_type": 0.0,
+            "loss_score": 0.0,
+            "loss_uncertainty": 0.0,
+        }
 
     def _empty_pair_metrics(self) -> Dict[str, float]:
         return {

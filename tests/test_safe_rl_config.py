@@ -187,8 +187,13 @@ def test_risk_model_v2_defaults_enabled():
     config = load_safe_rl_config()
     assert config.light_risk.enable_v2 is True
     assert config.light_risk.pair_finetune is True
-    assert config.light_risk.ranking_loss_weight == 1.0
+    assert config.light_risk.ranking_loss_weight == 0.3
     assert config.world_model.enable_v2 is True
     assert config.world_model.pair_finetune is True
+    assert config.light_risk.pointwise_replay_weight == 1.0
+    assert config.light_risk.spread_loss_weight == 0.05
+    assert config.world_model.ranking_loss_weight == 0.3
     assert config.world_model.stage5_pair_weight == 1.0
-    assert config.world_model.stage4_pair_weight == 0.5
+    assert config.world_model.stage4_pair_weight == 0.2
+    assert config.world_model.pair_ft_freeze_traj_decoder is True
+    assert config.world_model.pair_ft_freeze_backbone == "partial"

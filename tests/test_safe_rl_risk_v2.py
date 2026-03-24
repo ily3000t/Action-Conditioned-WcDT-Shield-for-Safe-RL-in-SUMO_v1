@@ -73,3 +73,52 @@ def test_light_risk_pair_metrics_compute():
     metrics = trainer.evaluate_pairs([pair])
     assert metrics["pair_count"] == 1.0
     assert "pair_ranking_accuracy" in metrics
+
+
+
+def test_world_pair_tensorization_avoids_future_targets():
+    from safe_rl.models.world_model import WorldModelTrainer
+
+    config = WorldModelConfig(hidden_dim=64, future_steps=2, multimodal=2)
+    trainer = WorldModelTrainer(config=config, history_steps=2, device="cpu")
+    pair = RiskPairSample(
+        history_scene=_history_scene()[:2],
+        action_a=4,
+        action_b=3,
+        preferred_action=4,
+        source="stage5_trace_first_replacement",
+        weight=1.0,
+        meta={"target_risk_a": 0.1, "target_risk_b": 0.8, "trusted_for_spread": True},
+    )
+    batch_a, batch_b, *_ = trainer._tensorize_pair_batch([pair])
+    assert "target_future" not in batch_a
+    assert "target_future" not in batch_b
+
+
+def test_light_pair_batch_tracks_trusted_for_spread():
+    trainer = LightRiskTrainer(LightRiskConfig(hidden_dim=32, epochs=1, batch_size=2), device="cpu")
+    pair = RiskPairSample(
+        history_scene=_history_scene(),
+        action_a=4,
+        action_b=3,
+        preferred_action=4,
+        source="stage5_trace_first_replacement",
+        weight=1.0,
+        meta={"target_risk_a": 0.1, "target_risk_b": 0.8, "trusted_for_spread": True},
+    )
+    *_, trusted = trainer._pair_batch_tensors([pair])
+    assert bool(trusted[0].item()) is True
+
+
+def test_world_pair_ft_freeze_policy_freezes_traj_decoder():
+    from safe_rl.models.world_model import WorldModelTrainer
+
+    config = WorldModelConfig(hidden_dim=64, future_steps=2, multimodal=2, pair_ft_freeze_traj_decoder=True, pair_ft_freeze_backbone="partial")
+    trainer = WorldModelTrainer(config=config, history_steps=2, device="cpu")
+    grad_state, frozen, trainable = trainer._apply_pair_ft_freeze_policy()
+    try:
+        assert "traj_decoder" in frozen
+        assert "fusion" in trainable
+        assert "risk_score_head" in trainable
+    finally:
+        trainer._restore_grad_state(grad_state)

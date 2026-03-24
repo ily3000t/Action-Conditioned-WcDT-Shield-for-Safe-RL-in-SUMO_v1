@@ -1,4 +1,5 @@
 ﻿import copy
+import hashlib
 import inspect
 import math
 import datetime as dt
@@ -14,7 +15,7 @@ from safe_rl.config import SafeRLConfig, load_safe_rl_config
 from safe_rl.data.collector import SumoDataCollector
 from safe_rl.data.dataset_builder import ActionConditionedDatasetBuilder
 from safe_rl.data.pair_dataset import save_risk_pairs, summarize_pair_sources
-from safe_rl.data.types import InterventionRecord, RiskPairSample, scene_state_list_from_dicts
+from safe_rl.data.types import InterventionRecord, RiskPairSample, dataclass_to_dict, scene_state_list_from_dicts
 from safe_rl.eval import SafeRLEvaluator
 from safe_rl.pipeline.session_event_logger import IncrementalSessionEventLogger
 from safe_rl.pipeline.telemetry import BufferTelemetryTracker, Stage3TelemetryTracker
@@ -24,6 +25,11 @@ from safe_rl.sim import create_backend
 
 
 STAGE_ORDER = ("stage1", "stage2", "stage3", "stage4", "stage5")
+TRACE_TRUST_TTC_DELTA = 0.75
+TRACE_TRUST_DISTANCE_DELTA = 2.0
+TRACE_TRUST_REWARD_DELTA = 0.10
+TRACE_TRUST_TTC_SUPPORT = 0.50
+TRACE_TRUST_DISTANCE_SUPPORT = 1.50
 
 
 @dataclass
@@ -70,6 +76,7 @@ class SafeRLPipeline:
         self.stage3_session_events_path: Optional[Path] = None
         self.stage4_buffer_report_path: Optional[Path] = None
         self.stage5_paired_episode_results_path: Optional[Path] = None
+        self.risk_v2_eval_summary_path: Optional[Path] = None
         self.shield_sweep_summary_path: Optional[Path] = None
         self.shield_trace_dir: Optional[Path] = None
         self.shield_trace_summary_path: Optional[Path] = None
@@ -174,6 +181,7 @@ class SafeRLPipeline:
         self.stage3_session_events_path = self.reports_dir / "stage3_session_events.json"
         self.stage4_buffer_report_path = self.reports_dir / "stage4_buffer_report.json"
         self.stage5_paired_episode_results_path = self.reports_dir / "stage5_paired_episode_results.json"
+        self.risk_v2_eval_summary_path = self.reports_dir / "risk_v2_eval_summary.json"
         self.shield_sweep_summary_path = self.reports_dir / "shield_sweep_summary.json"
         self.shield_trace_dir = self.reports_dir / str(self.config.shield_trace.trace_dir_name)
         self.shield_trace_summary_path = self.shield_trace_dir / "trace_summary.json"
@@ -214,6 +222,7 @@ class SafeRLPipeline:
                 "stage3_session_events_report": str(self.stage3_session_events_path),
                 "stage4_buffer_report": str(self.stage4_buffer_report_path),
                 "stage5_paired_episode_results": str(self.stage5_paired_episode_results_path),
+                "risk_v2_eval_summary_report": str(self.risk_v2_eval_summary_path),
                 "shield_sweep_summary_report": str(self.shield_sweep_summary_path),
                 "shield_trace_summary_report": str(self.shield_trace_summary_path),
                 "shield_trace_tuning_summary_report": str(self.shield_trace_tuning_summary_path),
@@ -386,8 +395,23 @@ class SafeRLPipeline:
         shielded_suffix_target = self._trace_suffix_target(shielded_steps[first_replacement_step:])
         baseline_collision = any(bool(step.get("collision", False)) for step in baseline_steps[first_replacement_step:])
         shielded_collision = any(bool(step.get("collision", False)) for step in shielded_steps[first_replacement_step:])
+        baseline_min_ttc = self._trace_suffix_min_metric(baseline_steps[first_replacement_step:], "ttc", fallback=1e6, prefer_lower=True)
+        shielded_min_ttc = self._trace_suffix_min_metric(shielded_steps[first_replacement_step:], "ttc", fallback=1e6, prefer_lower=True)
+        baseline_min_distance = self._trace_suffix_min_metric(baseline_steps[first_replacement_step:], "min_distance", fallback=1e6, prefer_lower=True)
+        shielded_min_distance = self._trace_suffix_min_metric(shielded_steps[first_replacement_step:], "min_distance", fallback=1e6, prefer_lower=True)
         reward_gap = float(self._trace_suffix_reward(shielded_steps[first_replacement_step:]) - self._trace_suffix_reward(baseline_steps[first_replacement_step:]))
         hard_negative = bool((not baseline_collision and shielded_collision) or reward_gap < -0.05)
+        trusted_for_spread = self._is_trusted_stage5_pair(
+            baseline_collision=baseline_collision,
+            shielded_collision=shielded_collision,
+            baseline_min_ttc=baseline_min_ttc,
+            shielded_min_ttc=shielded_min_ttc,
+            baseline_min_distance=baseline_min_distance,
+            shielded_min_distance=shielded_min_distance,
+            reward_gap=reward_gap,
+            hard_negative=hard_negative,
+        )
+        proof = self._build_same_state_proof(history_scene_payload, selected_step)
         sample = RiskPairSample(
             history_scene=history_scene,
             action_a=raw_action,
@@ -402,10 +426,16 @@ class SafeRLPipeline:
                 "target_risk_a": float(baseline_suffix_target),
                 "target_risk_b": float(shielded_suffix_target),
                 "hard_negative": hard_negative,
+                "trusted_for_spread": bool(trusted_for_spread),
                 "baseline_collision": bool(baseline_collision),
                 "shielded_collision": bool(shielded_collision),
+                "baseline_min_ttc": float(baseline_min_ttc),
+                "shielded_min_ttc": float(shielded_min_ttc),
+                "baseline_min_distance": float(baseline_min_distance),
+                "shielded_min_distance": float(shielded_min_distance),
                 "reward_gap": reward_gap,
                 "source_path": str(payload.get("pair_path", "")),
+                **proof,
             },
         )
         return sample, ""
@@ -432,6 +462,7 @@ class SafeRLPipeline:
                 summary["skipped_equal_risk"] += 1
                 continue
             preferred_action = int(record.final_action if float(record.final_risk) < float(record.raw_risk) else record.raw_action)
+            proof = self._build_same_state_proof([dataclass_to_dict(scene) for scene in list(record.history_scene)], {})
             sample = RiskPairSample(
                 history_scene=list(record.history_scene),
                 action_a=int(record.raw_action),
@@ -445,6 +476,8 @@ class SafeRLPipeline:
                     "reason": str(record.reason),
                     "episode_id": str(dict(record.meta or {}).get("episode_id", "")),
                     "hard_negative": False,
+                    "trusted_for_spread": False,
+                    **proof,
                 },
             )
             pair_samples.append(sample)
@@ -502,6 +535,88 @@ class SafeRLPipeline:
         if not values:
             return float(fallback)
         return float(min(values) if prefer_lower else max(values))
+
+    def _is_trusted_stage5_pair(
+        self,
+        baseline_collision: bool,
+        shielded_collision: bool,
+        baseline_min_ttc: float,
+        shielded_min_ttc: float,
+        baseline_min_distance: float,
+        shielded_min_distance: float,
+        reward_gap: float,
+        hard_negative: bool,
+    ) -> bool:
+        if hard_negative or baseline_collision != shielded_collision:
+            return True
+        ttc_diff = abs(float(baseline_min_ttc) - float(shielded_min_ttc))
+        distance_diff = abs(float(baseline_min_distance) - float(shielded_min_distance))
+        if ttc_diff >= TRACE_TRUST_TTC_DELTA:
+            return True
+        if distance_diff >= TRACE_TRUST_DISTANCE_DELTA:
+            return True
+        if abs(float(reward_gap)) >= TRACE_TRUST_REWARD_DELTA and (
+            ttc_diff >= TRACE_TRUST_TTC_SUPPORT or distance_diff >= TRACE_TRUST_DISTANCE_SUPPORT
+        ):
+            return True
+        return False
+
+    def _build_same_state_proof(self, history_scene_payload: Sequence[Dict[str, Any]], reference_step: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+        payload = list(history_scene_payload or [])
+        if not payload:
+            return {
+                "history_hash": "",
+                "ego_lane_id": str((reference_step or {}).get("ego_lane_id", "")),
+                "ego_x": 0.0,
+                "ego_y": 0.0,
+                "ego_speed": 0.0,
+                "neighbor_summary": [],
+            }
+
+        canonical = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+        history_hash = hashlib.sha1(canonical.encode("utf-8")).hexdigest()
+        last_scene = dict(payload[-1] or {})
+        vehicles = list(last_scene.get("vehicles", []) or [])
+        ego_id = str(last_scene.get("ego_id", ""))
+        ego_vehicle = None
+        for vehicle in vehicles:
+            if str(dict(vehicle or {}).get("vehicle_id", "")) == ego_id:
+                ego_vehicle = dict(vehicle or {})
+                break
+        if ego_vehicle is None and vehicles:
+            ego_vehicle = dict(vehicles[0] or {})
+        ego_vehicle = ego_vehicle or {}
+        ego_x = float(ego_vehicle.get("x", 0.0))
+        ego_y = float(ego_vehicle.get("y", 0.0))
+        ego_speed = float(((float(ego_vehicle.get("vx", 0.0)) ** 2) + (float(ego_vehicle.get("vy", 0.0)) ** 2)) ** 0.5)
+        ego_lane_id = str((reference_step or {}).get("ego_lane_id", ego_vehicle.get("lane_id", "")))
+
+        neighbors = []
+        for vehicle in vehicles:
+            item = dict(vehicle or {})
+            vehicle_id = str(item.get("vehicle_id", ""))
+            if vehicle_id == ego_id:
+                continue
+            rel_x = float(item.get("x", 0.0)) - ego_x
+            rel_y = float(item.get("y", 0.0)) - ego_y
+            rel_speed = float((((float(item.get("vx", 0.0)) - float(ego_vehicle.get("vx", 0.0))) ** 2) + ((float(item.get("vy", 0.0)) - float(ego_vehicle.get("vy", 0.0))) ** 2)) ** 0.5)
+            neighbors.append(
+                {
+                    "vehicle_id": vehicle_id,
+                    "rel_x": round(rel_x, 3),
+                    "rel_y": round(rel_y, 3),
+                    "rel_speed": round(rel_speed, 3),
+                }
+            )
+        neighbors.sort(key=lambda item: (abs(float(item["rel_x"])) + abs(float(item["rel_y"])), str(item["vehicle_id"])))
+        return {
+            "history_hash": history_hash,
+            "ego_lane_id": ego_lane_id,
+            "ego_x": round(ego_x, 3),
+            "ego_y": round(ego_y, 3),
+            "ego_speed": round(ego_speed, 3),
+            "neighbor_summary": neighbors[:4],
+        }
 
     def _build_predictors_from_saved_models(self):
         self._require_files("model_load", [self.light_model_path, self.world_model_path])
@@ -648,8 +763,10 @@ class SafeRLPipeline:
             train_samples,
             val_samples,
             model_dir=self.models_dir,
-            tb_light_writer=tb_manager.get_writer("light_risk"),
-            tb_world_writer=tb_manager.get_writer("world_model"),
+            tb_light_base_writer=tb_manager.get_writer("light_risk_base"),
+            tb_light_pair_writer=tb_manager.get_writer("light_risk_pair_ft"),
+            tb_world_base_writer=tb_manager.get_writer("world_model_base"),
+            tb_world_pair_writer=tb_manager.get_writer("world_model_pair_ft"),
             stage5_pair_samples=pair_payload["stage5_pairs"],
             stage4_pair_samples=pair_payload["stage4_pairs"],
         )
@@ -678,8 +795,19 @@ class SafeRLPipeline:
             "pair_generation": dict(pair_payload.get("generation_summary", {})),
             "light_training": dict(training_meta.get("light_training", {})),
             "world_training": dict(training_meta.get("world_training", {})),
+            "base_train_metrics": {
+                "light": dict(training_meta.get("light_training", {})),
+                "world": dict(training_meta.get("world_training", {})),
+            },
+            "pair_finetune_metrics": {
+                "light": dict(training_meta.get("light_pair_ft", {})),
+                "world": dict(training_meta.get("world_pair_ft", {})),
+            },
+            "world_pair_ft_frozen_modules": list(dict(training_meta.get("world_pair_ft", {})).get("world_pair_ft_frozen_modules", [])),
+            "world_pair_ft_trainable_modules": list(dict(training_meta.get("world_pair_ft", {})).get("world_pair_ft_trainable_modules", [])),
         }
         self._write_json(self.stage2_training_report_path, stage2_report)
+        self._write_risk_v2_eval_summary_from_stage2(stage2_report)
 
         return {
             "light_model": str(self.light_model_path),
@@ -817,8 +945,10 @@ class SafeRLPipeline:
         train_samples,
         val_samples,
         model_dir: Path,
-        tb_light_writer=None,
-        tb_world_writer=None,
+        tb_light_base_writer=None,
+        tb_light_pair_writer=None,
+        tb_world_base_writer=None,
+        tb_world_pair_writer=None,
         stage5_pair_samples: Optional[Sequence[RiskPairSample]] = None,
         stage4_pair_samples: Optional[Sequence[RiskPairSample]] = None,
     ):
@@ -837,8 +967,8 @@ class SafeRLPipeline:
         all_pair_samples = stage5_pair_samples + stage4_pair_samples
 
         light_trainer = LightRiskTrainer(self.config.light_risk, seed=self.config.sim.random_seed)
-        light_predictor = light_trainer.fit(train_samples, val_samples, tb_writer=tb_light_writer)
-        light_pair_metrics = light_trainer.fine_tune_pairs(all_pair_samples, tb_writer=tb_light_writer)
+        light_predictor = light_trainer.fit(train_samples, val_samples, tb_writer=tb_light_base_writer)
+        light_pair_metrics = light_trainer.fine_tune_pairs(all_pair_samples, replay_samples=train_samples, tb_writer=tb_light_pair_writer)
         light_trainer.save(str(self.light_model_path))
 
         world_trainer = WorldModelTrainer(
@@ -846,8 +976,8 @@ class SafeRLPipeline:
             history_steps=self.config.sim.history_steps,
             seed=self.config.sim.random_seed,
         )
-        world_predictor = world_trainer.fit(train_samples, val_samples, tb_writer=tb_world_writer)
-        world_pair_metrics = world_trainer.fine_tune_pairs(all_pair_samples, tb_writer=tb_world_writer)
+        world_predictor = world_trainer.fit(train_samples, val_samples, tb_writer=tb_world_base_writer)
+        world_pair_metrics = world_trainer.fine_tune_pairs(all_pair_samples, replay_samples=train_samples, tb_writer=tb_world_pair_writer)
         world_trainer.save(str(self.world_model_path))
 
         training_meta = {
@@ -858,6 +988,8 @@ class SafeRLPipeline:
             },
             "light_training": dict(getattr(light_trainer, "last_train_report", {})),
             "world_training": dict(getattr(world_trainer, "last_train_report", {})),
+            "light_pair_ft": dict(getattr(light_trainer, "last_pair_ft_report", {})),
+            "world_pair_ft": dict(getattr(world_trainer, "last_pair_ft_report", {})),
         }
         return light_predictor, world_predictor, training_meta
 
@@ -1147,6 +1279,7 @@ class SafeRLPipeline:
             distill_env.close()
             result["system_distilled"] = distilled_metrics
 
+        self._write_risk_v2_eval_summary_from_stage5(result)
         return result
 
     def _shield_sweep_enabled(self) -> bool:
@@ -1550,6 +1683,115 @@ class SafeRLPipeline:
         with target_path.open("w", encoding="utf-8") as f:
             json.dump(report, f, indent=2, ensure_ascii=False, default=str)
 
+    def _build_pair_before_after(self, before_metrics: Dict[str, Any], after_metrics: Dict[str, Any]) -> Dict[str, Any]:
+        return {
+            "before": dict(before_metrics or {}),
+            "after": dict(after_metrics or {}),
+        }
+
+    def _select_focus_trace_variant(self, tuning_summary: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+        if not tuning_summary:
+            return None
+        variants = list(tuning_summary.get("variants", []) or [])
+        if not variants:
+            return None
+        preferred = ["D1", "E2", "F1", "F2", "F3", "C_baseline"]
+        by_name = {str(item.get("variant_name", "")): item for item in variants}
+        for name in preferred:
+            if name in by_name:
+                return dict(by_name[name])
+        return dict(variants[0])
+
+    def _read_trace_focus_snapshot(self) -> Optional[Dict[str, Any]]:
+        if self.shield_trace_tuning_summary_path is None or not self.shield_trace_tuning_summary_path.exists():
+            return None
+        tuning_summary = self._read_json(self.shield_trace_tuning_summary_path)
+        focus = self._select_focus_trace_variant(tuning_summary)
+        if focus is None:
+            return None
+        return {
+            "variant_name": str(focus.get("variant_name", "")),
+            "trace_summary_path": str(focus.get("trace_summary_path", "")),
+            "margin_analysis_path": str(focus.get("margin_analysis_path", "")),
+            "candidate_selected_count": int(focus.get("candidate_selected_count", 0)),
+            "mean_intervention_count": float(focus.get("mean_intervention_count", 0.0)),
+            "mean_risk_reduction": float(focus.get("mean_risk_reduction", 0.0)),
+            "mean_reward_gap_to_baseline_policy": float(focus.get("mean_reward_gap_to_baseline_policy", 0.0)),
+            "margin_near_threshold_band_ratio": float(focus.get("margin_near_threshold_band_ratio", 0.0)),
+            "effective_shield_config": dict(focus.get("effective_shield_config", {})),
+        }
+
+    def _write_risk_v2_eval_summary_from_stage2(self, stage2_report: Dict[str, Any]):
+        if self.risk_v2_eval_summary_path is None:
+            return None
+        light_pair_ft = dict(stage2_report.get("pair_finetune_metrics", {}).get("light", {}))
+        world_pair_ft = dict(stage2_report.get("pair_finetune_metrics", {}).get("world", {}))
+        before_trace = self._read_trace_focus_snapshot()
+        summary = {
+            "run_id": str(self.run_id or ""),
+            "updated_at": dt.datetime.now().isoformat(timespec="seconds"),
+            "stage2_training_report_path": str(self.stage2_training_report_path),
+            "model_variants": {
+                "light": str(stage2_report.get("light_model_variant", "")),
+                "world": str(stage2_report.get("world_model_variant", "")),
+            },
+            "pair_finetune_applied": bool(stage2_report.get("pair_finetune_applied", False)),
+            "pair_source_weights": dict(stage2_report.get("pair_source_weights", {})),
+            "base_train_metrics": dict(stage2_report.get("base_train_metrics", {})),
+            "pair_finetune_metrics": dict(stage2_report.get("pair_finetune_metrics", {})),
+            "world_pair_ft_frozen_modules": list(stage2_report.get("world_pair_ft_frozen_modules", [])),
+            "world_pair_ft_trainable_modules": list(stage2_report.get("world_pair_ft_trainable_modules", [])),
+            "before_trace_metrics": before_trace,
+            "after_trace_metrics": None,
+            "score_spread_before_after": {
+                "light": self._build_pair_before_after(light_pair_ft.get("before_pair_metrics", {}), light_pair_ft.get("after_pair_metrics", {})),
+                "world": self._build_pair_before_after(world_pair_ft.get("before_pair_metrics", {}), world_pair_ft.get("after_pair_metrics", {})),
+            },
+            "same_state_score_gap_before_after": {
+                "light": self._build_pair_before_after(light_pair_ft.get("before_pair_metrics", {}), light_pair_ft.get("after_pair_metrics", {})),
+                "world": self._build_pair_before_after(world_pair_ft.get("before_pair_metrics", {}), world_pair_ft.get("after_pair_metrics", {})),
+            },
+            "pair_ranking_accuracy_before_after": {
+                "light": self._build_pair_before_after(light_pair_ft.get("before_pair_metrics", {}), light_pair_ft.get("after_pair_metrics", {})),
+                "world": self._build_pair_before_after(world_pair_ft.get("before_pair_metrics", {}), world_pair_ft.get("after_pair_metrics", {})),
+            },
+            "hard_negative_accuracy_before_after": {
+                "light": self._build_pair_before_after(light_pair_ft.get("before_pair_metrics", {}), light_pair_ft.get("after_pair_metrics", {})),
+                "world": self._build_pair_before_after(world_pair_ft.get("before_pair_metrics", {}), world_pair_ft.get("after_pair_metrics", {})),
+            },
+            "margin_near_threshold_band_ratio_before_after": {
+                "before": None if before_trace is None else float(before_trace.get("margin_near_threshold_band_ratio", 0.0)),
+                "after": None,
+            },
+        }
+        self._write_json(self.risk_v2_eval_summary_path, summary)
+        self.manifest.setdefault("artifact_paths", {})["risk_v2_eval_summary_report"] = str(self.risk_v2_eval_summary_path)
+        return summary
+
+    def _write_risk_v2_eval_summary_from_stage5(self, evaluation: Dict[str, Any]):
+        if self.risk_v2_eval_summary_path is None:
+            return None
+        if self.risk_v2_eval_summary_path.exists():
+            summary = self._read_json(self.risk_v2_eval_summary_path)
+        else:
+            summary = {"run_id": str(self.run_id or "")}
+        after_trace = self._read_trace_focus_snapshot()
+        summary["updated_at"] = dt.datetime.now().isoformat(timespec="seconds")
+        summary["stage5_report_path"] = str(self.report_path)
+        summary["after_trace_metrics"] = after_trace
+        summary["stage5_effective_shield_config"] = dict(evaluation.get("effective_shield_config", {}))
+        summary["stage5_paired_episode_results_path"] = str(evaluation.get("stage5_paired_episode_results_path", ""))
+        summary["stage5_trace_summary_path"] = str(evaluation.get("shield_trace_summary_path", ""))
+        summary["stage5_trace_tuning_summary_path"] = str(evaluation.get("shield_trace_tuning_summary_path", ""))
+        summary["stage5_margin_analysis_summary_path"] = str(evaluation.get("shield_margin_analysis_summary_path", ""))
+        before_trace = summary.get("before_trace_metrics")
+        summary["margin_near_threshold_band_ratio_before_after"] = {
+            "before": None if before_trace is None else float(dict(before_trace).get("margin_near_threshold_band_ratio", 0.0)),
+            "after": None if after_trace is None else float(after_trace.get("margin_near_threshold_band_ratio", 0.0)),
+        }
+        self._write_json(self.risk_v2_eval_summary_path, summary)
+        self.manifest.setdefault("artifact_paths", {})["risk_v2_eval_summary_report"] = str(self.risk_v2_eval_summary_path)
+        return summary
 
     def _evaluate_policy_with_trace_option(
         self,
@@ -2068,6 +2310,8 @@ class SafeRLPipeline:
             for item in shielded_steps
             if bool(item.get("replacement_happened", False)) and not bool(item.get("fallback_used", False))
         )
+        proof_step = shielded_steps[first_replacement_step] if 0 <= first_replacement_step < len(shielded_steps) else {}
+        same_state_proof = self._build_same_state_proof(list(proof_step.get("history_scene", []) or []), proof_step)
 
         return {
             "pair_index": int(pair_index),
@@ -2100,6 +2344,7 @@ class SafeRLPipeline:
             "merge_guard_triggered": bool(merge_guard_triggered),
             "has_fallback": bool(has_fallback),
             "collision_after_replacement": bool(collision_after_replacement),
+            **same_state_proof,
             "baseline_steps": baseline_steps,
             "shielded_steps": shielded_steps,
             "aligned_steps": aligned_steps,

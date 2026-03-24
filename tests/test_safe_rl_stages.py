@@ -736,6 +736,9 @@ def test_stage5_trace_writes_pair_files_and_summary(monkeypatch):
     assert pair_payload["raw_passthrough_count"] == 0
     assert pair_payload["merge_lateral_guard_block_count"] == 1
     assert pair_payload["candidate_selected_count"] == 1
+    assert "history_hash" in pair_payload
+    assert "ego_lane_id" in pair_payload
+    assert isinstance(pair_payload["neighbor_summary"], list)
     assert pair_payload["aligned_steps"][0]["shielded"]["chosen_candidate_index"] == 1
     assert Path(result["shield_trace_tuning_summary_path"]).exists()
     tuning_summary = json.loads(Path(result["shield_trace_tuning_summary_path"]).read_text(encoding="utf-8"))
@@ -743,6 +746,7 @@ def test_stage5_trace_writes_pair_files_and_summary(monkeypatch):
     assert tuning_summary["variants"][0]["variant_name"] == "C_baseline"
     assert tuning_summary["variants"][0]["effective_shield_config"]["effective_raw_passthrough_threshold"] == pytest.approx(0.20)
     assert Path(result["shield_margin_analysis_summary_path"]).exists()
+    assert Path(pipeline.risk_v2_eval_summary_path).exists()
     margin_summary = json.loads(Path(result["shield_margin_analysis_summary_path"]).read_text(encoding="utf-8"))
     assert margin_summary["variants"][0]["variant_name"] == "C_baseline"
     assert margin_summary["variants"][0]["replacement_step_count"] == 1
@@ -1163,6 +1167,9 @@ def test_stage2_pair_dataset_builder_uses_stage5_trace_and_stage4_buffer():
     assert len(payload["stage4_pairs"]) == 1
     assert payload["stage5_pairs"][0].preferred_action == 4
     assert payload["stage5_pairs"][0].meta["hard_negative"] is True
+    assert payload["stage5_pairs"][0].meta["trusted_for_spread"] is True
+    assert payload["stage5_pairs"][0].meta["history_hash"]
+    assert "neighbor_summary" in payload["stage5_pairs"][0].meta
     assert Path(payload["pair_dataset_paths"]["stage5"]).exists()
     assert Path(payload["pair_dataset_paths"]["stage4"]).exists()
 
@@ -1234,6 +1241,8 @@ def test_stage2_report_includes_pair_finetune_metadata(monkeypatch):
             "ranking_metrics": {"light": {"pair_ranking_accuracy": 1.0}, "world": {"pair_ranking_accuracy": 1.0}},
             "light_training": {"variant": "v2"},
             "world_training": {"variant": "v2"},
+            "light_pair_ft": {"before_pair_metrics": {"pair_ranking_accuracy": 0.5, "same_state_score_gap": 0.01, "score_spread": 0.01, "hard_negative_accuracy": 0.5}, "after_pair_metrics": {"pair_ranking_accuracy": 0.8, "same_state_score_gap": 0.04, "score_spread": 0.05, "hard_negative_accuracy": 0.75}},
+            "world_pair_ft": {"before_pair_metrics": {"pair_ranking_accuracy": 0.4, "same_state_score_gap": 0.01, "score_spread": 0.01, "hard_negative_accuracy": 0.4}, "after_pair_metrics": {"pair_ranking_accuracy": 0.7, "same_state_score_gap": 0.03, "score_spread": 0.04, "hard_negative_accuracy": 0.7}, "world_pair_ft_frozen_modules": ["traj_decoder"], "world_pair_ft_trainable_modules": ["fusion", "risk_score_head"]},
         }
 
     monkeypatch.setattr("safe_rl.pipeline.pipeline.SafeRLEvaluator", _DummyEvaluator)
@@ -1249,3 +1258,12 @@ def test_stage2_report_includes_pair_finetune_metadata(monkeypatch):
     assert report["world_model_variant"] == "v2"
     assert report["pair_source_counts"]["stage5_trace_first_replacement"] == 1
     assert report["pair_source_counts"]["stage4_buffer"] == 1
+    assert report["pair_source_weights"]["stage4_buffer"] == pytest.approx(0.2)
+    assert "base_train_metrics" in report
+    assert "pair_finetune_metrics" in report
+    assert report["world_pair_ft_frozen_modules"] == ["traj_decoder"]
+    assert report["world_pair_ft_trainable_modules"] == ["fusion", "risk_score_head"]
+    risk_v2_summary = json.loads(Path(pipeline.risk_v2_eval_summary_path).read_text(encoding="utf-8"))
+    assert risk_v2_summary["pair_finetune_applied"] is True
+    assert risk_v2_summary["score_spread_before_after"]["light"]["before"]["score_spread"] == pytest.approx(0.01)
+    assert risk_v2_summary["score_spread_before_after"]["world"]["after"]["score_spread"] == pytest.approx(0.04)
