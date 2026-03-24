@@ -375,7 +375,7 @@ class LightRiskTrainer:
         overall_error = torch.abs(output["risk_score"] - y_score).detach()
         uncertainty_loss = torch.mean((output["uncertainty"] - overall_error) ** 2)
         total_loss = type_loss + score_loss + 0.1 * uncertainty_loss
-        return total_loss, type_loss, score_loss, uncertainty_loss, replay_iter
+        return total_loss, type_loss, score_loss, uncertainty_loss
 
     def _compute_pair_losses(self, batch: Sequence[RiskPairSample]):
         x_a, x_b, preferred_a, target_a, target_b, weight, _, trusted_for_spread = self._pair_batch_tensors(batch)
@@ -458,7 +458,7 @@ class LightRiskTrainer:
         y_score = y_score.to(self.device).to(torch.float32).squeeze(-1)
         output = self.model(x)
         total_loss, type_loss, score_loss, uncertainty_loss = self._compute_pointwise_losses(output, y_types, y_score)
-        return total_loss, type_loss, score_loss, uncertainty_loss, replay_iter
+        return total_loss, type_loss, score_loss, uncertainty_loss
 
     @torch.no_grad()
     def _evaluate(self, samples: Sequence[ActionConditionedSample]):

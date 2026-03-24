@@ -758,7 +758,7 @@ class WorldModelTrainer:
         zero = torch.tensor(0.0, dtype=torch.float32, device=self.device)
         batch_samples, replay_iter = self._next_replay_batch(replay_iter, replay_loader)
         if batch_samples is None:
-            return zero, zero, zero, zero
+            return zero, zero, zero, zero, replay_iter
         batch = self._move_batch(self.tensorizer.tensorize_batch(batch_samples))
         output = self.model(batch)
         type_loss, score_loss, uncertainty_loss = self._compute_risk_losses(batch, output)
