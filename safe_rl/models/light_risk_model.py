@@ -211,10 +211,15 @@ class LightRiskTrainer:
         replay_samples: Optional[Sequence[ActionConditionedSample]] = None,
         tb_writer=None,
     ) -> Dict[str, float]:
+        pair_count = int(len(pair_samples))
+        replay_sample_count = int(len(replay_samples or []))
+        trusted_pair_count = sum(1 for sample in pair_samples if bool(sample.meta.get("trusted_for_spread", False)))
+        hard_negative_count = sum(1 for sample in pair_samples if bool(sample.meta.get("hard_negative", False)))
         before_pair_metrics = self.evaluate_pairs(pair_samples)
         before_pointwise_metrics = self._evaluate_pointwise_samples(replay_samples or [])
 
         if not self.config.pair_finetune or len(pair_samples) == 0:
+            print(f"[LightRisk PairFT] skipped, enabled={bool(self.config.pair_finetune)}, pairs={pair_count}, trusted_pairs={trusted_pair_count}, hard_negatives={hard_negative_count}, replay_samples={replay_sample_count}")
             self.last_pair_metrics = before_pair_metrics
             self.last_pair_ft_report = {
                 "enabled": bool(self.config.pair_finetune),
@@ -228,6 +233,7 @@ class LightRiskTrainer:
             }
             return self.last_pair_metrics
 
+        print(f"[LightRisk PairFT] start on {self.device}, pairs={pair_count}, trusted_pairs={trusted_pair_count}, hard_negatives={hard_negative_count}, replay_samples={replay_sample_count}")
         loader = DataLoader(
             RiskPairDataset(pair_samples),
             batch_size=self.config.batch_size,
@@ -291,6 +297,11 @@ class LightRiskTrainer:
                     "loss_spread": epoch_spread / epoch_steps,
                 }
                 epoch_metrics.append(epoch_summary)
+                print(
+                    f"[LightRisk PairFT] epoch {epoch_idx + 1}/{max(1, int(self.config.pair_finetune_epochs))}, "
+                    f"total={epoch_summary['loss_total']:.6f}, pointwise={epoch_summary['loss_pointwise']:.6f}, "
+                    f"ranking={epoch_summary['loss_ranking']:.6f}, spread={epoch_summary['loss_spread']:.6f}"
+                )
                 if tb_writer is not None:
                     tb_writer.add_scalar("loss/epoch_total", epoch_summary["loss_total"], epoch_idx)
                     tb_writer.add_scalar("loss/epoch_pointwise", epoch_summary["loss_pointwise"], epoch_idx)
