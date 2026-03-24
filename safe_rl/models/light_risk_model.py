@@ -458,7 +458,7 @@ class LightRiskTrainer:
         y_score = y_score.to(self.device).to(torch.float32).squeeze(-1)
         output = self.model(x)
         total_loss, type_loss, score_loss, uncertainty_loss = self._compute_pointwise_losses(output, y_types, y_score)
-        return total_loss, type_loss, score_loss, uncertainty_loss
+        return total_loss, type_loss, score_loss, uncertainty_loss, replay_iter
 
     @torch.no_grad()
     def _evaluate(self, samples: Sequence[ActionConditionedSample]):
