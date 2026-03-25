@@ -627,7 +627,6 @@ class WorldModelTrainer:
         brier_terms = []
         unique_scores = set()
 
-        print(f"[WorldModel PairFT] start on {self.device}, pairs={len(pair_samples)}, replay_samples={len(replay_samples or [])}")
         loader = DataLoader(
             RiskPairDataset(pair_samples),
             batch_size=self.config.batch_size,
