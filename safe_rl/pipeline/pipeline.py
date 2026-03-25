@@ -339,7 +339,10 @@ class SafeRLPipeline:
             "trace_dirs_seen": 0,
             "pair_files_seen": 0,
             "pairs_created": 0,
+            "skipped_missing_same_state_proof": 0,
             "skipped_missing_history": 0,
+            "skipped_invalid_first_replacement_step": 0,
+            "skipped_missing_actions": 0,
             "skipped_no_replacement": 0,
             "skipped_no_preference": 0,
         }
@@ -372,34 +375,61 @@ class SafeRLPipeline:
 
         shielded_steps = list(payload.get("shielded_steps", []) or [])
         baseline_steps = list(payload.get("baseline_steps", []) or [])
-        if first_replacement_step >= len(shielded_steps):
-            return None, "skipped_no_replacement"
-        selected_step = dict(shielded_steps[first_replacement_step] or {})
-        history_scene_payload = list(selected_step.get("history_scene", []) or [])
+        aligned_steps = list(payload.get("aligned_steps", []) or [])
+        aligned_step = self._trace_payload_step_at(aligned_steps, first_replacement_step)
+        selected_step = self._trace_payload_step_at(shielded_steps, first_replacement_step)
+        aligned_shielded_step = dict(aligned_step.get("shielded", {}) or {})
+        aligned_baseline_step = dict(aligned_step.get("baseline", {}) or {})
+        baseline_step = self._trace_payload_step_at(baseline_steps, first_replacement_step)
+
+        if not selected_step:
+            selected_step = aligned_shielded_step
+        if not selected_step:
+            return None, "skipped_invalid_first_replacement_step"
+
+        raw_action = self._first_valid_int(
+            selected_step.get("raw_action", None),
+            aligned_baseline_step.get("raw_action", None),
+            baseline_step.get("raw_action", None),
+        )
+        replaced_action = self._first_valid_int(
+            selected_step.get("final_action", None),
+            aligned_shielded_step.get("final_action", None),
+        )
+        if raw_action < 0 or replaced_action < 0:
+            return None, "skipped_missing_actions"
+
+        history_scene_payload = self._first_nonempty_list(
+            selected_step.get("history_scene", None),
+            aligned_shielded_step.get("history_scene", None),
+            baseline_step.get("history_scene", None),
+            aligned_baseline_step.get("history_scene", None),
+            payload.get("history_scene", None),
+        )
         if not history_scene_payload:
             return None, "skipped_missing_history"
 
+        baseline_suffix_steps = list(baseline_steps[first_replacement_step:]) if first_replacement_step < len(baseline_steps) else ([baseline_step] if baseline_step else [])
+        shielded_suffix_steps = list(shielded_steps[first_replacement_step:]) if first_replacement_step < len(shielded_steps) else ([selected_step] if selected_step else [])
         preferred_action = self._preferred_action_from_trace_suffix(
-            baseline_steps=baseline_steps[first_replacement_step:],
-            shielded_steps=shielded_steps[first_replacement_step:],
-            raw_action=int(selected_step.get("raw_action", -1)),
-            replaced_action=int(selected_step.get("final_action", -1)),
+            baseline_steps=baseline_suffix_steps,
+            shielded_steps=shielded_suffix_steps,
+            raw_action=raw_action,
+            replaced_action=replaced_action,
         )
         if preferred_action is None:
             return None, "skipped_no_preference"
 
         history_scene = scene_state_list_from_dicts(history_scene_payload)
-        raw_action = int(selected_step.get("raw_action", -1))
-        replaced_action = int(selected_step.get("final_action", -1))
-        baseline_suffix_target = self._trace_suffix_target(baseline_steps[first_replacement_step:])
-        shielded_suffix_target = self._trace_suffix_target(shielded_steps[first_replacement_step:])
-        baseline_collision = any(bool(step.get("collision", False)) for step in baseline_steps[first_replacement_step:])
-        shielded_collision = any(bool(step.get("collision", False)) for step in shielded_steps[first_replacement_step:])
-        baseline_min_ttc = self._trace_suffix_min_metric(baseline_steps[first_replacement_step:], "ttc", fallback=1e6, prefer_lower=True)
-        shielded_min_ttc = self._trace_suffix_min_metric(shielded_steps[first_replacement_step:], "ttc", fallback=1e6, prefer_lower=True)
-        baseline_min_distance = self._trace_suffix_min_metric(baseline_steps[first_replacement_step:], "min_distance", fallback=1e6, prefer_lower=True)
-        shielded_min_distance = self._trace_suffix_min_metric(shielded_steps[first_replacement_step:], "min_distance", fallback=1e6, prefer_lower=True)
-        reward_gap = float(self._trace_suffix_reward(shielded_steps[first_replacement_step:]) - self._trace_suffix_reward(baseline_steps[first_replacement_step:]))
+        baseline_suffix_target = self._trace_suffix_target(baseline_suffix_steps)
+        shielded_suffix_target = self._trace_suffix_target(shielded_suffix_steps)
+        baseline_collision = any(bool(step.get("collision", False)) for step in baseline_suffix_steps)
+        shielded_collision = any(bool(step.get("collision", False)) for step in shielded_suffix_steps)
+        baseline_min_ttc = self._trace_suffix_min_metric(baseline_suffix_steps, "ttc", fallback=1e6, prefer_lower=True)
+        shielded_min_ttc = self._trace_suffix_min_metric(shielded_suffix_steps, "ttc", fallback=1e6, prefer_lower=True)
+        baseline_min_distance = self._trace_suffix_min_metric(baseline_suffix_steps, "min_distance", fallback=1e6, prefer_lower=True)
+        shielded_min_distance = self._trace_suffix_min_metric(shielded_suffix_steps, "min_distance", fallback=1e6, prefer_lower=True)
+        reward_gap = float(self._trace_suffix_reward(shielded_suffix_steps) - self._trace_suffix_reward(baseline_suffix_steps))
         hard_negative = bool((not baseline_collision and shielded_collision) or reward_gap < -0.05)
         trusted_for_spread = self._is_trusted_stage5_pair(
             baseline_collision=baseline_collision,
@@ -411,7 +441,9 @@ class SafeRLPipeline:
             reward_gap=reward_gap,
             hard_negative=hard_negative,
         )
-        proof = self._build_same_state_proof(history_scene_payload, selected_step)
+        proof = self._resolve_same_state_proof(payload, history_scene_payload, selected_step)
+        if not self._has_same_state_proof(proof):
+            return None, "skipped_missing_same_state_proof"
         sample = RiskPairSample(
             history_scene=history_scene,
             action_a=raw_action,
@@ -434,11 +466,61 @@ class SafeRLPipeline:
                 "baseline_min_distance": float(baseline_min_distance),
                 "shielded_min_distance": float(shielded_min_distance),
                 "reward_gap": reward_gap,
-                "source_path": str(payload.get("pair_path", "")),
+                "source_path": str(payload.get("pair_path", payload.get("source_path", ""))),
                 **proof,
             },
         )
         return sample, ""
+
+    def _trace_payload_step_at(self, steps: Sequence[Dict[str, Any]], index: int) -> Dict[str, Any]:
+        if index < 0 or index >= len(steps):
+            return {}
+        return dict(steps[index] or {})
+
+    def _first_nonempty_list(self, *candidates: Any) -> List[Dict[str, Any]]:
+        for candidate in candidates:
+            payload = list(candidate or [])
+            if payload:
+                return payload
+        return []
+
+    def _first_valid_int(self, *candidates: Any) -> int:
+        for candidate in candidates:
+            try:
+                value = int(candidate)
+            except (TypeError, ValueError):
+                continue
+            if value >= 0:
+                return value
+        return -1
+
+    def _resolve_same_state_proof(
+        self,
+        payload: Dict[str, Any],
+        history_scene_payload: Sequence[Dict[str, Any]],
+        reference_step: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        proof = {
+            "history_hash": str(payload.get("history_hash", "")),
+            "ego_lane_id": str(payload.get("ego_lane_id", "")),
+            "ego_x": float(payload.get("ego_x", 0.0) or 0.0),
+            "ego_y": float(payload.get("ego_y", 0.0) or 0.0),
+            "ego_speed": float(payload.get("ego_speed", 0.0) or 0.0),
+            "neighbor_summary": list(payload.get("neighbor_summary", []) or []),
+        }
+        if self._has_same_state_proof(proof):
+            return proof
+        return self._build_same_state_proof(history_scene_payload, reference_step)
+
+    def _has_same_state_proof(self, proof: Optional[Dict[str, Any]]) -> bool:
+        item = dict(proof or {})
+        if str(item.get("history_hash", "")):
+            return True
+        if str(item.get("ego_lane_id", "")):
+            return True
+        if list(item.get("neighbor_summary", []) or []):
+            return True
+        return any(abs(float(item.get(key, 0.0) or 0.0)) > 1e-6 for key in ("ego_x", "ego_y", "ego_speed"))
 
     def _build_stage4_pair_samples(self):
         summary = {
@@ -758,6 +840,12 @@ class SafeRLPipeline:
         self._require_files("stage2", [self.train_pkl, self.val_pkl, self.test_pkl])
         train_samples, val_samples, test_samples = self._load_dataset_splits()
         pair_payload = self._build_pair_datasets_for_stage2()
+        stage5_pairs_created = int(dict(pair_payload.get("generation_summary", {}).get("stage5", {})).get("pairs_created", 0))
+        stage4_pairs_created = int(dict(pair_payload.get("generation_summary", {}).get("stage4", {})).get("pairs_created", 0))
+        print(
+            f"[Pipeline] stage2: pair datasets stage5_pairs_created={stage5_pairs_created}, stage4_pairs_created={stage4_pairs_created}",
+            flush=True,
+        )
 
         light_predictor, world_predictor, training_meta = self.train_models(
             train_samples,
@@ -770,6 +858,8 @@ class SafeRLPipeline:
             stage5_pair_samples=pair_payload["stage5_pairs"],
             stage4_pair_samples=pair_payload["stage4_pairs"],
         )
+        pair_finetune_applied = bool(training_meta.get("pair_finetune_applied", False))
+        print(f"[Pipeline] stage2: pair_finetune_applied={pair_finetune_applied}", flush=True)
 
         evaluator = SafeRLEvaluator(self.config.eval)
         world_eval_metrics = evaluator.evaluate_world_model(world_predictor, test_samples)
@@ -786,7 +876,9 @@ class SafeRLPipeline:
             "world_device": str(world_predictor.device),
             "light_model_variant": "v2",
             "world_model_variant": "v2",
-            "pair_finetune_applied": bool(training_meta.get("pair_finetune_applied", False)),
+            "stage5_pairs_created": stage5_pairs_created,
+            "stage4_pairs_created": stage4_pairs_created,
+            "pair_finetune_applied": pair_finetune_applied,
             "pair_source_counts": dict(pair_payload.get("pair_source_counts", {})),
             "pair_source_weights": dict(pair_payload.get("pair_source_weights", {})),
             "pair_dataset_paths": dict(pair_payload.get("pair_dataset_paths", {})),
@@ -815,7 +907,9 @@ class SafeRLPipeline:
             "train_samples": len(train_samples),
             "val_samples": len(val_samples),
             "test_samples": len(test_samples),
-            "pair_finetune_applied": bool(training_meta.get("pair_finetune_applied", False)),
+            "stage5_pairs_created": stage5_pairs_created,
+            "stage4_pairs_created": stage4_pairs_created,
+            "pair_finetune_applied": pair_finetune_applied,
             "training_report": str(self.stage2_training_report_path),
         }
 

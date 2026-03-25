@@ -183,6 +183,14 @@ def test_shield_trace_f3_config_loads():
     assert config.shield_trace.trace_dir_name == "shield_trace_f3"
     assert config.eval.seed_list == [42, 123, 2024]
 
+
+def test_stage2_world_base_only_config_loads():
+    config = load_safe_rl_config("safe_rl/config/stage2_world_base_only.yaml")
+    assert config.light_risk.pair_finetune is False
+    assert config.world_model.pair_finetune is False
+    assert config.light_risk.epochs == 50
+    assert config.world_model.epochs == 20
+
 def test_risk_model_v2_defaults_enabled():
     config = load_safe_rl_config()
     assert config.light_risk.enable_v2 is True

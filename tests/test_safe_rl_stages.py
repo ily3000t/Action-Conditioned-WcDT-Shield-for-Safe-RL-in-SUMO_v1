@@ -747,6 +747,9 @@ def test_stage5_trace_writes_pair_files_and_summary(monkeypatch):
     assert tuning_summary["variants"][0]["effective_shield_config"]["effective_raw_passthrough_threshold"] == pytest.approx(0.20)
     assert Path(result["shield_margin_analysis_summary_path"]).exists()
     assert Path(pipeline.risk_v2_eval_summary_path).exists()
+    risk_v2_summary = json.loads(Path(pipeline.risk_v2_eval_summary_path).read_text(encoding="utf-8"))
+    assert risk_v2_summary["after_trace_metrics"] is not None
+    assert risk_v2_summary["margin_near_threshold_band_ratio_before_after"]["after"] == pytest.approx(0.0)
     margin_summary = json.loads(Path(result["shield_margin_analysis_summary_path"]).read_text(encoding="utf-8"))
     assert margin_summary["variants"][0]["variant_name"] == "C_baseline"
     assert margin_summary["variants"][0]["replacement_step_count"] == 1
@@ -1253,6 +1256,10 @@ def test_stage2_report_includes_pair_finetune_metadata(monkeypatch):
 
     assert captured["stage5_pairs"] == 1
     assert captured["stage4_pairs"] == 1
+    assert result["stage5_pairs_created"] == 1
+    assert result["stage4_pairs_created"] == 1
+    assert report["stage5_pairs_created"] == 1
+    assert report["stage4_pairs_created"] == 1
     assert report["pair_finetune_applied"] is True
     assert report["light_model_variant"] == "v2"
     assert report["world_model_variant"] == "v2"
@@ -1267,3 +1274,227 @@ def test_stage2_report_includes_pair_finetune_metadata(monkeypatch):
     assert risk_v2_summary["pair_finetune_applied"] is True
     assert risk_v2_summary["score_spread_before_after"]["light"]["before"]["score_spread"] == pytest.approx(0.01)
     assert risk_v2_summary["score_spread_before_after"]["world"]["after"]["score_spread"] == pytest.approx(0.04)
+
+
+
+def test_stage5_pair_from_payload_uses_history_fallback_and_top_level_same_state_proof():
+    from safe_rl.data.types import SceneState, VehicleState, dataclass_to_dict
+
+    config = _tiny_config()
+    pipeline = SafeRLPipeline(config)
+    run_id = f"ut_stage5_pair_fallback_{uuid.uuid4().hex[:8]}"
+    pipeline._prepare_run_context(stage="stage2", run_id=run_id)
+
+    history = [
+        SceneState(
+            timestamp=0.0,
+            ego_id="ego",
+            vehicles=[VehicleState("ego", 1.0, 2.0, 20.0, 0.0, 0.0, 0.0, 0.0, 1)],
+        )
+    ] * 2
+    history_payload = dataclass_to_dict(history)
+    proof = pipeline._build_same_state_proof(history_payload, {"ego_lane_id": "1"})
+    payload = {
+        "pair_index": 0,
+        "seed": 42,
+        "first_replacement_step": 0,
+        **proof,
+        "baseline_steps": [
+            {
+                "step_index": 0,
+                "raw_action": 4,
+                "final_action": 4,
+                "history_scene": history_payload,
+                "collision": False,
+                "ttc": 5.0,
+                "min_distance": 10.0,
+                "reward": 0.3,
+            }
+        ],
+        "shielded_steps": [
+            {
+                "step_index": 0,
+                "raw_action": 4,
+                "final_action": 3,
+                "collision": True,
+                "ttc": 0.5,
+                "min_distance": 0.5,
+                "reward": -0.2,
+            }
+        ],
+    }
+
+    sample, reason = pipeline._stage5_pair_from_payload(payload)
+
+    assert reason == ""
+    assert sample is not None
+    assert sample.preferred_action == 4
+    assert sample.meta["history_hash"] == proof["history_hash"]
+    assert sample.meta["trusted_for_spread"] is True
+
+
+
+def test_stage2_pair_dataset_builder_reports_detailed_stage5_skip_reasons():
+    from safe_rl.data.types import SceneState, VehicleState, dataclass_to_dict
+
+    config = _tiny_config()
+    pipeline = SafeRLPipeline(config)
+    run_id = f"ut_stage2_pair_reasons_{uuid.uuid4().hex[:8]}"
+    pipeline._prepare_run_context(stage="stage2", run_id=run_id)
+
+    history = [
+        SceneState(
+            timestamp=0.0,
+            ego_id="ego",
+            vehicles=[VehicleState("ego", 0.0, 4.0, 20.0, 0.0, 0.0, 0.0, 0.0, 1)],
+        )
+    ] * 2
+    history_payload = dataclass_to_dict(history)
+    proof = pipeline._build_same_state_proof(history_payload, {"ego_lane_id": "1"})
+
+    trace_dir = pipeline.reports_dir / "shield_trace_d1"
+    trace_dir.mkdir(parents=True, exist_ok=True)
+    pair_payloads = {
+        "d1pair_00_seed_42.json": {
+            "pair_index": 0,
+            "seed": 42,
+            "first_replacement_step": 0,
+            **proof,
+            "baseline_steps": [{"step_index": 0, "raw_action": 4, "final_action": 4, "history_scene": history_payload, "collision": False, "ttc": 5.0, "min_distance": 10.0, "reward": 0.3}],
+            "shielded_steps": [{"step_index": 0, "raw_action": 4, "final_action": 3, "collision": True, "ttc": 0.5, "min_distance": 0.5, "reward": -0.2}],
+        },
+        "d1pair_01_seed_43.json": {
+            "pair_index": 1,
+            "seed": 43,
+            "first_replacement_step": 0,
+            "baseline_steps": [{"step_index": 0, "raw_action": 4, "final_action": 4, "collision": False, "ttc": 5.0, "min_distance": 10.0, "reward": 0.3}],
+            "shielded_steps": [{"step_index": 0, "raw_action": 4, "final_action": 3, "collision": True, "ttc": 0.5, "min_distance": 0.5, "reward": -0.2}],
+        },
+        "d1pair_02_seed_44.json": {
+            "pair_index": 2,
+            "seed": 44,
+            "first_replacement_step": 2,
+            "baseline_steps": [{"step_index": 0, "raw_action": 4, "final_action": 4, "history_scene": history_payload, "collision": False, "ttc": 5.0, "min_distance": 10.0, "reward": 0.3}],
+            "shielded_steps": [{"step_index": 0, "raw_action": 4, "final_action": 3, "history_scene": history_payload, "collision": True, "ttc": 0.5, "min_distance": 0.5, "reward": -0.2}],
+        },
+        "d1pair_03_seed_45.json": {
+            "pair_index": 3,
+            "seed": 45,
+            "first_replacement_step": 0,
+            "baseline_steps": [{"step_index": 0, "raw_action": 4, "final_action": 4, "history_scene": history_payload, "collision": False, "ttc": 5.0, "min_distance": 10.0, "reward": 0.3}],
+            "shielded_steps": [{"step_index": 0, "history_scene": history_payload, "collision": True, "ttc": 0.5, "min_distance": 0.5, "reward": -0.2}],
+        },
+        "d1pair_04_seed_46.json": {
+            "pair_index": 4,
+            "seed": 46,
+            "first_replacement_step": 0,
+            "baseline_steps": [{"step_index": 0, "raw_action": 4, "final_action": 4, "history_scene": history_payload, "collision": False, "ttc": 5.0, "min_distance": 10.0, "reward": 0.3}],
+            "shielded_steps": [{"step_index": 0, "raw_action": 4, "final_action": 3, "history_scene": history_payload, "collision": False, "ttc": 5.0, "min_distance": 10.0, "reward": 0.3}],
+        },
+        "d1pair_05_seed_47.json": {
+            "pair_index": 5,
+            "seed": 47,
+            "first_replacement_step": -1,
+            "baseline_steps": [{"step_index": 0, "raw_action": 4, "final_action": 4, "history_scene": history_payload, "collision": False, "ttc": 5.0, "min_distance": 10.0, "reward": 0.3}],
+            "shielded_steps": [{"step_index": 0, "raw_action": 4, "final_action": 3, "history_scene": history_payload, "collision": True, "ttc": 0.5, "min_distance": 0.5, "reward": -0.2}],
+        },
+    }
+    pair_files = []
+    for filename, payload in pair_payloads.items():
+        pair_path = trace_dir / filename
+        pipeline._write_json(pair_path, payload)
+        pair_files.append(str(pair_path))
+    pipeline._write_json(trace_dir / "trace_summary.json", {"variant_name": "D1", "pair_files": pair_files, "seeds": [42]})
+
+    payload = pipeline._build_pair_datasets_for_stage2()
+    stage5_summary = payload["generation_summary"]["stage5"]
+
+    assert len(payload["stage5_pairs"]) == 1
+    assert stage5_summary["pairs_created"] == 1
+    assert stage5_summary["skipped_missing_history"] == 1
+    assert stage5_summary["skipped_invalid_first_replacement_step"] == 1
+    assert stage5_summary["skipped_missing_actions"] == 1
+    assert stage5_summary["skipped_no_preference"] == 1
+    assert stage5_summary["skipped_no_replacement"] == 1
+
+
+
+def test_stage5_pair_from_payload_reports_missing_same_state_proof(monkeypatch):
+    from safe_rl.data.types import SceneState, VehicleState, dataclass_to_dict
+
+    config = _tiny_config()
+    pipeline = SafeRLPipeline(config)
+    run_id = f"ut_stage5_pair_proof_{uuid.uuid4().hex[:8]}"
+    pipeline._prepare_run_context(stage="stage2", run_id=run_id)
+
+    history = [
+        SceneState(
+            timestamp=0.0,
+            ego_id="ego",
+            vehicles=[VehicleState("ego", 0.0, 4.0, 20.0, 0.0, 0.0, 0.0, 0.0, 1)],
+        )
+    ] * 2
+    history_payload = dataclass_to_dict(history)
+    payload = {
+        "pair_index": 0,
+        "seed": 42,
+        "first_replacement_step": 0,
+        "baseline_steps": [{"step_index": 0, "raw_action": 4, "final_action": 4, "history_scene": history_payload, "collision": False, "ttc": 5.0, "min_distance": 10.0, "reward": 0.3}],
+        "shielded_steps": [{"step_index": 0, "raw_action": 4, "final_action": 3, "history_scene": history_payload, "collision": True, "ttc": 0.5, "min_distance": 0.5, "reward": -0.2}],
+    }
+    monkeypatch.setattr(pipeline, "_resolve_same_state_proof", lambda *_args, **_kwargs: {})
+
+    sample, reason = pipeline._stage5_pair_from_payload(payload)
+
+    assert sample is None
+    assert reason == "skipped_missing_same_state_proof"
+
+
+
+def test_stage2_base_only_report_marks_pair_finetune_skipped(monkeypatch):
+    import pickle
+
+    config = _tiny_config()
+    config.light_risk.pair_finetune = False
+    config.world_model.pair_finetune = False
+    pipeline = SafeRLPipeline(config)
+    run_id = f"ut_stage2_base_only_{uuid.uuid4().hex[:8]}"
+    pipeline._prepare_run_context(stage="stage2", run_id=run_id)
+    pipeline.datasets_dir.mkdir(parents=True, exist_ok=True)
+    pipeline.models_dir.mkdir(parents=True, exist_ok=True)
+    for path in [pipeline.train_pkl, pipeline.val_pkl, pipeline.test_pkl]:
+        with open(path, "wb") as f:
+            pickle.dump([], f)
+
+    class _DummyPredictor:
+        def __init__(self):
+            self.device = "cpu"
+
+    class _DummyEvaluator:
+        def __init__(self, cfg):
+            _ = cfg
+
+        def evaluate_world_model(self, world_predictor, samples):
+            _ = (world_predictor, samples)
+            return {"traj_ade": 1.23, "risk_acc": 0.45, "risk_mae": 0.67}
+
+    def _fake_train_models(*args, **kwargs):
+        return _DummyPredictor(), _DummyPredictor(), {
+            "pair_finetune_applied": False,
+            "ranking_metrics": {"light": {}, "world": {}},
+            "light_training": {"variant": "v2"},
+            "world_training": {"variant": "v2"},
+            "light_pair_ft": {},
+            "world_pair_ft": {},
+        }
+
+    monkeypatch.setattr("safe_rl.pipeline.pipeline.SafeRLEvaluator", _DummyEvaluator)
+    pipeline.train_models = _fake_train_models
+
+    result = pipeline.run(stage="stage2", run_id=run_id)["stage2"]
+    report = json.loads(Path(result["training_report"]).read_text(encoding="utf-8"))
+
+    assert result["pair_finetune_applied"] is False
+    assert report["pair_finetune_applied"] is False
+    assert report["world_eval_metrics"]["traj_ade"] == pytest.approx(1.23)
+    assert report["pair_finetune_metrics"] == {"light": {}, "world": {}}
