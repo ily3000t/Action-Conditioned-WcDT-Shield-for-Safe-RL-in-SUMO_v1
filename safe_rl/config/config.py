@@ -53,6 +53,7 @@ class LightRiskConfig:
     stage5_pair_weight: float = 1.0
     stage4_pair_weight: float = 0.2
     pair_finetune_epochs: int = 3
+    pair_ft_eval_max_samples: int = 2048
     hidden_dim: int = 128
     batch_size: int = 64
     learning_rate: float = 1e-3
@@ -72,6 +73,7 @@ class WorldModelConfig:
     pair_finetune_epochs: int = 3
     pair_ft_freeze_traj_decoder: bool = True
     pair_ft_freeze_backbone: str = "partial"
+    pair_ft_eval_max_samples: int = 2048
     multimodal: int = 6
     future_steps: int = 20
     hidden_dim: int = 256

@@ -189,7 +189,9 @@ def test_stage2_world_base_only_config_loads():
     assert config.light_risk.pair_finetune is False
     assert config.world_model.pair_finetune is False
     assert config.light_risk.epochs == 50
-    assert config.world_model.epochs == 20
+    assert config.world_model.epochs == 10
+    assert config.light_risk.pair_ft_eval_max_samples == 2048
+    assert config.world_model.pair_ft_eval_max_samples == 2048
 
 def test_risk_model_v2_defaults_enabled():
     config = load_safe_rl_config()
@@ -198,6 +200,8 @@ def test_risk_model_v2_defaults_enabled():
     assert config.light_risk.ranking_loss_weight == 0.3
     assert config.world_model.enable_v2 is True
     assert config.world_model.pair_finetune is True
+    assert config.light_risk.pair_ft_eval_max_samples == 2048
+    assert config.world_model.pair_ft_eval_max_samples == 2048
     assert config.light_risk.pointwise_replay_weight == 1.0
     assert config.light_risk.spread_loss_weight == 0.05
     assert config.world_model.ranking_loss_weight == 0.3

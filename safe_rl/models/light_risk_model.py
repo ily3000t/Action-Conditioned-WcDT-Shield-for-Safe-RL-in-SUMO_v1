@@ -211,20 +211,24 @@ class LightRiskTrainer:
         replay_samples: Optional[Sequence[ActionConditionedSample]] = None,
         tb_writer=None,
     ) -> Dict[str, float]:
+        replay_samples = list(replay_samples or [])
         pair_count = int(len(pair_samples))
-        replay_sample_count = int(len(replay_samples or []))
+        replay_sample_count = int(len(replay_samples))
+        eval_replay_samples = self._select_pair_ft_eval_samples(replay_samples)
+        eval_replay_sample_count = int(len(eval_replay_samples))
         trusted_pair_count = sum(1 for sample in pair_samples if bool(sample.meta.get("trusted_for_spread", False)))
         hard_negative_count = sum(1 for sample in pair_samples if bool(sample.meta.get("hard_negative", False)))
         before_pair_metrics = self.evaluate_pairs(pair_samples)
-        before_pointwise_metrics = self._evaluate_pointwise_samples(replay_samples or [])
+        before_pointwise_metrics = self._evaluate_pointwise_samples(eval_replay_samples)
 
         if not self.config.pair_finetune or len(pair_samples) == 0:
-            print(f"[LightRisk PairFT] skipped, enabled={bool(self.config.pair_finetune)}, pairs={pair_count}, trusted_pairs={trusted_pair_count}, hard_negatives={hard_negative_count}, replay_samples={replay_sample_count}")
+            print(f"[LightRisk PairFT] skipped, enabled={bool(self.config.pair_finetune)}, pairs={pair_count}, trusted_pairs={trusted_pair_count}, hard_negatives={hard_negative_count}, replay_samples={replay_sample_count}, eval_replay_samples={eval_replay_sample_count}")
             self.last_pair_metrics = before_pair_metrics
             self.last_pair_ft_report = {
                 "enabled": bool(self.config.pair_finetune),
                 "pair_count": int(len(pair_samples)),
-                "replay_sample_count": int(len(replay_samples or [])),
+                "replay_sample_count": int(replay_sample_count),
+                "eval_replay_sample_count": int(eval_replay_sample_count),
                 "before_pair_metrics": before_pair_metrics,
                 "after_pair_metrics": before_pair_metrics,
                 "before_pointwise_metrics": before_pointwise_metrics,
@@ -233,7 +237,7 @@ class LightRiskTrainer:
             }
             return self.last_pair_metrics
 
-        print(f"[LightRisk PairFT] start on {self.device}, pairs={pair_count}, trusted_pairs={trusted_pair_count}, hard_negatives={hard_negative_count}, replay_samples={replay_sample_count}")
+        print(f"[LightRisk PairFT] start on {self.device}, pairs={pair_count}, trusted_pairs={trusted_pair_count}, hard_negatives={hard_negative_count}, replay_samples={replay_sample_count}, eval_replay_samples={eval_replay_sample_count}")
         loader = DataLoader(
             RiskPairDataset(pair_samples),
             batch_size=self.config.batch_size,
@@ -241,7 +245,7 @@ class LightRiskTrainer:
             drop_last=False,
             collate_fn=collate_risk_pairs,
         )
-        replay_loader = self._build_replay_loader(replay_samples or [])
+        replay_loader = self._build_replay_loader(replay_samples)
         replay_iter = iter(replay_loader) if replay_loader is not None else None
 
         optimizer = torch.optim.AdamW(
@@ -310,12 +314,13 @@ class LightRiskTrainer:
 
         self.model.eval()
         after_pair_metrics = self.evaluate_pairs(pair_samples)
-        after_pointwise_metrics = self._evaluate_pointwise_samples(replay_samples or [])
+        after_pointwise_metrics = self._evaluate_pointwise_samples(eval_replay_samples)
         self.last_pair_metrics = after_pair_metrics
         self.last_pair_ft_report = {
             "enabled": True,
             "pair_count": int(len(pair_samples)),
-            "replay_sample_count": int(len(replay_samples or [])),
+            "replay_sample_count": int(replay_sample_count),
+            "eval_replay_sample_count": int(eval_replay_sample_count),
             "before_pair_metrics": before_pair_metrics,
             "after_pair_metrics": after_pair_metrics,
             "before_pointwise_metrics": before_pointwise_metrics,
@@ -436,6 +441,16 @@ class LightRiskTrainer:
             torch.tensor(hard_negative, dtype=torch.bool, device=self.device),
             torch.tensor(trusted_for_spread, dtype=torch.bool, device=self.device),
         )
+
+    def _select_pair_ft_eval_samples(self, replay_samples: Sequence[ActionConditionedSample]) -> List[ActionConditionedSample]:
+        replay_samples = list(replay_samples)
+        max_samples = int(getattr(self.config, "pair_ft_eval_max_samples", 0) or 0)
+        if max_samples <= 0 or len(replay_samples) <= max_samples:
+            return replay_samples
+        if max_samples == 1:
+            return [replay_samples[0]]
+        step = (len(replay_samples) - 1) / float(max_samples - 1)
+        return [replay_samples[int(round(index * step))] for index in range(max_samples)]
 
     def _build_replay_loader(self, replay_samples: Sequence[ActionConditionedSample]):
         samples = list(replay_samples or [])
