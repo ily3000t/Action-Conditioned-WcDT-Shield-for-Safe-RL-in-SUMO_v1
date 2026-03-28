@@ -748,8 +748,11 @@ def test_stage5_trace_writes_pair_files_and_summary(monkeypatch):
     assert Path(result["shield_margin_analysis_summary_path"]).exists()
     assert Path(pipeline.risk_v2_eval_summary_path).exists()
     risk_v2_summary = json.loads(Path(pipeline.risk_v2_eval_summary_path).read_text(encoding="utf-8"))
-    assert risk_v2_summary["after_trace_metrics"] is not None
-    assert risk_v2_summary["margin_near_threshold_band_ratio_before_after"]["after"] == pytest.approx(0.0)
+    assert risk_v2_summary["after_trace_metrics"] == {"D1": None, "E2": None, "F1": None}
+    assert risk_v2_summary["after_trace_metrics_complete"] is False
+    assert risk_v2_summary["margin_near_threshold_band_ratio_before_after"]["D1"]["after"] is None
+    assert risk_v2_summary["margin_near_threshold_band_ratio_before_after"]["E2"]["after"] is None
+    assert risk_v2_summary["margin_near_threshold_band_ratio_before_after"]["F1"]["after"] is None
     margin_summary = json.loads(Path(result["shield_margin_analysis_summary_path"]).read_text(encoding="utf-8"))
     assert margin_summary["variants"][0]["variant_name"] == "C_baseline"
     assert margin_summary["variants"][0]["replacement_step_count"] == 1
@@ -1241,11 +1244,14 @@ def test_stage2_report_includes_pair_finetune_metadata(monkeypatch):
         captured["stage4_pairs"] = len(stage4_pair_samples or [])
         return _DummyPredictor(), _DummyPredictor(), {
             "pair_finetune_applied": True,
+            "light_pair_finetune_applied": True,
+            "world_pair_finetune_applied": True,
             "ranking_metrics": {"light": {"pair_ranking_accuracy": 1.0}, "world": {"pair_ranking_accuracy": 1.0}},
             "light_training": {"variant": "v2"},
             "world_training": {"variant": "v2"},
             "light_pair_ft": {"before_pair_metrics": {"pair_ranking_accuracy": 0.5, "same_state_score_gap": 0.01, "score_spread": 0.01, "hard_negative_accuracy": 0.5}, "after_pair_metrics": {"pair_ranking_accuracy": 0.8, "same_state_score_gap": 0.04, "score_spread": 0.05, "hard_negative_accuracy": 0.75}},
             "world_pair_ft": {"before_pair_metrics": {"pair_ranking_accuracy": 0.4, "same_state_score_gap": 0.01, "score_spread": 0.01, "hard_negative_accuracy": 0.4}, "after_pair_metrics": {"pair_ranking_accuracy": 0.7, "same_state_score_gap": 0.03, "score_spread": 0.04, "hard_negative_accuracy": 0.7}, "world_pair_ft_frozen_modules": ["traj_decoder"], "world_pair_ft_trainable_modules": ["fusion", "risk_score_head"]},
+            "world_pair_ft_source_mix": {"stage5_steps": 3, "stage4_steps": 1, "stage5_pairs_seen": 3, "stage4_pairs_seen": 1},
         }
 
     monkeypatch.setattr("safe_rl.pipeline.pipeline.SafeRLEvaluator", _DummyEvaluator)
@@ -1261,6 +1267,8 @@ def test_stage2_report_includes_pair_finetune_metadata(monkeypatch):
     assert report["stage5_pairs_created"] == 1
     assert report["stage4_pairs_created"] == 1
     assert report["pair_finetune_applied"] is True
+    assert report["light_pair_finetune_applied"] is True
+    assert report["world_pair_finetune_applied"] is True
     assert report["light_model_variant"] == "v2"
     assert report["world_model_variant"] == "v2"
     assert report["pair_source_counts"]["stage5_trace_first_replacement"] == 1
@@ -1270,8 +1278,15 @@ def test_stage2_report_includes_pair_finetune_metadata(monkeypatch):
     assert "pair_finetune_metrics" in report
     assert report["world_pair_ft_frozen_modules"] == ["traj_decoder"]
     assert report["world_pair_ft_trainable_modules"] == ["fusion", "risk_score_head"]
+    assert report["world_pair_ft_source_mix"]["stage5_steps"] == 3
+    assert report["world_pair_ft_source_mix"]["stage4_steps"] == 1
     risk_v2_summary = json.loads(Path(pipeline.risk_v2_eval_summary_path).read_text(encoding="utf-8"))
     assert risk_v2_summary["pair_finetune_applied"] is True
+    assert risk_v2_summary["light_pair_finetune_applied"] is True
+    assert risk_v2_summary["world_pair_finetune_applied"] is True
+    assert risk_v2_summary["world_pair_ft_source_mix"]["stage5_steps"] == 3
+    assert risk_v2_summary["after_trace_metrics"] == {"D1": None, "E2": None, "F1": None}
+    assert risk_v2_summary["after_trace_metrics_complete"] is False
     assert risk_v2_summary["score_spread_before_after"]["light"]["before"]["score_spread"] == pytest.approx(0.01)
     assert risk_v2_summary["score_spread_before_after"]["world"]["after"]["score_spread"] == pytest.approx(0.04)
 
@@ -1498,3 +1513,80 @@ def test_stage2_base_only_report_marks_pair_finetune_skipped(monkeypatch):
     assert report["pair_finetune_applied"] is False
     assert report["world_eval_metrics"]["traj_ade"] == pytest.approx(1.23)
     assert report["pair_finetune_metrics"] == {"light": {}, "world": {}}
+
+
+def test_risk_v2_summary_tracks_after_trace_metrics_by_variant():
+    config = _tiny_config()
+    pipeline = SafeRLPipeline(config)
+    run_id = f"ut_risk_v2_after_trace_{uuid.uuid4().hex[:8]}"
+    pipeline._prepare_run_context(stage="stage5", run_id=run_id)
+
+    assert pipeline.shield_trace_tuning_summary_path is not None
+    pipeline._write_json(
+        pipeline.shield_trace_tuning_summary_path,
+        {
+            "variants": [
+                {
+                    "variant_name": "D1",
+                    "trace_summary_path": "d1/trace_summary.json",
+                    "margin_analysis_path": "d1/margin_analysis.json",
+                    "candidate_selected_count": 10,
+                    "mean_intervention_count": 3.0,
+                    "mean_risk_reduction": 0.02,
+                    "mean_reward_gap_to_baseline_policy": -0.01,
+                    "margin_near_threshold_band_ratio": 0.11,
+                    "effective_shield_config": {"replacement_min_risk_margin": 0.10},
+                },
+                {
+                    "variant_name": "E2",
+                    "trace_summary_path": "e2/trace_summary.json",
+                    "margin_analysis_path": "e2/margin_analysis.json",
+                    "candidate_selected_count": 8,
+                    "mean_intervention_count": 2.0,
+                    "mean_risk_reduction": 0.03,
+                    "mean_reward_gap_to_baseline_policy": -0.02,
+                    "margin_near_threshold_band_ratio": 0.22,
+                    "effective_shield_config": {"replacement_min_risk_margin": 0.10},
+                },
+                {
+                    "variant_name": "F1",
+                    "trace_summary_path": "f1/trace_summary.json",
+                    "margin_analysis_path": "f1/margin_analysis.json",
+                    "candidate_selected_count": 0,
+                    "mean_intervention_count": 0.0,
+                    "mean_risk_reduction": 0.0,
+                    "mean_reward_gap_to_baseline_policy": 0.0,
+                    "margin_near_threshold_band_ratio": 0.33,
+                    "effective_shield_config": {"replacement_min_risk_margin": 0.103},
+                },
+            ]
+        },
+    )
+
+    stage2_report = {
+        "light_model_variant": "v2",
+        "world_model_variant": "v2",
+        "pair_finetune_applied": True,
+        "light_pair_finetune_applied": False,
+        "world_pair_finetune_applied": True,
+        "pair_source_weights": {"stage5_trace_first_replacement": 1.0, "stage4_buffer": 0.2},
+        "world_pair_ft_source_mix": {"stage5_steps": 3, "stage4_steps": 1},
+        "base_train_metrics": {},
+        "pair_finetune_metrics": {
+            "light": {"before_pair_metrics": {}, "after_pair_metrics": {}},
+            "world": {"before_pair_metrics": {}, "after_pair_metrics": {}},
+        },
+        "world_pair_ft_frozen_modules": ["traj_decoder"],
+        "world_pair_ft_trainable_modules": ["fusion", "risk_score_head"],
+    }
+    pipeline._write_risk_v2_eval_summary_from_stage2(stage2_report)
+    summary = pipeline._write_risk_v2_eval_summary_from_stage5({})
+
+    assert summary is not None
+    assert summary["after_trace_metrics_complete"] is True
+    assert summary["after_trace_metrics"]["D1"]["variant_name"] == "D1"
+    assert summary["after_trace_metrics"]["E2"]["variant_name"] == "E2"
+    assert summary["after_trace_metrics"]["F1"]["variant_name"] == "F1"
+    assert summary["margin_near_threshold_band_ratio_before_after"]["D1"]["after"] == pytest.approx(0.11)
+    assert summary["margin_near_threshold_band_ratio_before_after"]["E2"]["after"] == pytest.approx(0.22)
+    assert summary["margin_near_threshold_band_ratio_before_after"]["F1"]["after"] == pytest.approx(0.33)

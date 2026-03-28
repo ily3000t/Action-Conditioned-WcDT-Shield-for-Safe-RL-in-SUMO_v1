@@ -18,6 +18,7 @@ from safe_rl.models.action_encoder import ActionEncoder
 PAIR_RANK_MARGIN = 0.02
 SPREAD_TARGET_DELTA = 0.15
 SPREAD_MIN_GAP = 0.02
+STAGE4_MIX_EVERY_N_STEPS = 4
 
 
 def _post_process_output(generate_traj: torch.Tensor, predicted_his_traj: torch.Tensor) -> torch.Tensor:
@@ -491,20 +492,33 @@ class WorldModelTrainer:
         pair_samples: Sequence[RiskPairSample],
         replay_samples: Optional[Sequence[ActionConditionedSample]] = None,
         tb_writer=None,
+        stage5_pair_samples: Optional[Sequence[RiskPairSample]] = None,
+        stage4_pair_samples: Optional[Sequence[RiskPairSample]] = None,
     ) -> Dict[str, float]:
         replay_samples = list(replay_samples or [])
+        pair_samples = list(pair_samples or [])
+        stage5_pair_samples = list(stage5_pair_samples or [sample for sample in pair_samples if str(sample.source) == 'stage5_trace_first_replacement'])
+        stage4_pair_samples = list(stage4_pair_samples or [sample for sample in pair_samples if str(sample.source) == 'stage4_buffer'])
         pair_count = int(len(pair_samples))
         replay_sample_count = int(len(replay_samples))
         eval_replay_samples = self._select_pair_ft_eval_samples(replay_samples)
         eval_replay_sample_count = int(len(eval_replay_samples))
-        trusted_pair_count = sum(1 for sample in pair_samples if bool(sample.meta.get("trusted_for_spread", False)))
-        hard_negative_count = sum(1 for sample in pair_samples if bool(sample.meta.get("hard_negative", False)))
-        print(f"[WorldModel PairFT] start on {self.device}, pairs={pair_count}, trusted_pairs={trusted_pair_count}, hard_negatives={hard_negative_count}, replay_samples={replay_sample_count}, eval_replay_samples={eval_replay_sample_count}")
+        trusted_pair_count = sum(1 for sample in pair_samples if bool(sample.meta.get('trusted_for_spread', False)))
+        hard_negative_count = sum(1 for sample in pair_samples if bool(sample.meta.get('hard_negative', False)))
         before_pair_metrics = self.evaluate_pairs(pair_samples)
         before_pointwise_metrics = self._evaluate_risk_only_samples(eval_replay_samples)
+        source_mix = {
+            'stage5_steps': 0,
+            'stage4_steps': 0,
+            'stage5_pairs_seen': 0,
+            'stage4_pairs_seen': 0,
+            'stage5_pair_count': int(len(stage5_pair_samples)),
+            'stage4_pair_count': int(len(stage4_pair_samples)),
+            'stage4_mix_every_n_steps': int(STAGE4_MIX_EVERY_N_STEPS),
+        }
 
         if not self.config.pair_finetune or len(pair_samples) == 0:
-            print(f"[WorldModel PairFT] skipped, enabled={bool(self.config.pair_finetune)}, pairs={pair_count}, trusted_pairs={trusted_pair_count}, hard_negatives={hard_negative_count}, replay_samples={replay_sample_count}, eval_replay_samples={eval_replay_sample_count}")
+            print(f"[WorldModel PairFT] skipped, enabled={bool(self.config.pair_finetune)}, pairs={pair_count}, stage5_pairs={len(stage5_pair_samples)}, stage4_pairs={len(stage4_pair_samples)}, trusted_pairs={trusted_pair_count}, hard_negatives={hard_negative_count}, replay_samples={replay_sample_count}, eval_replay_samples={eval_replay_sample_count}")
             self.last_pair_metrics = before_pair_metrics
             self.last_pair_ft_report = {
                 'enabled': bool(self.config.pair_finetune),
@@ -518,16 +532,18 @@ class WorldModelTrainer:
                 'epoch_metrics': [],
                 'world_pair_ft_frozen_modules': [],
                 'world_pair_ft_trainable_modules': [],
+                'world_pair_ft_source_mix': dict(source_mix),
             }
             return self.last_pair_metrics
 
-        loader = DataLoader(
-            RiskPairDataset(pair_samples),
-            batch_size=self.config.batch_size,
-            shuffle=True,
-            drop_last=False,
-            collate_fn=collate_risk_pairs,
+        print(
+            f"[WorldModel PairFT] start on {self.device}, pairs={pair_count}, "
+            f"stage5_pairs={len(stage5_pair_samples)}, stage4_pairs={len(stage4_pair_samples)}, "
+            f"trusted_pairs={trusted_pair_count}, hard_negatives={hard_negative_count}, "
+            f"replay_samples={replay_sample_count}, eval_replay_samples={eval_replay_sample_count}"
         )
+        stage4_loader = self._build_pair_loader(stage4_pair_samples)
+        stage4_iter = iter(stage4_loader) if stage4_loader is not None else None
         replay_loader = self._build_replay_loader(replay_samples)
         replay_iter = iter(replay_loader) if replay_loader is not None else None
         grad_state, frozen_modules, trainable_modules = self._apply_pair_ft_freeze_policy()
@@ -536,14 +552,41 @@ class WorldModelTrainer:
         self.model.train()
         global_step = 0
         epoch_metrics: List[Dict[str, float]] = []
+        stage5_batch_size = max(1, min(int(self.config.batch_size), max(1, len(stage5_pair_samples)))) if stage5_pair_samples else 0
+        total_epoch_steps = self._pair_ft_epoch_steps(
+            stage5_pair_samples=stage5_pair_samples,
+            stage4_loader=stage4_loader,
+            stage5_batch_size=stage5_batch_size,
+        )
         for epoch_idx in range(max(1, int(self.config.pair_finetune_epochs))):
             epoch_total = 0.0
             epoch_pointwise = 0.0
             epoch_ranking = 0.0
             epoch_spread = 0.0
             epoch_steps = 0
-            for batch in loader:
-                ranking_loss, spread_loss = self._compute_pair_losses(batch)
+            for step_idx in range(total_epoch_steps):
+                ranking_terms: List[torch.Tensor] = []
+                spread_loss = self._zero_loss()
+                if stage5_pair_samples:
+                    stage5_batch = self._sample_pair_batch_with_replacement(stage5_pair_samples, stage5_batch_size)
+                    stage5_ranking_loss, stage5_spread_loss = self._compute_pair_losses(stage5_batch)
+                    ranking_terms.append(stage5_ranking_loss)
+                    spread_loss = stage5_spread_loss
+                    source_mix['stage5_steps'] += 1
+                    source_mix['stage5_pairs_seen'] += len(stage5_batch)
+                should_mix_stage4 = (
+                    stage4_loader is not None and (
+                        not stage5_pair_samples or (step_idx + 1) % int(STAGE4_MIX_EVERY_N_STEPS) == 0
+                    )
+                )
+                if should_mix_stage4:
+                    stage4_batch, stage4_iter = self._next_pair_batch(stage4_iter, stage4_loader)
+                    if stage4_batch:
+                        stage4_ranking_loss, _ = self._compute_pair_losses(stage4_batch)
+                        ranking_terms.append(stage4_ranking_loss)
+                        source_mix['stage4_steps'] += 1
+                        source_mix['stage4_pairs_seen'] += len(stage4_batch)
+                ranking_loss = torch.mean(torch.stack(ranking_terms)) if ranking_terms else self._zero_loss()
                 pointwise_total, _, _, _, replay_iter = self._compute_replay_losses(replay_iter, replay_loader)
                 total_loss = (
                     float(self.config.pointwise_replay_weight) * pointwise_total
@@ -609,6 +652,7 @@ class WorldModelTrainer:
             'epoch_metrics': epoch_metrics,
             'world_pair_ft_frozen_modules': frozen_modules,
             'world_pair_ft_trainable_modules': trainable_modules,
+            'world_pair_ft_source_mix': dict(source_mix),
         }
         if tb_writer is not None:
             tb_writer.add_scalar('summary/before_pair_ranking_accuracy', float(before_pair_metrics.get('pair_ranking_accuracy', 0.0)), 0)
@@ -757,6 +801,44 @@ class WorldModelTrainer:
             return [replay_samples[0]]
         step = (len(replay_samples) - 1) / float(max_samples - 1)
         return [replay_samples[int(round(index * step))] for index in range(max_samples)]
+
+    def _build_pair_loader(self, pair_samples: Sequence[RiskPairSample]):
+        samples = list(pair_samples or [])
+        if not samples:
+            return None
+        return DataLoader(
+            RiskPairDataset(samples),
+            batch_size=max(1, min(int(self.config.batch_size), len(samples))),
+            shuffle=True,
+            drop_last=False,
+            collate_fn=collate_risk_pairs,
+        )
+
+    def _next_pair_batch(self, pair_iter, pair_loader):
+        if pair_loader is None:
+            return None, pair_iter
+        try:
+            batch = next(pair_iter)
+        except StopIteration:
+            pair_iter = iter(pair_loader)
+            batch = next(pair_iter)
+        return list(batch), pair_iter
+
+    def _sample_pair_batch_with_replacement(self, pair_samples: Sequence[RiskPairSample], batch_size: int) -> List[RiskPairSample]:
+        samples = list(pair_samples or [])
+        if not samples:
+            return []
+        return [self.rng.choice(samples) for _ in range(max(1, batch_size))]
+
+    def _pair_ft_epoch_steps(self, stage5_pair_samples: Sequence[RiskPairSample], stage4_loader, stage5_batch_size: int) -> int:
+        if stage4_loader is not None:
+            return max(1, len(stage4_loader))
+        if stage5_pair_samples:
+            return max(1, int(np.ceil(len(stage5_pair_samples) / float(max(1, stage5_batch_size)))))
+        return 1
+
+    def _zero_loss(self) -> torch.Tensor:
+        return torch.zeros((), dtype=torch.float32, device=self.device)
 
     def _build_replay_loader(self, replay_samples: Sequence[ActionConditionedSample]):
         samples = list(replay_samples or [])

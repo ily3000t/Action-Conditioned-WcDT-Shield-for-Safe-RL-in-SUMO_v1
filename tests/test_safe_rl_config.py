@@ -193,6 +193,16 @@ def test_stage2_world_base_only_config_loads():
     assert config.light_risk.pair_ft_eval_max_samples == 2048
     assert config.world_model.pair_ft_eval_max_samples == 2048
 
+def test_stage2_v2_world_pair_focus_config_loads():
+    config = load_safe_rl_config("safe_rl/config/stage2_v2_world_pair_focus.yaml")
+    assert config.light_risk.pair_finetune is False
+    assert config.world_model.pair_finetune is True
+    assert config.light_risk.epochs == 50
+    assert config.world_model.epochs == 20
+    assert config.world_model.stage5_pair_weight == 1.0
+    assert config.world_model.stage4_pair_weight == 0.2
+    assert config.tensorboard.run_name == "stage2_v2_world_pair_focus"
+
 def test_risk_model_v2_defaults_enabled():
     config = load_safe_rl_config()
     assert config.light_risk.enable_v2 is True

@@ -308,9 +308,21 @@ class SafeRLPipeline:
         test_samples = ActionConditionedDatasetBuilder.load(str(self.test_pkl))
         return train_samples, val_samples, test_samples
 
+    def _effective_pair_source_weights(self) -> Dict[str, float]:
+        if bool(self.config.world_model.pair_finetune) and not bool(self.config.light_risk.pair_finetune):
+            return {
+                "stage5_trace_first_replacement": float(self.config.world_model.stage5_pair_weight),
+                "stage4_buffer": float(self.config.world_model.stage4_pair_weight),
+            }
+        return {
+            "stage5_trace_first_replacement": float(self.config.light_risk.stage5_pair_weight),
+            "stage4_buffer": float(self.config.light_risk.stage4_pair_weight),
+        }
+
     def _build_pair_datasets_for_stage2(self) -> Dict[str, Any]:
-        stage5_pairs, stage5_summary = self._build_stage5_pair_samples()
-        stage4_pairs, stage4_summary = self._build_stage4_pair_samples()
+        pair_source_weights = self._effective_pair_source_weights()
+        stage5_pairs, stage5_summary = self._build_stage5_pair_samples(stage5_weight=float(pair_source_weights["stage5_trace_first_replacement"]))
+        stage4_pairs, stage4_summary = self._build_stage4_pair_samples(stage4_weight=float(pair_source_weights["stage4_buffer"]))
         if stage5_pairs:
             save_risk_pairs(str(self.pairs_stage5_path), stage5_pairs)
         if stage4_pairs:
@@ -320,10 +332,7 @@ class SafeRLPipeline:
             "stage5_pairs": stage5_pairs,
             "stage4_pairs": stage4_pairs,
             "pair_source_counts": summarize_pair_sources(all_pairs),
-            "pair_source_weights": {
-                "stage5_trace_first_replacement": float(self.config.light_risk.stage5_pair_weight),
-                "stage4_buffer": float(self.config.light_risk.stage4_pair_weight),
-            },
+            "pair_source_weights": dict(pair_source_weights),
             "pair_dataset_paths": {
                 "stage5": str(self.pairs_stage5_path),
                 "stage4": str(self.pairs_stage4_path),
@@ -334,7 +343,7 @@ class SafeRLPipeline:
             },
         }
 
-    def _build_stage5_pair_samples(self):
+    def _build_stage5_pair_samples(self, stage5_weight: Optional[float] = None):
         summary = {
             "trace_dirs_seen": 0,
             "pair_files_seen": 0,
@@ -347,6 +356,7 @@ class SafeRLPipeline:
             "skipped_no_preference": 0,
         }
         pair_samples: List[RiskPairSample] = []
+        stage5_weight = float(self.config.light_risk.stage5_pair_weight if stage5_weight is None else stage5_weight)
         if self.reports_dir is None:
             return pair_samples, summary
 
@@ -359,7 +369,7 @@ class SafeRLPipeline:
             for pair_path in self._find_trace_pair_paths(trace_dir):
                 summary["pair_files_seen"] += 1
                 payload = self._read_json(pair_path)
-                sample, reason = self._stage5_pair_from_payload(payload)
+                sample, reason = self._stage5_pair_from_payload(payload, stage5_weight=stage5_weight)
                 if sample is None:
                     if reason in summary:
                         summary[reason] += 1
@@ -368,7 +378,7 @@ class SafeRLPipeline:
                 summary["pairs_created"] += 1
         return pair_samples, summary
 
-    def _stage5_pair_from_payload(self, payload: Dict[str, Any]):
+    def _stage5_pair_from_payload(self, payload: Dict[str, Any], stage5_weight: float = 1.0):
         first_replacement_step = int(payload.get("first_replacement_step", -1))
         if first_replacement_step < 0:
             return None, "skipped_no_replacement"
@@ -450,7 +460,7 @@ class SafeRLPipeline:
             action_b=replaced_action,
             preferred_action=int(preferred_action),
             source="stage5_trace_first_replacement",
-            weight=float(self.config.light_risk.stage5_pair_weight) * (2.0 if hard_negative else 1.0),
+            weight=float(stage5_weight) * (2.0 if hard_negative else 1.0),
             meta={
                 "pair_index": int(payload.get("pair_index", -1)),
                 "seed": int(payload.get("seed", -1)),
@@ -522,7 +532,7 @@ class SafeRLPipeline:
             return True
         return any(abs(float(item.get(key, 0.0) or 0.0)) > 1e-6 for key in ("ego_x", "ego_y", "ego_speed"))
 
-    def _build_stage4_pair_samples(self):
+    def _build_stage4_pair_samples(self, stage4_weight: Optional[float] = None):
         summary = {
             "records_seen": 0,
             "pairs_created": 0,
@@ -530,6 +540,7 @@ class SafeRLPipeline:
             "skipped_equal_risk": 0,
         }
         pair_samples: List[RiskPairSample] = []
+        stage4_weight = float(self.config.light_risk.stage4_pair_weight if stage4_weight is None else stage4_weight)
         if self.buffer_path is None or not self.buffer_path.exists():
             return pair_samples, summary
 
@@ -551,7 +562,7 @@ class SafeRLPipeline:
                 action_b=int(record.final_action),
                 preferred_action=preferred_action,
                 source="stage4_buffer",
-                weight=float(self.config.light_risk.stage4_pair_weight),
+                weight=float(stage4_weight),
                 meta={
                     "target_risk_a": float(record.raw_risk),
                     "target_risk_b": float(record.final_risk),
@@ -879,6 +890,8 @@ class SafeRLPipeline:
             "stage5_pairs_created": stage5_pairs_created,
             "stage4_pairs_created": stage4_pairs_created,
             "pair_finetune_applied": pair_finetune_applied,
+            "light_pair_finetune_applied": bool(training_meta.get("light_pair_finetune_applied", False)),
+            "world_pair_finetune_applied": bool(training_meta.get("world_pair_finetune_applied", False)),
             "pair_source_counts": dict(pair_payload.get("pair_source_counts", {})),
             "pair_source_weights": dict(pair_payload.get("pair_source_weights", {})),
             "pair_dataset_paths": dict(pair_payload.get("pair_dataset_paths", {})),
@@ -897,6 +910,7 @@ class SafeRLPipeline:
             },
             "world_pair_ft_frozen_modules": list(dict(training_meta.get("world_pair_ft", {})).get("world_pair_ft_frozen_modules", [])),
             "world_pair_ft_trainable_modules": list(dict(training_meta.get("world_pair_ft", {})).get("world_pair_ft_trainable_modules", [])),
+            "world_pair_ft_source_mix": dict(training_meta.get("world_pair_ft_source_mix", {})),
         }
         self._write_json(self.stage2_training_report_path, stage2_report)
         self._write_risk_v2_eval_summary_from_stage2(stage2_report)
@@ -1071,19 +1085,26 @@ class SafeRLPipeline:
             seed=self.config.sim.random_seed,
         )
         world_predictor = world_trainer.fit(train_samples, val_samples, tb_writer=tb_world_base_writer)
-        world_pair_metrics = world_trainer.fine_tune_pairs(all_pair_samples, replay_samples=train_samples, tb_writer=tb_world_pair_writer)
+        world_pair_metrics = world_trainer.fine_tune_pairs(all_pair_samples, replay_samples=train_samples, tb_writer=tb_world_pair_writer, stage5_pair_samples=stage5_pair_samples, stage4_pair_samples=stage4_pair_samples)
         world_trainer.save(str(self.world_model_path))
 
+        light_pair_report = dict(getattr(light_trainer, "last_pair_ft_report", {}))
+        world_pair_report = dict(getattr(world_trainer, "last_pair_ft_report", {}))
+        light_pair_finetune_applied = bool(light_pair_report.get("enabled", False) and int(light_pair_report.get("pair_count", 0)) > 0)
+        world_pair_finetune_applied = bool(world_pair_report.get("enabled", False) and int(world_pair_report.get("pair_count", 0)) > 0)
         training_meta = {
-            "pair_finetune_applied": bool(all_pair_samples and (self.config.light_risk.pair_finetune or self.config.world_model.pair_finetune)),
+            "pair_finetune_applied": bool(light_pair_finetune_applied or world_pair_finetune_applied),
+            "light_pair_finetune_applied": light_pair_finetune_applied,
+            "world_pair_finetune_applied": world_pair_finetune_applied,
             "ranking_metrics": {
                 "light": light_pair_metrics,
                 "world": world_pair_metrics,
             },
             "light_training": dict(getattr(light_trainer, "last_train_report", {})),
             "world_training": dict(getattr(world_trainer, "last_train_report", {})),
-            "light_pair_ft": dict(getattr(light_trainer, "last_pair_ft_report", {})),
-            "world_pair_ft": dict(getattr(world_trainer, "last_pair_ft_report", {})),
+            "light_pair_ft": light_pair_report,
+            "world_pair_ft": world_pair_report,
+            "world_pair_ft_source_mix": dict(world_pair_report.get("world_pair_ft_source_mix", {})),
         }
         return light_predictor, world_predictor, training_meta
 
@@ -1796,31 +1817,57 @@ class SafeRLPipeline:
                 return dict(by_name[name])
         return dict(variants[0])
 
-    def _read_trace_focus_snapshot(self) -> Optional[Dict[str, Any]]:
-        if self.shield_trace_tuning_summary_path is None or not self.shield_trace_tuning_summary_path.exists():
-            return None
-        tuning_summary = self._read_json(self.shield_trace_tuning_summary_path)
-        focus = self._select_focus_trace_variant(tuning_summary)
-        if focus is None:
-            return None
+    def _trace_eval_variant_names(self) -> List[str]:
+        return ["D1", "E2", "F1"]
+
+    def _snapshot_from_tuning_entry(self, entry: Dict[str, Any]) -> Dict[str, Any]:
         return {
-            "variant_name": str(focus.get("variant_name", "")),
-            "trace_summary_path": str(focus.get("trace_summary_path", "")),
-            "margin_analysis_path": str(focus.get("margin_analysis_path", "")),
-            "candidate_selected_count": int(focus.get("candidate_selected_count", 0)),
-            "mean_intervention_count": float(focus.get("mean_intervention_count", 0.0)),
-            "mean_risk_reduction": float(focus.get("mean_risk_reduction", 0.0)),
-            "mean_reward_gap_to_baseline_policy": float(focus.get("mean_reward_gap_to_baseline_policy", 0.0)),
-            "margin_near_threshold_band_ratio": float(focus.get("margin_near_threshold_band_ratio", 0.0)),
-            "effective_shield_config": dict(focus.get("effective_shield_config", {})),
+            "variant_name": str(entry.get("variant_name", "")),
+            "trace_summary_path": str(entry.get("trace_summary_path", "")),
+            "margin_analysis_path": str(entry.get("margin_analysis_path", "")),
+            "candidate_selected_count": int(entry.get("candidate_selected_count", 0)),
+            "mean_intervention_count": float(entry.get("mean_intervention_count", 0.0)),
+            "mean_risk_reduction": float(entry.get("mean_risk_reduction", 0.0)),
+            "mean_reward_gap_to_baseline_policy": float(entry.get("mean_reward_gap_to_baseline_policy", 0.0)),
+            "margin_near_threshold_band_ratio": float(entry.get("margin_near_threshold_band_ratio", 0.0)),
+            "effective_shield_config": dict(entry.get("effective_shield_config", {})),
         }
+
+    def _read_trace_variant_snapshots(self, variant_names: Optional[Sequence[str]] = None) -> Dict[str, Optional[Dict[str, Any]]]:
+        names = list(variant_names or self._trace_eval_variant_names())
+        snapshots: Dict[str, Optional[Dict[str, Any]]] = {name: None for name in names}
+        if self.shield_trace_tuning_summary_path is None or not self.shield_trace_tuning_summary_path.exists():
+            return snapshots
+        tuning_summary = self._read_json(self.shield_trace_tuning_summary_path)
+        variants = {str(entry.get("variant_name", "")): dict(entry) for entry in list(tuning_summary.get("variants", []) or [])}
+        for name in names:
+            entry = variants.get(name)
+            if entry is not None:
+                snapshots[name] = self._snapshot_from_tuning_entry(entry)
+        return snapshots
+
+    def _trace_metric_before_after(self, before: Dict[str, Optional[Dict[str, Any]]], after: Dict[str, Optional[Dict[str, Any]]], metric_key: str) -> Dict[str, Dict[str, Optional[float]]]:
+        names = self._trace_eval_variant_names()
+        payload: Dict[str, Dict[str, Optional[float]]] = {}
+        for name in names:
+            before_item = dict(before.get(name) or {})
+            after_item = dict(after.get(name) or {})
+            payload[name] = {
+                "before": None if not before_item else float(before_item.get(metric_key, 0.0)),
+                "after": None if not after_item else float(after_item.get(metric_key, 0.0)),
+            }
+        return payload
+
+    def _trace_snapshot_map_complete(self, snapshots: Dict[str, Optional[Dict[str, Any]]]) -> bool:
+        names = self._trace_eval_variant_names()
+        return all(snapshots.get(name) is not None for name in names)
 
     def _write_risk_v2_eval_summary_from_stage2(self, stage2_report: Dict[str, Any]):
         if self.risk_v2_eval_summary_path is None:
             return None
         light_pair_ft = dict(stage2_report.get("pair_finetune_metrics", {}).get("light", {}))
         world_pair_ft = dict(stage2_report.get("pair_finetune_metrics", {}).get("world", {}))
-        before_trace = self._read_trace_focus_snapshot()
+        before_trace = self._read_trace_variant_snapshots()
         summary = {
             "run_id": str(self.run_id or ""),
             "updated_at": dt.datetime.now().isoformat(timespec="seconds"),
@@ -1830,13 +1877,17 @@ class SafeRLPipeline:
                 "world": str(stage2_report.get("world_model_variant", "")),
             },
             "pair_finetune_applied": bool(stage2_report.get("pair_finetune_applied", False)),
+            "light_pair_finetune_applied": bool(stage2_report.get("light_pair_finetune_applied", False)),
+            "world_pair_finetune_applied": bool(stage2_report.get("world_pair_finetune_applied", False)),
             "pair_source_weights": dict(stage2_report.get("pair_source_weights", {})),
+            "world_pair_ft_source_mix": dict(stage2_report.get("world_pair_ft_source_mix", {})),
             "base_train_metrics": dict(stage2_report.get("base_train_metrics", {})),
             "pair_finetune_metrics": dict(stage2_report.get("pair_finetune_metrics", {})),
             "world_pair_ft_frozen_modules": list(stage2_report.get("world_pair_ft_frozen_modules", [])),
             "world_pair_ft_trainable_modules": list(stage2_report.get("world_pair_ft_trainable_modules", [])),
             "before_trace_metrics": before_trace,
-            "after_trace_metrics": None,
+            "after_trace_metrics": {name: None for name in self._trace_eval_variant_names()},
+            "after_trace_metrics_complete": False,
             "score_spread_before_after": {
                 "light": self._build_pair_before_after(light_pair_ft.get("before_pair_metrics", {}), light_pair_ft.get("after_pair_metrics", {})),
                 "world": self._build_pair_before_after(world_pair_ft.get("before_pair_metrics", {}), world_pair_ft.get("after_pair_metrics", {})),
@@ -1853,10 +1904,7 @@ class SafeRLPipeline:
                 "light": self._build_pair_before_after(light_pair_ft.get("before_pair_metrics", {}), light_pair_ft.get("after_pair_metrics", {})),
                 "world": self._build_pair_before_after(world_pair_ft.get("before_pair_metrics", {}), world_pair_ft.get("after_pair_metrics", {})),
             },
-            "margin_near_threshold_band_ratio_before_after": {
-                "before": None if before_trace is None else float(before_trace.get("margin_near_threshold_band_ratio", 0.0)),
-                "after": None,
-            },
+            "margin_near_threshold_band_ratio_before_after": self._trace_metric_before_after(before_trace, {name: None for name in self._trace_eval_variant_names()}, "margin_near_threshold_band_ratio"),
         }
         self._write_json(self.risk_v2_eval_summary_path, summary)
         self.manifest.setdefault("artifact_paths", {})["risk_v2_eval_summary_report"] = str(self.risk_v2_eval_summary_path)
@@ -1869,20 +1917,18 @@ class SafeRLPipeline:
             summary = self._read_json(self.risk_v2_eval_summary_path)
         else:
             summary = {"run_id": str(self.run_id or "")}
-        after_trace = self._read_trace_focus_snapshot()
+        after_trace = self._read_trace_variant_snapshots()
         summary["updated_at"] = dt.datetime.now().isoformat(timespec="seconds")
         summary["stage5_report_path"] = str(self.report_path)
         summary["after_trace_metrics"] = after_trace
+        summary["after_trace_metrics_complete"] = self._trace_snapshot_map_complete(after_trace)
         summary["stage5_effective_shield_config"] = dict(evaluation.get("effective_shield_config", {}))
         summary["stage5_paired_episode_results_path"] = str(evaluation.get("stage5_paired_episode_results_path", ""))
         summary["stage5_trace_summary_path"] = str(evaluation.get("shield_trace_summary_path", ""))
         summary["stage5_trace_tuning_summary_path"] = str(evaluation.get("shield_trace_tuning_summary_path", ""))
         summary["stage5_margin_analysis_summary_path"] = str(evaluation.get("shield_margin_analysis_summary_path", ""))
-        before_trace = summary.get("before_trace_metrics")
-        summary["margin_near_threshold_band_ratio_before_after"] = {
-            "before": None if before_trace is None else float(dict(before_trace).get("margin_near_threshold_band_ratio", 0.0)),
-            "after": None if after_trace is None else float(after_trace.get("margin_near_threshold_band_ratio", 0.0)),
-        }
+        before_trace = dict(summary.get("before_trace_metrics", {}))
+        summary["margin_near_threshold_band_ratio_before_after"] = self._trace_metric_before_after(before_trace, after_trace, "margin_near_threshold_band_ratio")
         self._write_json(self.risk_v2_eval_summary_path, summary)
         self.manifest.setdefault("artifact_paths", {})["risk_v2_eval_summary_report"] = str(self.risk_v2_eval_summary_path)
         return summary
