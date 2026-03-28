@@ -74,6 +74,8 @@ class WorldModelConfig:
     pair_ft_freeze_traj_decoder: bool = True
     pair_ft_freeze_backbone: str = "partial"
     pair_ft_eval_max_samples: int = 2048
+    stage5_pair_max_seen_per_epoch: int = 8
+    pair_ft_patience: int = 2
     multimodal: int = 6
     future_steps: int = 20
     hidden_dim: int = 256

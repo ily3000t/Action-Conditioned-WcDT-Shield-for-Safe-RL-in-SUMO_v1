@@ -506,7 +506,12 @@ class WorldModelTrainer:
         trusted_pair_count = sum(1 for sample in pair_samples if bool(sample.meta.get('trusted_for_spread', False)))
         hard_negative_count = sum(1 for sample in pair_samples if bool(sample.meta.get('hard_negative', False)))
         before_pair_metrics = self.evaluate_pairs(pair_samples)
+        before_stage5_metrics = self.evaluate_pairs(stage5_pair_samples)
+        before_stage4_metrics = self.evaluate_pairs(stage4_pair_samples)
         before_pointwise_metrics = self._evaluate_risk_only_samples(eval_replay_samples)
+        stage5_spread_eligible_count = self._spread_eligible_pair_count(stage5_pair_samples)
+        stage4_spread_eligible_count = self._spread_eligible_pair_count(stage4_pair_samples)
+        stage5_pair_ids = [self._stage5_pair_identifier(sample, index) for index, sample in enumerate(stage5_pair_samples)]
         source_mix = {
             'stage5_steps': 0,
             'stage4_steps': 0,
@@ -515,6 +520,9 @@ class WorldModelTrainer:
             'stage5_pair_count': int(len(stage5_pair_samples)),
             'stage4_pair_count': int(len(stage4_pair_samples)),
             'stage4_mix_every_n_steps': int(STAGE4_MIX_EVERY_N_STEPS),
+            'stage5_pair_cap': int(getattr(self.config, 'stage5_pair_max_seen_per_epoch', 0) or 0),
+            'stage5_pair_seen_counts': {pair_id: 0 for pair_id in stage5_pair_ids},
+            'stage5_cap_reached_pairs': 0,
         }
 
         if not self.config.pair_finetune or len(pair_samples) == 0:
@@ -533,6 +541,17 @@ class WorldModelTrainer:
                 'world_pair_ft_frozen_modules': [],
                 'world_pair_ft_trainable_modules': [],
                 'world_pair_ft_source_mix': dict(source_mix),
+                'stage5_pair_ranking_accuracy_before_after': self._metric_before_after(before_stage5_metrics, before_stage5_metrics, 'pair_ranking_accuracy'),
+                'stage4_pair_ranking_accuracy_before_after': self._metric_before_after(before_stage4_metrics, before_stage4_metrics, 'pair_ranking_accuracy'),
+                'stage5_same_state_score_gap_before_after': self._metric_before_after(before_stage5_metrics, before_stage5_metrics, 'same_state_score_gap'),
+                'stage4_same_state_score_gap_before_after': self._metric_before_after(before_stage4_metrics, before_stage4_metrics, 'same_state_score_gap'),
+                'stage5_score_spread_before_after': self._metric_before_after(before_stage5_metrics, before_stage5_metrics, 'score_spread'),
+                'stage4_score_spread_before_after': self._metric_before_after(before_stage4_metrics, before_stage4_metrics, 'score_spread'),
+                'stage5_spread_eligible_pair_count': int(stage5_spread_eligible_count),
+                'stage4_spread_eligible_pair_count': int(stage4_spread_eligible_count),
+                'world_pair_ft_best_epoch': -1,
+                'world_pair_ft_best_metrics': dict(before_stage5_metrics),
+                'world_pair_ft_restored_best': False,
             }
             return self.last_pair_metrics
 
@@ -558,22 +577,44 @@ class WorldModelTrainer:
             stage4_loader=stage4_loader,
             stage5_batch_size=stage5_batch_size,
         )
+        best_eval_pairs = stage5_pair_samples or pair_samples
+        best_metrics = dict(self.evaluate_pairs(best_eval_pairs))
+        best_epoch = -1
+        best_state = {name: tensor.detach().cpu().clone() for name, tensor in self.model.state_dict().items()}
+        patience = max(0, int(getattr(self.config, 'pair_ft_patience', 0) or 0))
+        epochs_without_improvement = 0
+        total_stage5_seen_counts = {pair_id: 0 for pair_id in stage5_pair_ids}
+        stage5_cap_reached_ids = set()
+
         for epoch_idx in range(max(1, int(self.config.pair_finetune_epochs))):
             epoch_total = 0.0
             epoch_pointwise = 0.0
             epoch_ranking = 0.0
             epoch_spread = 0.0
             epoch_steps = 0
+            epoch_stage5_seen_counts = {pair_id: 0 for pair_id in stage5_pair_ids}
             for step_idx in range(total_epoch_steps):
                 ranking_terms: List[torch.Tensor] = []
-                spread_loss = self._zero_loss()
+                spread_terms: List[torch.Tensor] = []
                 if stage5_pair_samples:
-                    stage5_batch = self._sample_pair_batch_with_replacement(stage5_pair_samples, stage5_batch_size)
-                    stage5_ranking_loss, stage5_spread_loss = self._compute_pair_losses(stage5_batch)
-                    ranking_terms.append(stage5_ranking_loss)
-                    spread_loss = stage5_spread_loss
-                    source_mix['stage5_steps'] += 1
-                    source_mix['stage5_pairs_seen'] += len(stage5_batch)
+                    stage5_batch, selected_pair_ids = self._sample_stage5_batch_with_cap(
+                        stage5_pair_samples=stage5_pair_samples,
+                        pair_ids=stage5_pair_ids,
+                        batch_size=stage5_batch_size,
+                        seen_counts=epoch_stage5_seen_counts,
+                        max_seen_per_epoch=int(getattr(self.config, 'stage5_pair_max_seen_per_epoch', 0) or 0),
+                    )
+                    if stage5_batch:
+                        stage5_ranking_loss, stage5_spread_loss = self._compute_pair_losses(stage5_batch)
+                        ranking_terms.append(stage5_ranking_loss)
+                        spread_terms.append(stage5_spread_loss)
+                        source_mix['stage5_steps'] += 1
+                        source_mix['stage5_pairs_seen'] += len(stage5_batch)
+                        for pair_id in selected_pair_ids:
+                            epoch_stage5_seen_counts[pair_id] += 1
+                            total_stage5_seen_counts[pair_id] += 1
+                            if int(getattr(self.config, 'stage5_pair_max_seen_per_epoch', 0) or 0) > 0 and epoch_stage5_seen_counts[pair_id] >= int(getattr(self.config, 'stage5_pair_max_seen_per_epoch', 0) or 0):
+                                stage5_cap_reached_ids.add(pair_id)
                 should_mix_stage4 = (
                     stage4_loader is not None and (
                         not stage5_pair_samples or (step_idx + 1) % int(STAGE4_MIX_EVERY_N_STEPS) == 0
@@ -586,7 +627,9 @@ class WorldModelTrainer:
                         ranking_terms.append(stage4_ranking_loss)
                         source_mix['stage4_steps'] += 1
                         source_mix['stage4_pairs_seen'] += len(stage4_batch)
+
                 ranking_loss = torch.mean(torch.stack(ranking_terms)) if ranking_terms else self._zero_loss()
+                spread_loss = torch.mean(torch.stack(spread_terms)) if spread_terms else self._zero_loss()
                 pointwise_total, _, _, _, replay_iter = self._compute_replay_losses(replay_iter, replay_loader)
                 total_loss = (
                     float(self.config.pointwise_replay_weight) * pointwise_total
@@ -635,10 +678,26 @@ class WorldModelTrainer:
                     tb_writer.add_scalar('loss/epoch_ranking', epoch_summary['loss_ranking'], epoch_idx)
                     tb_writer.add_scalar('loss/epoch_spread', epoch_summary['loss_spread'], epoch_idx)
 
+            current_best_metrics = self.evaluate_pairs(best_eval_pairs)
+            if self._is_better_pair_ft_metrics(current_best_metrics, best_metrics):
+                best_metrics = dict(current_best_metrics)
+                best_epoch = int(epoch_idx)
+                best_state = {name: tensor.detach().cpu().clone() for name, tensor in self.model.state_dict().items()}
+                epochs_without_improvement = 0
+            else:
+                epochs_without_improvement += 1
+                if patience > 0 and epochs_without_improvement >= patience:
+                    break
+
+        self.model.load_state_dict(best_state)
         self._restore_grad_state(grad_state)
         self.model.eval()
         after_pair_metrics = self.evaluate_pairs(pair_samples)
+        after_stage5_metrics = self.evaluate_pairs(stage5_pair_samples)
+        after_stage4_metrics = self.evaluate_pairs(stage4_pair_samples)
         after_pointwise_metrics = self._evaluate_risk_only_samples(eval_replay_samples)
+        source_mix['stage5_pair_seen_counts'] = dict(total_stage5_seen_counts)
+        source_mix['stage5_cap_reached_pairs'] = int(len(stage5_cap_reached_ids))
         self.last_pair_metrics = after_pair_metrics
         self.last_pair_ft_report = {
             'enabled': True,
@@ -653,6 +712,17 @@ class WorldModelTrainer:
             'world_pair_ft_frozen_modules': frozen_modules,
             'world_pair_ft_trainable_modules': trainable_modules,
             'world_pair_ft_source_mix': dict(source_mix),
+            'stage5_pair_ranking_accuracy_before_after': self._metric_before_after(before_stage5_metrics, after_stage5_metrics, 'pair_ranking_accuracy'),
+            'stage4_pair_ranking_accuracy_before_after': self._metric_before_after(before_stage4_metrics, after_stage4_metrics, 'pair_ranking_accuracy'),
+            'stage5_same_state_score_gap_before_after': self._metric_before_after(before_stage5_metrics, after_stage5_metrics, 'same_state_score_gap'),
+            'stage4_same_state_score_gap_before_after': self._metric_before_after(before_stage4_metrics, after_stage4_metrics, 'same_state_score_gap'),
+            'stage5_score_spread_before_after': self._metric_before_after(before_stage5_metrics, after_stage5_metrics, 'score_spread'),
+            'stage4_score_spread_before_after': self._metric_before_after(before_stage4_metrics, after_stage4_metrics, 'score_spread'),
+            'stage5_spread_eligible_pair_count': int(stage5_spread_eligible_count),
+            'stage4_spread_eligible_pair_count': int(stage4_spread_eligible_count),
+            'world_pair_ft_best_epoch': int(best_epoch),
+            'world_pair_ft_best_metrics': dict(best_metrics),
+            'world_pair_ft_restored_best': True,
         }
         if tb_writer is not None:
             tb_writer.add_scalar('summary/before_pair_ranking_accuracy', float(before_pair_metrics.get('pair_ranking_accuracy', 0.0)), 0)
@@ -661,7 +731,67 @@ class WorldModelTrainer:
             tb_writer.add_scalar('summary/after_same_state_score_gap', float(after_pair_metrics.get('same_state_score_gap', 0.0)), 0)
             tb_writer.add_scalar('summary/before_score_spread', float(before_pair_metrics.get('score_spread', 0.0)), 0)
             tb_writer.add_scalar('summary/after_score_spread', float(after_pair_metrics.get('score_spread', 0.0)), 0)
+            tb_writer.add_scalar('summary/stage5_before_pair_ranking_accuracy', float(before_stage5_metrics.get('pair_ranking_accuracy', 0.0)), 0)
+            tb_writer.add_scalar('summary/stage5_after_pair_ranking_accuracy', float(after_stage5_metrics.get('pair_ranking_accuracy', 0.0)), 0)
         return self.last_pair_metrics
+
+    def _metric_before_after(self, before_metrics: Dict[str, float], after_metrics: Dict[str, float], key: str) -> Dict[str, float]:
+        return {
+            'before': float((before_metrics or {}).get(key, 0.0)),
+            'after': float((after_metrics or {}).get(key, 0.0)),
+        }
+
+    def _spread_eligible_pair_count(self, pair_samples: Sequence[RiskPairSample]) -> int:
+        count = 0
+        for sample in pair_samples:
+            target_a = float(sample.meta.get('target_risk_a', 0.0))
+            target_b = float(sample.meta.get('target_risk_b', 0.0))
+            trusted = bool(sample.meta.get('trusted_for_spread', False))
+            if trusted and abs(target_a - target_b) >= float(SPREAD_TARGET_DELTA):
+                count += 1
+        return count
+
+    def _stage5_pair_identifier(self, sample: RiskPairSample, fallback_index: int) -> str:
+        meta = dict(sample.meta or {})
+        source_path = str(meta.get('source_path', ''))
+        if source_path:
+            return source_path
+        pair_index = meta.get('pair_index', fallback_index)
+        seed = meta.get('seed', 'na')
+        return f"stage5_pair::{seed}::{pair_index}"
+
+    def _sample_stage5_batch_with_cap(
+        self,
+        stage5_pair_samples: Sequence[RiskPairSample],
+        pair_ids: Sequence[str],
+        batch_size: int,
+        seen_counts: Dict[str, int],
+        max_seen_per_epoch: int,
+    ) -> tuple[List[RiskPairSample], List[str]]:
+        indexed = list(zip(pair_ids, stage5_pair_samples))
+        if max_seen_per_epoch > 0:
+            indexed = [(pair_id, sample) for pair_id, sample in indexed if int(seen_counts.get(pair_id, 0)) < max_seen_per_epoch]
+        if not indexed:
+            return [], []
+        target_batch = max(1, min(int(batch_size), len(indexed)))
+        if len(indexed) <= target_batch:
+            selected = indexed
+        else:
+            selected = self.rng.sample(indexed, target_batch)
+        batch_ids = [pair_id for pair_id, _ in selected]
+        batch_samples = [sample for _, sample in selected]
+        return batch_samples, batch_ids
+
+    def _is_better_pair_ft_metrics(self, current_metrics: Dict[str, float], best_metrics: Dict[str, float]) -> bool:
+        current_acc = float((current_metrics or {}).get('pair_ranking_accuracy', 0.0))
+        best_acc = float((best_metrics or {}).get('pair_ranking_accuracy', 0.0))
+        if current_acc > best_acc + 1e-9:
+            return True
+        if current_acc < best_acc - 1e-9:
+            return False
+        current_gap = float((current_metrics or {}).get('same_state_score_gap', 0.0))
+        best_gap = float((best_metrics or {}).get('same_state_score_gap', 0.0))
+        return current_gap > best_gap + 1e-9
 
     @torch.no_grad()
     def evaluate_pairs(self, pair_samples: Sequence[RiskPairSample]) -> Dict[str, float]:

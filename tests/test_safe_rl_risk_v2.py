@@ -122,3 +122,76 @@ def test_world_pair_ft_freeze_policy_freezes_traj_decoder():
         assert "risk_score_head" in trainable
     finally:
         trainer._restore_grad_state(grad_state)
+
+
+def test_world_pair_spread_eligibility_respects_trust_and_gap():
+    from safe_rl.models.world_model import WorldModelTrainer
+
+    trainer = WorldModelTrainer(config=WorldModelConfig(hidden_dim=64, future_steps=2, multimodal=2), history_steps=2, device="cpu")
+    trusted_large_gap = RiskPairSample(
+        history_scene=_history_scene()[:2],
+        action_a=4,
+        action_b=3,
+        preferred_action=4,
+        source="stage5_trace_first_replacement",
+        weight=1.0,
+        meta={"target_risk_a": 0.1, "target_risk_b": 0.8, "trusted_for_spread": True},
+    )
+    trusted_small_gap = RiskPairSample(
+        history_scene=_history_scene()[:2],
+        action_a=4,
+        action_b=3,
+        preferred_action=4,
+        source="stage5_trace_first_replacement",
+        weight=1.0,
+        meta={"target_risk_a": 0.1, "target_risk_b": 0.2, "trusted_for_spread": True},
+    )
+    untrusted_large_gap = RiskPairSample(
+        history_scene=_history_scene()[:2],
+        action_a=4,
+        action_b=3,
+        preferred_action=4,
+        source="stage4_buffer",
+        weight=1.0,
+        meta={"target_risk_a": 0.1, "target_risk_b": 0.8, "trusted_for_spread": False},
+    )
+    assert trainer._spread_eligible_pair_count([trusted_large_gap, trusted_small_gap, untrusted_large_gap]) == 1
+
+
+def test_world_pair_stage5_sampling_respects_epoch_cap():
+    from safe_rl.models.world_model import WorldModelTrainer
+
+    trainer = WorldModelTrainer(config=WorldModelConfig(hidden_dim=64, future_steps=2, multimodal=2), history_steps=2, device="cpu", seed=123)
+    pair = RiskPairSample(
+        history_scene=_history_scene()[:2],
+        action_a=4,
+        action_b=3,
+        preferred_action=4,
+        source="stage5_trace_first_replacement",
+        weight=1.0,
+        meta={"seed": 42, "pair_index": 0},
+    )
+    batch1, ids1 = trainer._sample_stage5_batch_with_cap([pair], ["p0"], batch_size=1, seen_counts={"p0": 0}, max_seen_per_epoch=1)
+    assert len(batch1) == 1
+    assert ids1 == ["p0"]
+    batch2, ids2 = trainer._sample_stage5_batch_with_cap([pair], ["p0"], batch_size=1, seen_counts={"p0": 1}, max_seen_per_epoch=1)
+    assert batch2 == []
+    assert ids2 == []
+
+
+def test_world_pair_best_metric_prefers_accuracy_then_gap():
+    from safe_rl.models.world_model import WorldModelTrainer
+
+    trainer = WorldModelTrainer(config=WorldModelConfig(hidden_dim=64, future_steps=2, multimodal=2), history_steps=2, device="cpu")
+    assert trainer._is_better_pair_ft_metrics(
+        {"pair_ranking_accuracy": 0.8, "same_state_score_gap": 0.01},
+        {"pair_ranking_accuracy": 0.7, "same_state_score_gap": 0.5},
+    ) is True
+    assert trainer._is_better_pair_ft_metrics(
+        {"pair_ranking_accuracy": 0.8, "same_state_score_gap": 0.06},
+        {"pair_ranking_accuracy": 0.8, "same_state_score_gap": 0.05},
+    ) is True
+    assert trainer._is_better_pair_ft_metrics(
+        {"pair_ranking_accuracy": 0.8, "same_state_score_gap": 0.04},
+        {"pair_ranking_accuracy": 0.8, "same_state_score_gap": 0.05},
+    ) is False

@@ -748,11 +748,12 @@ def test_stage5_trace_writes_pair_files_and_summary(monkeypatch):
     assert Path(result["shield_margin_analysis_summary_path"]).exists()
     assert Path(pipeline.risk_v2_eval_summary_path).exists()
     risk_v2_summary = json.loads(Path(pipeline.risk_v2_eval_summary_path).read_text(encoding="utf-8"))
-    assert risk_v2_summary["after_trace_metrics"] == {"D1": None, "E2": None, "F1": None}
+    assert risk_v2_summary["after_trace_metrics"] == {"D1": None, "E2": None, "F1": None, "HOLDOUT_C1": None}
     assert risk_v2_summary["after_trace_metrics_complete"] is False
     assert risk_v2_summary["margin_near_threshold_band_ratio_before_after"]["D1"]["after"] is None
     assert risk_v2_summary["margin_near_threshold_band_ratio_before_after"]["E2"]["after"] is None
     assert risk_v2_summary["margin_near_threshold_band_ratio_before_after"]["F1"]["after"] is None
+    assert risk_v2_summary["margin_near_threshold_band_ratio_before_after"]["HOLDOUT_C1"]["after"] is None
     margin_summary = json.loads(Path(result["shield_margin_analysis_summary_path"]).read_text(encoding="utf-8"))
     assert margin_summary["variants"][0]["variant_name"] == "C_baseline"
     assert margin_summary["variants"][0]["replacement_step_count"] == 1
@@ -1025,6 +1026,7 @@ def test_shield_trace_tuning_summary_supports_d_variants_in_order():
         ("shield_trace_d1", "D1"),
         ("shield_trace_e2", "E2"),
         ("shield_trace_f1", "F1"),
+        ("shield_trace_holdout_c1", "HOLDOUT_C1"),
         ("shield_trace_f2", "F2"),
         ("shield_trace_f3", "F3"),
         ("shield_trace_e1", "E1"),
@@ -1088,6 +1090,7 @@ def test_shield_trace_tuning_summary_supports_d_variants_in_order():
         "D1",
         "E2",
         "F1",
+        "HOLDOUT_C1",
         "F2",
         "F3",
         "E1",
@@ -1250,8 +1253,24 @@ def test_stage2_report_includes_pair_finetune_metadata(monkeypatch):
             "light_training": {"variant": "v2"},
             "world_training": {"variant": "v2"},
             "light_pair_ft": {"before_pair_metrics": {"pair_ranking_accuracy": 0.5, "same_state_score_gap": 0.01, "score_spread": 0.01, "hard_negative_accuracy": 0.5}, "after_pair_metrics": {"pair_ranking_accuracy": 0.8, "same_state_score_gap": 0.04, "score_spread": 0.05, "hard_negative_accuracy": 0.75}},
-            "world_pair_ft": {"before_pair_metrics": {"pair_ranking_accuracy": 0.4, "same_state_score_gap": 0.01, "score_spread": 0.01, "hard_negative_accuracy": 0.4}, "after_pair_metrics": {"pair_ranking_accuracy": 0.7, "same_state_score_gap": 0.03, "score_spread": 0.04, "hard_negative_accuracy": 0.7}, "world_pair_ft_frozen_modules": ["traj_decoder"], "world_pair_ft_trainable_modules": ["fusion", "risk_score_head"]},
-            "world_pair_ft_source_mix": {"stage5_steps": 3, "stage4_steps": 1, "stage5_pairs_seen": 3, "stage4_pairs_seen": 1},
+            "world_pair_ft": {
+                "before_pair_metrics": {"pair_ranking_accuracy": 0.4, "same_state_score_gap": 0.01, "score_spread": 0.01, "hard_negative_accuracy": 0.4},
+                "after_pair_metrics": {"pair_ranking_accuracy": 0.7, "same_state_score_gap": 0.03, "score_spread": 0.04, "hard_negative_accuracy": 0.7},
+                "world_pair_ft_frozen_modules": ["traj_decoder"],
+                "world_pair_ft_trainable_modules": ["fusion", "risk_score_head"],
+                "stage5_pair_ranking_accuracy_before_after": {"before": 0.55, "after": 0.75},
+                "stage4_pair_ranking_accuracy_before_after": {"before": 0.45, "after": 0.65},
+                "stage5_same_state_score_gap_before_after": {"before": 0.02, "after": 0.05},
+                "stage4_same_state_score_gap_before_after": {"before": 0.01, "after": 0.03},
+                "stage5_score_spread_before_after": {"before": 0.02, "after": 0.06},
+                "stage4_score_spread_before_after": {"before": 0.01, "after": 0.04},
+                "stage5_spread_eligible_pair_count": 2,
+                "stage4_spread_eligible_pair_count": 0,
+                "world_pair_ft_best_epoch": 1,
+                "world_pair_ft_best_metrics": {"pair_ranking_accuracy": 0.75, "same_state_score_gap": 0.05},
+                "world_pair_ft_restored_best": True,
+            },
+            "world_pair_ft_source_mix": {"stage5_steps": 3, "stage4_steps": 1, "stage5_pairs_seen": 3, "stage4_pairs_seen": 1, "stage5_pair_seen_counts": {"p0": 2, "p1": 1}, "stage5_pair_cap": 8, "stage5_cap_reached_pairs": 0},
         }
 
     monkeypatch.setattr("safe_rl.pipeline.pipeline.SafeRLEvaluator", _DummyEvaluator)
@@ -1285,10 +1304,18 @@ def test_stage2_report_includes_pair_finetune_metadata(monkeypatch):
     assert risk_v2_summary["light_pair_finetune_applied"] is True
     assert risk_v2_summary["world_pair_finetune_applied"] is True
     assert risk_v2_summary["world_pair_ft_source_mix"]["stage5_steps"] == 3
-    assert risk_v2_summary["after_trace_metrics"] == {"D1": None, "E2": None, "F1": None}
+    assert risk_v2_summary["after_trace_metrics"] == {"D1": None, "E2": None, "F1": None, "HOLDOUT_C1": None}
     assert risk_v2_summary["after_trace_metrics_complete"] is False
     assert risk_v2_summary["score_spread_before_after"]["light"]["before"]["score_spread"] == pytest.approx(0.01)
     assert risk_v2_summary["score_spread_before_after"]["world"]["after"]["score_spread"] == pytest.approx(0.04)
+    assert report["stage5_pair_ranking_accuracy_before_after"]["after"] == pytest.approx(0.75)
+    assert report["stage4_pair_ranking_accuracy_before_after"]["after"] == pytest.approx(0.65)
+    assert report["stage5_spread_eligible_pair_count"] == 2
+    assert report["stage4_spread_eligible_pair_count"] == 0
+    assert report["world_pair_ft_best_epoch"] == 1
+    assert report["world_pair_ft_restored_best"] is True
+    assert risk_v2_summary["stage5_pair_ranking_accuracy_before_after"]["after"] == pytest.approx(0.75)
+    assert risk_v2_summary["stage4_pair_ranking_accuracy_before_after"]["after"] == pytest.approx(0.65)
 
 
 
@@ -1466,6 +1493,28 @@ def test_stage5_pair_from_payload_reports_missing_same_state_proof(monkeypatch):
 
 
 
+
+def test_stage5_pair_miner_ignores_pre_v2_and_holdout_trace_dirs():
+    config = _tiny_config()
+    pipeline = SafeRLPipeline(config)
+    run_id = f"ut_stage5_pair_filter_{uuid.uuid4().hex[:8]}"
+    pipeline._prepare_run_context(stage="stage2", run_id=run_id)
+
+    assert pipeline.reports_dir is not None
+    included = pipeline.reports_dir / "shield_trace_d1"
+    excluded_pre = pipeline.reports_dir / "shield_trace_d1_pre_v2"
+    excluded_holdout = pipeline.reports_dir / "shield_trace_holdout_c1"
+    for path in [included, excluded_pre, excluded_holdout]:
+        path.mkdir(parents=True, exist_ok=True)
+        pipeline._write_json(path / "trace_summary.json", {"variant_name": path.name, "pair_files": [], "seeds": [42]})
+
+    payload = pipeline._build_pair_datasets_for_stage2()
+
+    assert payload["generation_summary"]["stage5"]["trace_dirs_seen"] == 1
+    assert pipeline._include_trace_dir_for_stage5_pair_mining(included) is True
+    assert pipeline._include_trace_dir_for_stage5_pair_mining(excluded_pre) is False
+    assert pipeline._include_trace_dir_for_stage5_pair_mining(excluded_holdout) is False
+
 def test_stage2_base_only_report_marks_pair_finetune_skipped(monkeypatch):
     import pickle
 
@@ -1559,6 +1608,17 @@ def test_risk_v2_summary_tracks_after_trace_metrics_by_variant():
                     "margin_near_threshold_band_ratio": 0.33,
                     "effective_shield_config": {"replacement_min_risk_margin": 0.103},
                 },
+                {
+                    "variant_name": "HOLDOUT_C1",
+                    "trace_summary_path": "holdout/trace_summary.json",
+                    "margin_analysis_path": "holdout/margin_analysis.json",
+                    "candidate_selected_count": 7,
+                    "mean_intervention_count": 1.5,
+                    "mean_risk_reduction": 0.01,
+                    "mean_reward_gap_to_baseline_policy": -0.01,
+                    "margin_near_threshold_band_ratio": 0.44,
+                    "effective_shield_config": {"replacement_min_risk_margin": 0.08},
+                },
             ]
         },
     )
@@ -1587,6 +1647,8 @@ def test_risk_v2_summary_tracks_after_trace_metrics_by_variant():
     assert summary["after_trace_metrics"]["D1"]["variant_name"] == "D1"
     assert summary["after_trace_metrics"]["E2"]["variant_name"] == "E2"
     assert summary["after_trace_metrics"]["F1"]["variant_name"] == "F1"
+    assert summary["after_trace_metrics"]["HOLDOUT_C1"]["variant_name"] == "HOLDOUT_C1"
     assert summary["margin_near_threshold_band_ratio_before_after"]["D1"]["after"] == pytest.approx(0.11)
     assert summary["margin_near_threshold_band_ratio_before_after"]["E2"]["after"] == pytest.approx(0.22)
     assert summary["margin_near_threshold_band_ratio_before_after"]["F1"]["after"] == pytest.approx(0.33)
+    assert summary["margin_near_threshold_band_ratio_before_after"]["HOLDOUT_C1"]["after"] == pytest.approx(0.44)

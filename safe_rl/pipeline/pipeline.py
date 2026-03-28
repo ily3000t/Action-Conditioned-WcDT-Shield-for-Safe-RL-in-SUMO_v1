@@ -319,6 +319,20 @@ class SafeRLPipeline:
             "stage4_buffer": float(self.config.light_risk.stage4_pair_weight),
         }
 
+    def _include_trace_dir_for_stage5_pair_mining(self, trace_dir: Path) -> bool:
+        name = str(trace_dir.name or "").strip().lower()
+        if "_pre_v2" in name:
+            return False
+        if name.startswith("shield_trace_holdout"):
+            return False
+        return self._find_trace_summary_path(trace_dir) is not None
+
+    def _include_trace_dir_for_trace_reports(self, trace_dir: Path) -> bool:
+        name = str(trace_dir.name or "").strip().lower()
+        if "_pre_v2" in name:
+            return False
+        return self._find_trace_summary_path(trace_dir) is not None
+
     def _build_pair_datasets_for_stage2(self) -> Dict[str, Any]:
         pair_source_weights = self._effective_pair_source_weights()
         stage5_pairs, stage5_summary = self._build_stage5_pair_samples(stage5_weight=float(pair_source_weights["stage5_trace_first_replacement"]))
@@ -362,7 +376,7 @@ class SafeRLPipeline:
 
         trace_dirs = sorted(
             path for path in self.reports_dir.glob("shield_trace*")
-            if path.is_dir() and self._find_trace_summary_path(path) is not None
+            if path.is_dir() and self._include_trace_dir_for_stage5_pair_mining(path)
         )
         summary["trace_dirs_seen"] = len(trace_dirs)
         for trace_dir in trace_dirs:
@@ -874,6 +888,7 @@ class SafeRLPipeline:
 
         evaluator = SafeRLEvaluator(self.config.eval)
         world_eval_metrics = evaluator.evaluate_world_model(world_predictor, test_samples)
+        world_pair_ft_report = dict(training_meta.get("world_pair_ft", {}))
         stage2_report = {
             "stage": "stage2",
             "run_id": self.run_id,
@@ -911,6 +926,17 @@ class SafeRLPipeline:
             "world_pair_ft_frozen_modules": list(dict(training_meta.get("world_pair_ft", {})).get("world_pair_ft_frozen_modules", [])),
             "world_pair_ft_trainable_modules": list(dict(training_meta.get("world_pair_ft", {})).get("world_pair_ft_trainable_modules", [])),
             "world_pair_ft_source_mix": dict(training_meta.get("world_pair_ft_source_mix", {})),
+            "stage5_pair_ranking_accuracy_before_after": dict(world_pair_ft_report.get("stage5_pair_ranking_accuracy_before_after", {})),
+            "stage4_pair_ranking_accuracy_before_after": dict(world_pair_ft_report.get("stage4_pair_ranking_accuracy_before_after", {})),
+            "stage5_same_state_score_gap_before_after": dict(world_pair_ft_report.get("stage5_same_state_score_gap_before_after", {})),
+            "stage4_same_state_score_gap_before_after": dict(world_pair_ft_report.get("stage4_same_state_score_gap_before_after", {})),
+            "stage5_score_spread_before_after": dict(world_pair_ft_report.get("stage5_score_spread_before_after", {})),
+            "stage4_score_spread_before_after": dict(world_pair_ft_report.get("stage4_score_spread_before_after", {})),
+            "stage5_spread_eligible_pair_count": int(world_pair_ft_report.get("stage5_spread_eligible_pair_count", 0)),
+            "stage4_spread_eligible_pair_count": int(world_pair_ft_report.get("stage4_spread_eligible_pair_count", 0)),
+            "world_pair_ft_best_epoch": int(world_pair_ft_report.get("world_pair_ft_best_epoch", -1)),
+            "world_pair_ft_best_metrics": dict(world_pair_ft_report.get("world_pair_ft_best_metrics", {})),
+            "world_pair_ft_restored_best": bool(world_pair_ft_report.get("world_pair_ft_restored_best", False)),
         }
         self._write_json(self.stage2_training_report_path, stage2_report)
         self._write_risk_v2_eval_summary_from_stage2(stage2_report)
@@ -1810,7 +1836,7 @@ class SafeRLPipeline:
         variants = list(tuning_summary.get("variants", []) or [])
         if not variants:
             return None
-        preferred = ["D1", "E2", "F1", "F2", "F3", "C_baseline"]
+        preferred = ["D1", "E2", "F1", "HOLDOUT_C1", "F2", "F3", "C_baseline"]
         by_name = {str(item.get("variant_name", "")): item for item in variants}
         for name in preferred:
             if name in by_name:
@@ -1818,7 +1844,7 @@ class SafeRLPipeline:
         return dict(variants[0])
 
     def _trace_eval_variant_names(self) -> List[str]:
-        return ["D1", "E2", "F1"]
+        return ["D1", "E2", "F1", "HOLDOUT_C1"]
 
     def _snapshot_from_tuning_entry(self, entry: Dict[str, Any]) -> Dict[str, Any]:
         return {
@@ -1881,6 +1907,17 @@ class SafeRLPipeline:
             "world_pair_finetune_applied": bool(stage2_report.get("world_pair_finetune_applied", False)),
             "pair_source_weights": dict(stage2_report.get("pair_source_weights", {})),
             "world_pair_ft_source_mix": dict(stage2_report.get("world_pair_ft_source_mix", {})),
+            "stage5_pair_ranking_accuracy_before_after": dict(stage2_report.get("stage5_pair_ranking_accuracy_before_after", {})),
+            "stage4_pair_ranking_accuracy_before_after": dict(stage2_report.get("stage4_pair_ranking_accuracy_before_after", {})),
+            "stage5_same_state_score_gap_before_after": dict(stage2_report.get("stage5_same_state_score_gap_before_after", {})),
+            "stage4_same_state_score_gap_before_after": dict(stage2_report.get("stage4_same_state_score_gap_before_after", {})),
+            "stage5_score_spread_before_after": dict(stage2_report.get("stage5_score_spread_before_after", {})),
+            "stage4_score_spread_before_after": dict(stage2_report.get("stage4_score_spread_before_after", {})),
+            "stage5_spread_eligible_pair_count": int(stage2_report.get("stage5_spread_eligible_pair_count", 0)),
+            "stage4_spread_eligible_pair_count": int(stage2_report.get("stage4_spread_eligible_pair_count", 0)),
+            "world_pair_ft_best_epoch": int(stage2_report.get("world_pair_ft_best_epoch", -1)),
+            "world_pair_ft_best_metrics": dict(stage2_report.get("world_pair_ft_best_metrics", {})),
+            "world_pair_ft_restored_best": bool(stage2_report.get("world_pair_ft_restored_best", False)),
             "base_train_metrics": dict(stage2_report.get("base_train_metrics", {})),
             "pair_finetune_metrics": dict(stage2_report.get("pair_finetune_metrics", {})),
             "world_pair_ft_frozen_modules": list(stage2_report.get("world_pair_ft_frozen_modules", [])),
@@ -2058,7 +2095,7 @@ class SafeRLPipeline:
 
         trace_dirs = sorted(
             path for path in self.reports_dir.glob("shield_trace*")
-            if path.is_dir() and self._find_trace_summary_path(path) is not None
+            if path.is_dir() and self._include_trace_dir_for_trace_reports(path)
         )
         if not trace_dirs:
             return None
@@ -2075,7 +2112,7 @@ class SafeRLPipeline:
         margin_summary_payload = self._write_shield_margin_analysis_summary(trace_dirs=trace_dirs, tuning_variants=variants)
         margin_summary_path = margin_summary_payload["summary_path"] if margin_summary_payload is not None else None
 
-        order = {"C_baseline": 0, "C1": 1, "C2": 2, "D1": 3, "E2": 4, "F1": 5, "F2": 6, "F3": 7, "E1": 8, "E3": 9, "D2": 10, "D3": 11, "C_strong": 12}
+        order = {"C_baseline": 0, "C1": 1, "C2": 2, "D1": 3, "E2": 4, "F1": 5, "HOLDOUT_C1": 6, "F2": 7, "F3": 8, "E1": 9, "E3": 10, "D2": 11, "D3": 12, "C_strong": 13}
         variants.sort(key=lambda item: (order.get(str(item.get("variant_name", "")), 99), str(item.get("variant_name", ""))))
 
         summary = {
@@ -2210,11 +2247,11 @@ class SafeRLPipeline:
         if not entries:
             return None
 
-        order = {"D1": 0, "E2": 1, "F1": 2, "F2": 3, "F3": 4}
+        order = {"D1": 0, "E2": 1, "F1": 2, "HOLDOUT_C1": 3, "F2": 4, "F3": 5}
         entries.sort(key=lambda item: (order.get(str(item.get("variant_name", "")), 99), str(item.get("variant_name", ""))))
         summary = {
             "run_id": str(self.run_id or ""),
-            "focus_variants": ["D1", "E2", "F1", "F2", "F3"],
+            "focus_variants": ["D1", "E2", "F1", "HOLDOUT_C1", "F2", "F3"],
             "variants": entries,
         }
         self._write_json(self.shield_margin_analysis_summary_path, summary)
@@ -2378,6 +2415,8 @@ class SafeRLPipeline:
             return "E2"
         if normalized == "shield_trace_f1":
             return "F1"
+        if normalized == "shield_trace_holdout_c1":
+            return "HOLDOUT_C1"
         if normalized == "shield_trace_f2":
             return "F2"
         if normalized == "shield_trace_f3":
