@@ -166,3 +166,19 @@ python safe_rl_main.py --config safe_rl/config/shield_trace_c_strong.yaml --stag
 - `mean_intervention_count`
 - `mean_risk_reduction`
 - `mean_reward_gap_to_baseline_policy`
+
+## ????
+
+???????????????? 4 ???????
+
+```bash
+python run_safe_rl_v2_pipeline.py
+```
+
+?????
+
+```bash
+python run_safe_rl_v2_pipeline.py --run-id 20260320_210439
+python run_safe_rl_v2_pipeline.py --python "E:\\Programs\\EnvAnaconda3\\envs\\pytorch\\python.exe"
+python run_safe_rl_v2_pipeline.py --dry-run
+```
