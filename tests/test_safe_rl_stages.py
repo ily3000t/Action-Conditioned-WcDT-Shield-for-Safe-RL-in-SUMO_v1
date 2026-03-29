@@ -1,4 +1,4 @@
-import json
+﻿import json
 import uuid
 from pathlib import Path
 from types import SimpleNamespace
@@ -78,6 +78,10 @@ def test_stage1_creates_manifest_and_datasets():
     assert pipeline.val_pkl.exists()
     assert pipeline.test_pkl.exists()
     assert Path(result["stage1"]["warning_summary_report"]).exists()
+    assert Path(result["stage1"]["stage1_probe_summary_report"]).exists()
+    assert Path(result["stage1"]["stage1_bucket_summary_report"]).exists()
+    assert Path(result["stage1"]["stage1_probe_events_report"]).exists()
+    assert Path(result["stage1"]["pairs_stage1_probe"]).exists()
 
 
 
@@ -748,13 +752,15 @@ def test_stage5_trace_writes_pair_files_and_summary(monkeypatch):
     assert Path(result["shield_margin_analysis_summary_path"]).exists()
     assert Path(pipeline.risk_v2_eval_summary_path).exists()
     risk_v2_summary = json.loads(Path(pipeline.risk_v2_eval_summary_path).read_text(encoding="utf-8"))
-    assert risk_v2_summary["after_trace_metrics"] == {"G1": None, "G2": None, "G3": None, "G4": None, "G5": None}
+    assert risk_v2_summary["after_trace_metrics"]["ANCHOR"]["variant_name"] == "C_baseline"
+    assert risk_v2_summary["after_trace_metrics"]["BOUNDARY"]["variant_name"] == "C_baseline"
+    assert risk_v2_summary["after_trace_metrics"]["CONSERVATIVE"]["variant_name"] == "C_baseline"
+    assert risk_v2_summary["after_trace_metrics"]["HOLDOUT"] is None
     assert risk_v2_summary["after_trace_metrics_complete"] is False
-    assert risk_v2_summary["margin_near_threshold_band_ratio_before_after"]["G1"]["after"] is None
-    assert risk_v2_summary["margin_near_threshold_band_ratio_before_after"]["G2"]["after"] is None
-    assert risk_v2_summary["margin_near_threshold_band_ratio_before_after"]["G3"]["after"] is None
-    assert risk_v2_summary["margin_near_threshold_band_ratio_before_after"]["G4"]["after"] is None
-    assert risk_v2_summary["margin_near_threshold_band_ratio_before_after"]["G5"]["after"] is None
+    assert risk_v2_summary["margin_near_threshold_band_ratio_before_after"]["ANCHOR"]["after"] == pytest.approx(0.0)
+    assert risk_v2_summary["margin_near_threshold_band_ratio_before_after"]["BOUNDARY"]["after"] == pytest.approx(0.0)
+    assert risk_v2_summary["margin_near_threshold_band_ratio_before_after"]["CONSERVATIVE"]["after"] == pytest.approx(0.0)
+    assert risk_v2_summary["margin_near_threshold_band_ratio_before_after"]["HOLDOUT"]["after"] is None
     margin_summary = json.loads(Path(result["shield_margin_analysis_summary_path"]).read_text(encoding="utf-8"))
     assert margin_summary["variants"][0]["variant_name"] == "C_baseline"
     assert margin_summary["variants"][0]["replacement_step_count"] == 1
@@ -763,6 +769,11 @@ def test_stage5_trace_writes_pair_files_and_summary(monkeypatch):
     assert trace_summary["unique_margin_count"] == 1
     assert trace_summary["replacement_margin_stats"]["mean"] == pytest.approx(0.1)
     assert trace_summary["margin_near_threshold_band_ratio"] == pytest.approx(0.0)
+    assert "best_margin_stats" in trace_summary
+    assert trace_summary["best_margin_stats"]["mean"] == pytest.approx(0.05)
+    assert trace_summary["best_margin_unique_count"] == 2
+    assert trace_summary["no_safe_candidate_count"] == 0
+    assert trace_summary["raw_already_best_count"] == 0
 
 
 def test_shield_trace_tuning_summary_aggregates_baseline_and_c1():
@@ -1022,6 +1033,7 @@ def test_shield_trace_tuning_summary_supports_d_variants_in_order():
     assert pipeline.reports_dir is not None
     variants = [
         ("shield_trace", "C_baseline"),
+        ("shield_trace_pair_bootstrap", "PAIR_BOOTSTRAP"),
         ("shield_trace_g1", "G1"),
         ("shield_trace_g2", "G2"),
         ("shield_trace_g3", "G3"),
@@ -1091,6 +1103,7 @@ def test_shield_trace_tuning_summary_supports_d_variants_in_order():
     summary = json.loads(Path(payload["summary_path"]).read_text(encoding="utf-8"))
     assert [entry["variant_name"] for entry in summary["variants"]] == [
         "C_baseline",
+        "PAIR_BOOTSTRAP",
         "G1",
         "G2",
         "G3",
@@ -1111,6 +1124,7 @@ def test_shield_trace_tuning_summary_supports_d_variants_in_order():
         "C_strong",
     ]
     by_name = {entry["variant_name"]: entry for entry in summary["variants"]}
+    assert by_name["PAIR_BOOTSTRAP"]["effective_shield_config"]["replacement_min_risk_margin"] == pytest.approx(0.11)
     assert by_name["G1"]["effective_shield_config"]["replacement_min_risk_margin"] == pytest.approx(0.11)
     assert by_name["G2"]["candidate_selected_count"] == 4
     assert by_name["G3"]["effective_shield_config"]["replacement_min_risk_margin"] == pytest.approx(0.11)
@@ -1318,7 +1332,7 @@ def test_stage2_report_includes_pair_finetune_metadata(monkeypatch):
     assert risk_v2_summary["light_pair_finetune_applied"] is True
     assert risk_v2_summary["world_pair_finetune_applied"] is True
     assert risk_v2_summary["world_pair_ft_source_mix"]["stage5_steps"] == 3
-    assert risk_v2_summary["after_trace_metrics"] == {"G1": None, "G2": None, "G3": None, "G4": None, "G5": None}
+    assert risk_v2_summary["after_trace_metrics"] == {"ANCHOR": None, "BOUNDARY": None, "CONSERVATIVE": None, "HOLDOUT": None}
     assert risk_v2_summary["after_trace_metrics_complete"] is False
     assert risk_v2_summary["score_spread_before_after"]["light"]["before"]["score_spread"] == pytest.approx(0.01)
     assert risk_v2_summary["score_spread_before_after"]["world"]["after"]["score_spread"] == pytest.approx(0.04)
@@ -1578,7 +1592,7 @@ def test_stage2_base_only_report_marks_pair_finetune_skipped(monkeypatch):
     assert report["pair_finetune_metrics"] == {"light": {}, "world": {}}
 
 
-def test_risk_v2_summary_tracks_after_trace_metrics_by_variant():
+def test_risk_v2_summary_tracks_after_trace_metrics_by_role():
     config = _tiny_config()
     pipeline = SafeRLPipeline(config)
     run_id = f"ut_risk_v2_after_trace_{uuid.uuid4().hex[:8]}"
@@ -1590,37 +1604,16 @@ def test_risk_v2_summary_tracks_after_trace_metrics_by_variant():
         {
             "variants": [
                 {
-                    "variant_name": "G1",
-                    "trace_summary_path": "g1/trace_summary.json",
-                    "margin_analysis_path": "g1/margin_analysis.json",
-                    "candidate_selected_count": 10,
-                    "mean_intervention_count": 3.0,
-                    "mean_risk_reduction": 0.02,
-                    "mean_reward_gap_to_baseline_policy": -0.01,
-                    "margin_near_threshold_band_ratio": 0.11,
-                    "effective_shield_config": {"replacement_min_risk_margin": 0.10},
-                },
-                {
-                    "variant_name": "G2",
-                    "trace_summary_path": "g2/trace_summary.json",
-                    "margin_analysis_path": "g2/margin_analysis.json",
-                    "candidate_selected_count": 8,
-                    "mean_intervention_count": 2.0,
-                    "mean_risk_reduction": 0.03,
-                    "mean_reward_gap_to_baseline_policy": -0.02,
-                    "margin_near_threshold_band_ratio": 0.22,
-                    "effective_shield_config": {"replacement_min_risk_margin": 0.10},
-                },
-                {
-                    "variant_name": "G3",
-                    "trace_summary_path": "g3/trace_summary.json",
-                    "margin_analysis_path": "g3/margin_analysis.json",
-                    "candidate_selected_count": 0,
-                    "mean_intervention_count": 0.0,
-                    "mean_risk_reduction": 0.0,
-                    "mean_reward_gap_to_baseline_policy": 0.0,
-                    "margin_near_threshold_band_ratio": 0.33,
-                    "effective_shield_config": {"replacement_min_risk_margin": 0.103},
+                    "variant_name": "PAIR_BOOTSTRAP",
+                    "trace_summary_path": "pair_bootstrap/trace_summary.json",
+                    "margin_analysis_path": "pair_bootstrap/margin_analysis.json",
+                    "candidate_selected_count": 12,
+                    "mean_intervention_count": 4.0,
+                    "mean_risk_reduction": 0.05,
+                    "mean_reward_gap_to_baseline_policy": -0.03,
+                    "margin_near_threshold_band_ratio": 0.15,
+                    "best_margin_near_threshold_band_ratio": 0.25,
+                    "effective_shield_config": {"replacement_min_risk_margin": 0.02},
                 },
                 {
                     "variant_name": "G4",
@@ -1631,6 +1624,7 @@ def test_risk_v2_summary_tracks_after_trace_metrics_by_variant():
                     "mean_risk_reduction": 0.01,
                     "mean_reward_gap_to_baseline_policy": -0.01,
                     "margin_near_threshold_band_ratio": 0.44,
+                    "best_margin_near_threshold_band_ratio": 0.54,
                     "effective_shield_config": {"replacement_min_risk_margin": 0.08},
                 },
                 {
@@ -1642,7 +1636,32 @@ def test_risk_v2_summary_tracks_after_trace_metrics_by_variant():
                     "mean_risk_reduction": 0.01,
                     "mean_reward_gap_to_baseline_policy": -0.01,
                     "margin_near_threshold_band_ratio": 0.55,
+                    "best_margin_near_threshold_band_ratio": 0.65,
                     "effective_shield_config": {"replacement_min_risk_margin": 0.09},
+                },
+                {
+                    "variant_name": "F1",
+                    "trace_summary_path": "f1/trace_summary.json",
+                    "margin_analysis_path": "f1/margin_analysis.json",
+                    "candidate_selected_count": 0,
+                    "mean_intervention_count": 0.0,
+                    "mean_risk_reduction": 0.0,
+                    "mean_reward_gap_to_baseline_policy": 0.0,
+                    "margin_near_threshold_band_ratio": 0.66,
+                    "best_margin_near_threshold_band_ratio": 0.76,
+                    "effective_shield_config": {"replacement_min_risk_margin": 0.103},
+                },
+                {
+                    "variant_name": "HOLDOUT_C1",
+                    "trace_summary_path": "holdout/trace_summary.json",
+                    "margin_analysis_path": "holdout/margin_analysis.json",
+                    "candidate_selected_count": 0,
+                    "mean_intervention_count": 0.0,
+                    "mean_risk_reduction": 0.0,
+                    "mean_reward_gap_to_baseline_policy": 0.0,
+                    "margin_near_threshold_band_ratio": 0.77,
+                    "best_margin_near_threshold_band_ratio": 0.87,
+                    "effective_shield_config": {"replacement_min_risk_margin": 0.08},
                 },
             ]
         },
@@ -1654,8 +1673,8 @@ def test_risk_v2_summary_tracks_after_trace_metrics_by_variant():
         "pair_finetune_applied": True,
         "light_pair_finetune_applied": False,
         "world_pair_finetune_applied": True,
-        "pair_source_weights": {"stage5_trace_first_replacement": 1.0, "stage4_buffer": 0.2},
-        "world_pair_ft_source_mix": {"stage5_steps": 3, "stage4_steps": 1},
+        "pair_source_weights": {"stage5_trace_first_replacement": 1.0, "stage1_probe_same_state": 0.7, "stage4_buffer": 0.2},
+        "world_pair_ft_source_mix": {"stage5_steps": 3, "stage1_probe_steps": 2, "stage4_steps": 1},
         "base_train_metrics": {},
         "pair_finetune_metrics": {
             "light": {"before_pair_metrics": {}, "after_pair_metrics": {}},
@@ -1669,13 +1688,11 @@ def test_risk_v2_summary_tracks_after_trace_metrics_by_variant():
 
     assert summary is not None
     assert summary["after_trace_metrics_complete"] is True
-    assert summary["after_trace_metrics"]["G1"]["variant_name"] == "G1"
-    assert summary["after_trace_metrics"]["G2"]["variant_name"] == "G2"
-    assert summary["after_trace_metrics"]["G3"]["variant_name"] == "G3"
-    assert summary["after_trace_metrics"]["G4"]["variant_name"] == "G4"
-    assert summary["after_trace_metrics"]["G5"]["variant_name"] == "G5"
-    assert summary["margin_near_threshold_band_ratio_before_after"]["G1"]["after"] == pytest.approx(0.11)
-    assert summary["margin_near_threshold_band_ratio_before_after"]["G2"]["after"] == pytest.approx(0.22)
-    assert summary["margin_near_threshold_band_ratio_before_after"]["G3"]["after"] == pytest.approx(0.33)
-    assert summary["margin_near_threshold_band_ratio_before_after"]["G4"]["after"] == pytest.approx(0.44)
-    assert summary["margin_near_threshold_band_ratio_before_after"]["G5"]["after"] == pytest.approx(0.55)
+    assert summary["after_trace_metrics"]["ANCHOR"]["variant_name"] == "PAIR_BOOTSTRAP"
+    assert summary["after_trace_metrics"]["BOUNDARY"]["variant_name"] == "G5"
+    assert summary["after_trace_metrics"]["CONSERVATIVE"]["variant_name"] == "F1"
+    assert summary["after_trace_metrics"]["HOLDOUT"]["variant_name"] == "HOLDOUT_C1"
+    assert summary["margin_near_threshold_band_ratio_before_after"]["ANCHOR"]["after"] == pytest.approx(0.15)
+    assert summary["margin_near_threshold_band_ratio_before_after"]["BOUNDARY"]["after"] == pytest.approx(0.55)
+    assert summary["margin_near_threshold_band_ratio_before_after"]["CONSERVATIVE"]["after"] == pytest.approx(0.66)
+    assert summary["margin_near_threshold_band_ratio_before_after"]["HOLDOUT"]["after"] == pytest.approx(0.77)

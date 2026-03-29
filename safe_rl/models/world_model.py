@@ -1,4 +1,4 @@
-﻿import random
+import random
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
@@ -493,11 +493,13 @@ class WorldModelTrainer:
         replay_samples: Optional[Sequence[ActionConditionedSample]] = None,
         tb_writer=None,
         stage5_pair_samples: Optional[Sequence[RiskPairSample]] = None,
+        stage1_probe_pair_samples: Optional[Sequence[RiskPairSample]] = None,
         stage4_pair_samples: Optional[Sequence[RiskPairSample]] = None,
     ) -> Dict[str, float]:
         replay_samples = list(replay_samples or [])
         pair_samples = list(pair_samples or [])
         stage5_pair_samples = list(stage5_pair_samples or [sample for sample in pair_samples if str(sample.source) == 'stage5_trace_first_replacement'])
+        stage1_probe_pair_samples = list(stage1_probe_pair_samples or [sample for sample in pair_samples if str(sample.source) == 'stage1_probe_same_state'])
         stage4_pair_samples = list(stage4_pair_samples or [sample for sample in pair_samples if str(sample.source) == 'stage4_buffer'])
         pair_count = int(len(pair_samples))
         replay_sample_count = int(len(replay_samples))
@@ -507,17 +509,24 @@ class WorldModelTrainer:
         hard_negative_count = sum(1 for sample in pair_samples if bool(sample.meta.get('hard_negative', False)))
         before_pair_metrics = self.evaluate_pairs(pair_samples)
         before_stage5_metrics = self.evaluate_pairs(stage5_pair_samples)
+        before_stage1_probe_metrics = self.evaluate_pairs(stage1_probe_pair_samples)
         before_stage4_metrics = self.evaluate_pairs(stage4_pair_samples)
         before_pointwise_metrics = self._evaluate_risk_only_samples(eval_replay_samples)
         stage5_spread_eligible_count = self._spread_eligible_pair_count(stage5_pair_samples)
+        stage1_probe_spread_eligible_count = self._spread_eligible_pair_count(stage1_probe_pair_samples)
         stage4_spread_eligible_count = self._spread_eligible_pair_count(stage4_pair_samples)
         stage5_pair_ids = [self._stage5_pair_identifier(sample, index) for index, sample in enumerate(stage5_pair_samples)]
         source_mix = {
+            'phase_a_epochs': 0,
+            'phase_b_epochs': 0,
             'stage5_steps': 0,
+            'stage1_probe_steps': 0,
             'stage4_steps': 0,
             'stage5_pairs_seen': 0,
+            'stage1_probe_pairs_seen': 0,
             'stage4_pairs_seen': 0,
             'stage5_pair_count': int(len(stage5_pair_samples)),
+            'stage1_probe_pair_count': int(len(stage1_probe_pair_samples)),
             'stage4_pair_count': int(len(stage4_pair_samples)),
             'stage4_mix_every_n_steps': int(STAGE4_MIX_EVERY_N_STEPS),
             'stage5_pair_cap': int(getattr(self.config, 'stage5_pair_max_seen_per_epoch', 0) or 0),
@@ -526,10 +535,15 @@ class WorldModelTrainer:
         }
 
         if not self.config.pair_finetune or len(pair_samples) == 0:
-            print(f"[WorldModel PairFT] skipped, enabled={bool(self.config.pair_finetune)}, pairs={pair_count}, stage5_pairs={len(stage5_pair_samples)}, stage4_pairs={len(stage4_pair_samples)}, trusted_pairs={trusted_pair_count}, hard_negatives={hard_negative_count}, replay_samples={replay_sample_count}, eval_replay_samples={eval_replay_sample_count}")
+            print(
+                f"[WorldModel PairFT] skipped, enabled={bool(self.config.pair_finetune)}, pairs={pair_count}, "
+                f"stage5_pairs={len(stage5_pair_samples)}, stage1_probe_pairs={len(stage1_probe_pair_samples)}, stage4_pairs={len(stage4_pair_samples)}, "
+                f"trusted_pairs={trusted_pair_count}, hard_negatives={hard_negative_count}, replay_samples={replay_sample_count}, "
+                f"eval_replay_samples={eval_replay_sample_count}"
+            )
             self.last_pair_metrics = before_pair_metrics
             self.last_pair_ft_report = {
-                'enabled': bool(self.config.pair_finetune),
+                'enabled': False,
                 'pair_count': int(len(pair_samples)),
                 'replay_sample_count': int(replay_sample_count),
                 'eval_replay_sample_count': int(eval_replay_sample_count),
@@ -542,12 +556,16 @@ class WorldModelTrainer:
                 'world_pair_ft_trainable_modules': [],
                 'world_pair_ft_source_mix': dict(source_mix),
                 'stage5_pair_ranking_accuracy_before_after': self._metric_before_after(before_stage5_metrics, before_stage5_metrics, 'pair_ranking_accuracy'),
+                'stage1_probe_pair_ranking_accuracy_before_after': self._metric_before_after(before_stage1_probe_metrics, before_stage1_probe_metrics, 'pair_ranking_accuracy'),
                 'stage4_pair_ranking_accuracy_before_after': self._metric_before_after(before_stage4_metrics, before_stage4_metrics, 'pair_ranking_accuracy'),
                 'stage5_same_state_score_gap_before_after': self._metric_before_after(before_stage5_metrics, before_stage5_metrics, 'same_state_score_gap'),
+                'stage1_probe_same_state_score_gap_before_after': self._metric_before_after(before_stage1_probe_metrics, before_stage1_probe_metrics, 'same_state_score_gap'),
                 'stage4_same_state_score_gap_before_after': self._metric_before_after(before_stage4_metrics, before_stage4_metrics, 'same_state_score_gap'),
                 'stage5_score_spread_before_after': self._metric_before_after(before_stage5_metrics, before_stage5_metrics, 'score_spread'),
+                'stage1_probe_score_spread_before_after': self._metric_before_after(before_stage1_probe_metrics, before_stage1_probe_metrics, 'score_spread'),
                 'stage4_score_spread_before_after': self._metric_before_after(before_stage4_metrics, before_stage4_metrics, 'score_spread'),
                 'stage5_spread_eligible_pair_count': int(stage5_spread_eligible_count),
+                'stage1_probe_spread_eligible_pair_count': int(stage1_probe_spread_eligible_count),
                 'stage4_spread_eligible_pair_count': int(stage4_spread_eligible_count),
                 'world_pair_ft_best_epoch': -1,
                 'world_pair_ft_best_metrics': dict(before_stage5_metrics),
@@ -557,14 +575,14 @@ class WorldModelTrainer:
 
         print(
             f"[WorldModel PairFT] start on {self.device}, pairs={pair_count}, "
-            f"stage5_pairs={len(stage5_pair_samples)}, stage4_pairs={len(stage4_pair_samples)}, "
-            f"trusted_pairs={trusted_pair_count}, hard_negatives={hard_negative_count}, "
-            f"replay_samples={replay_sample_count}, eval_replay_samples={eval_replay_sample_count}"
+            f"stage5_pairs={len(stage5_pair_samples)}, stage1_probe_pairs={len(stage1_probe_pair_samples)}, stage4_pairs={len(stage4_pair_samples)}, "
+            f"trusted_pairs={trusted_pair_count}, hard_negatives={hard_negative_count}, replay_samples={replay_sample_count}, "
+            f"eval_replay_samples={eval_replay_sample_count}"
         )
-        stage4_loader = self._build_pair_loader(stage4_pair_samples)
-        stage4_iter = iter(stage4_loader) if stage4_loader is not None else None
         replay_loader = self._build_replay_loader(replay_samples)
         replay_iter = iter(replay_loader) if replay_loader is not None else None
+        stage4_loader = self._build_pair_loader(stage4_pair_samples)
+        stage4_iter = iter(stage4_loader) if stage4_loader is not None else None
         grad_state, frozen_modules, trainable_modules = self._apply_pair_ft_freeze_policy()
         optimizer = torch.optim.Adam([parameter for parameter in self.model.parameters() if parameter.requires_grad], lr=self.config.learning_rate)
 
@@ -572,12 +590,13 @@ class WorldModelTrainer:
         global_step = 0
         epoch_metrics: List[Dict[str, float]] = []
         stage5_batch_size = max(1, min(int(self.config.batch_size), max(1, len(stage5_pair_samples)))) if stage5_pair_samples else 0
-        total_epoch_steps = self._pair_ft_epoch_steps(
-            stage5_pair_samples=stage5_pair_samples,
-            stage4_loader=stage4_loader,
-            stage5_batch_size=stage5_batch_size,
-        )
-        best_eval_pairs = stage5_pair_samples or pair_samples
+        stage1_probe_batch_size = max(1, min(int(self.config.batch_size), max(1, len(stage1_probe_pair_samples)))) if stage1_probe_pair_samples else 0
+        total_epochs = max(1, int(self.config.pair_finetune_epochs))
+        phase_a_epochs = min(total_epochs, 1 if (stage5_pair_samples or stage1_probe_pair_samples) else 0)
+        phase_b_epochs = max(0, total_epochs - phase_a_epochs)
+        source_mix['phase_a_epochs'] = int(phase_a_epochs)
+        source_mix['phase_b_epochs'] = int(phase_b_epochs)
+        best_eval_pairs = stage5_pair_samples or stage1_probe_pair_samples or pair_samples
         best_metrics = dict(self.evaluate_pairs(best_eval_pairs))
         best_epoch = -1
         best_state = {name: tensor.detach().cpu().clone() for name, tensor in self.model.state_dict().items()}
@@ -586,16 +605,25 @@ class WorldModelTrainer:
         total_stage5_seen_counts = {pair_id: 0 for pair_id in stage5_pair_ids}
         stage5_cap_reached_ids = set()
 
-        for epoch_idx in range(max(1, int(self.config.pair_finetune_epochs))):
+        for epoch_idx in range(total_epochs):
+            phase_name = 'phase_a_strong_only' if epoch_idx < phase_a_epochs else 'phase_b_source_mixed'
             epoch_total = 0.0
             epoch_pointwise = 0.0
             epoch_ranking = 0.0
             epoch_spread = 0.0
             epoch_steps = 0
             epoch_stage5_seen_counts = {pair_id: 0 for pair_id in stage5_pair_ids}
+            step_targets = [1]
+            if stage5_pair_samples and stage5_batch_size > 0:
+                step_targets.append(int(np.ceil(len(stage5_pair_samples) / float(stage5_batch_size))))
+            if stage1_probe_pair_samples and stage1_probe_batch_size > 0:
+                step_targets.append(int(np.ceil(len(stage1_probe_pair_samples) / float(stage1_probe_batch_size))))
+            total_epoch_steps = max(step_targets)
+
             for step_idx in range(total_epoch_steps):
                 ranking_terms: List[torch.Tensor] = []
                 spread_terms: List[torch.Tensor] = []
+
                 if stage5_pair_samples:
                     stage5_batch, selected_pair_ids = self._sample_stage5_batch_with_cap(
                         stage5_pair_samples=stage5_pair_samples,
@@ -615,12 +643,17 @@ class WorldModelTrainer:
                             total_stage5_seen_counts[pair_id] += 1
                             if int(getattr(self.config, 'stage5_pair_max_seen_per_epoch', 0) or 0) > 0 and epoch_stage5_seen_counts[pair_id] >= int(getattr(self.config, 'stage5_pair_max_seen_per_epoch', 0) or 0):
                                 stage5_cap_reached_ids.add(pair_id)
-                should_mix_stage4 = (
-                    stage4_loader is not None and (
-                        not stage5_pair_samples or (step_idx + 1) % int(STAGE4_MIX_EVERY_N_STEPS) == 0
-                    )
-                )
-                if should_mix_stage4:
+
+                if stage1_probe_pair_samples:
+                    stage1_probe_batch = self._sample_pair_batch_with_replacement(stage1_probe_pair_samples, stage1_probe_batch_size)
+                    if stage1_probe_batch:
+                        stage1_ranking_loss, stage1_spread_loss = self._compute_pair_losses(stage1_probe_batch)
+                        ranking_terms.append(stage1_ranking_loss)
+                        spread_terms.append(stage1_spread_loss)
+                        source_mix['stage1_probe_steps'] += 1
+                        source_mix['stage1_probe_pairs_seen'] += len(stage1_probe_batch)
+
+                if epoch_idx >= phase_a_epochs and stage4_loader is not None and (step_idx + 1) % int(STAGE4_MIX_EVERY_N_STEPS) == 0:
                     stage4_batch, stage4_iter = self._next_pair_batch(stage4_iter, stage4_loader)
                     if stage4_batch:
                         stage4_ranking_loss, _ = self._compute_pair_losses(stage4_batch)
@@ -661,6 +694,7 @@ class WorldModelTrainer:
             if epoch_steps > 0:
                 epoch_summary = {
                     'epoch': float(epoch_idx),
+                    'phase': phase_name,
                     'loss_total': epoch_total / epoch_steps,
                     'loss_pointwise': epoch_pointwise / epoch_steps,
                     'loss_ranking': epoch_ranking / epoch_steps,
@@ -668,7 +702,7 @@ class WorldModelTrainer:
                 }
                 epoch_metrics.append(epoch_summary)
                 print(
-                    f"[WorldModel PairFT] epoch {epoch_idx + 1}/{max(1, int(self.config.pair_finetune_epochs))}, "
+                    f"[WorldModel PairFT] epoch {epoch_idx + 1}/{total_epochs} ({phase_name}), "
                     f"total={epoch_summary['loss_total']:.6f}, pointwise={epoch_summary['loss_pointwise']:.6f}, "
                     f"ranking={epoch_summary['loss_ranking']:.6f}, spread={epoch_summary['loss_spread']:.6f}"
                 )
@@ -694,6 +728,7 @@ class WorldModelTrainer:
         self.model.eval()
         after_pair_metrics = self.evaluate_pairs(pair_samples)
         after_stage5_metrics = self.evaluate_pairs(stage5_pair_samples)
+        after_stage1_probe_metrics = self.evaluate_pairs(stage1_probe_pair_samples)
         after_stage4_metrics = self.evaluate_pairs(stage4_pair_samples)
         after_pointwise_metrics = self._evaluate_risk_only_samples(eval_replay_samples)
         source_mix['stage5_pair_seen_counts'] = dict(total_stage5_seen_counts)
@@ -713,12 +748,16 @@ class WorldModelTrainer:
             'world_pair_ft_trainable_modules': trainable_modules,
             'world_pair_ft_source_mix': dict(source_mix),
             'stage5_pair_ranking_accuracy_before_after': self._metric_before_after(before_stage5_metrics, after_stage5_metrics, 'pair_ranking_accuracy'),
+            'stage1_probe_pair_ranking_accuracy_before_after': self._metric_before_after(before_stage1_probe_metrics, after_stage1_probe_metrics, 'pair_ranking_accuracy'),
             'stage4_pair_ranking_accuracy_before_after': self._metric_before_after(before_stage4_metrics, after_stage4_metrics, 'pair_ranking_accuracy'),
             'stage5_same_state_score_gap_before_after': self._metric_before_after(before_stage5_metrics, after_stage5_metrics, 'same_state_score_gap'),
+            'stage1_probe_same_state_score_gap_before_after': self._metric_before_after(before_stage1_probe_metrics, after_stage1_probe_metrics, 'same_state_score_gap'),
             'stage4_same_state_score_gap_before_after': self._metric_before_after(before_stage4_metrics, after_stage4_metrics, 'same_state_score_gap'),
             'stage5_score_spread_before_after': self._metric_before_after(before_stage5_metrics, after_stage5_metrics, 'score_spread'),
+            'stage1_probe_score_spread_before_after': self._metric_before_after(before_stage1_probe_metrics, after_stage1_probe_metrics, 'score_spread'),
             'stage4_score_spread_before_after': self._metric_before_after(before_stage4_metrics, after_stage4_metrics, 'score_spread'),
             'stage5_spread_eligible_pair_count': int(stage5_spread_eligible_count),
+            'stage1_probe_spread_eligible_pair_count': int(stage1_probe_spread_eligible_count),
             'stage4_spread_eligible_pair_count': int(stage4_spread_eligible_count),
             'world_pair_ft_best_epoch': int(best_epoch),
             'world_pair_ft_best_metrics': dict(best_metrics),
@@ -733,6 +772,10 @@ class WorldModelTrainer:
             tb_writer.add_scalar('summary/after_score_spread', float(after_pair_metrics.get('score_spread', 0.0)), 0)
             tb_writer.add_scalar('summary/stage5_before_pair_ranking_accuracy', float(before_stage5_metrics.get('pair_ranking_accuracy', 0.0)), 0)
             tb_writer.add_scalar('summary/stage5_after_pair_ranking_accuracy', float(after_stage5_metrics.get('pair_ranking_accuracy', 0.0)), 0)
+            tb_writer.add_scalar('summary/stage1_probe_before_pair_ranking_accuracy', float(before_stage1_probe_metrics.get('pair_ranking_accuracy', 0.0)), 0)
+            tb_writer.add_scalar('summary/stage1_probe_after_pair_ranking_accuracy', float(after_stage1_probe_metrics.get('pair_ranking_accuracy', 0.0)), 0)
+            tb_writer.add_scalar('summary/stage4_before_pair_ranking_accuracy', float(before_stage4_metrics.get('pair_ranking_accuracy', 0.0)), 0)
+            tb_writer.add_scalar('summary/stage4_after_pair_ranking_accuracy', float(after_stage4_metrics.get('pair_ranking_accuracy', 0.0)), 0)
         return self.last_pair_metrics
 
     def _metric_before_after(self, before_metrics: Dict[str, float], after_metrics: Dict[str, float], key: str) -> Dict[str, float]:

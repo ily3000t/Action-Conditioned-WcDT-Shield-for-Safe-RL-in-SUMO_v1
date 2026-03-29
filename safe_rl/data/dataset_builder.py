@@ -13,12 +13,19 @@ class ActionConditionedDatasetBuilder:
         self.sim_config = sim_config
         self.dataset_config = dataset_config
 
-    def build_samples(self, episodes: Sequence[EpisodeLog]) -> List[ActionConditionedSample]:
+    def build_samples(
+        self,
+        episodes: Sequence[EpisodeLog],
+        exclude_structural_from_main: bool = False,
+    ) -> List[ActionConditionedSample]:
         samples: List[ActionConditionedSample] = []
         h = self.sim_config.history_steps
         f = self.sim_config.future_steps
 
         for episode in episodes:
+            bucket = str(dict(getattr(episode, "meta", {}) or {}).get("collection_bucket", ""))
+            if exclude_structural_from_main and bucket == "structural_failure":
+                continue
             if len(episode.steps) < h + f + 1:
                 continue
             for t in range(h, len(episode.steps) - f):
@@ -40,6 +47,7 @@ class ActionConditionedDatasetBuilder:
                         "episode_id": episode.episode_id,
                         "step_index": t,
                         "risky_mode": episode.risky_mode,
+                        "collection_bucket": bucket,
                     },
                 )
                 samples.append(sample)

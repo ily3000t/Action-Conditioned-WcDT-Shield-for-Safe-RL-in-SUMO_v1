@@ -16,6 +16,11 @@ def test_default_config_loads():
     assert config.sim.collision_check_junctions is True
     assert config.shield.replacement_min_risk_margin == 0.05
     assert config.shield.protect_merge_lateral_decisions is True
+    assert config.stage1_collection.probe_enabled is True
+    assert config.stage1_collection.probe_horizon_steps == 8
+    assert config.stage1_collection.probe_action_set == "all_9"
+    assert config.stage1_collection.exclude_structural_from_main is True
+    assert config.world_model.min_stage5_pairs_for_world_ft == 50
 
 
 def test_tensorboard_config_override():
@@ -253,6 +258,19 @@ def test_shield_trace_holdout_c1_config_loads():
     assert config.shield_trace.seed_list == [11, 29, 47]
     assert config.eval.seed_list == [11, 29, 47]
     assert config.tensorboard.run_name == "shield_trace_holdout_c1"
+
+
+def test_stage5_pair_bootstrap_config_loads():
+    config = load_safe_rl_config("safe_rl/config/stage5_pair_bootstrap.yaml")
+    assert config.shield.risk_threshold == 0.30
+    assert config.shield.replacement_min_risk_margin == 0.02
+    assert config.shield.raw_passthrough_risk_threshold == 0.24
+    assert config.shield_trace.trace_dir_name == "shield_trace_pair_bootstrap"
+    assert config.shield_trace.seed_list[0] == 1000
+    assert config.shield_trace.seed_list[-1] == 1049
+    assert len(config.shield_trace.seed_list) == 50
+    assert config.eval.eval_episodes == 50
+    assert config.tensorboard.run_name == "shield_trace_pair_bootstrap"
 
 def test_risk_model_v2_defaults_enabled():
     config = load_safe_rl_config()

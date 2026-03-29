@@ -1,0 +1,28 @@
+﻿shield:
+  candidate_count: 7
+  coarse_top_k: 5
+  tail_quantile: 0.9
+  risk_threshold: 0.30
+  uncertainty_threshold: 0.45
+  uncertainty_weight: 0.2
+  fallback_action: "DECEL_KEEP"
+  replacement_min_risk_margin: 0.02
+  raw_passthrough_risk_threshold: 0.24
+  protect_merge_lateral_decisions: true
+  merge_override_margin: 0.12
+
+shield_trace:
+  enabled: true
+  seed_list: [1000, 1001, 1002, 1003, 1004, 1005, 1006, 1007, 1008, 1009, 1010, 1011, 1012, 1013, 1014, 1015, 1016, 1017, 1018, 1019, 1020, 1021, 1022, 1023, 1024, 1025, 1026, 1027, 1028, 1029, 1030, 1031, 1032, 1033, 1034, 1035, 1036, 1037, 1038, 1039, 1040, 1041, 1042, 1043, 1044, 1045, 1046, 1047, 1048, 1049]
+  save_pair_traces: true
+  trace_dir_name: "shield_trace_pair_bootstrap"
+
+eval:
+  eval_episodes: 50
+  seed_list: [1000, 1001, 1002, 1003, 1004, 1005, 1006, 1007, 1008, 1009, 1010, 1011, 1012, 1013, 1014, 1015, 1016, 1017, 1018, 1019, 1020, 1021, 1022, 1023, 1024, 1025, 1026, 1027, 1028, 1029, 1030, 1031, 1032, 1033, 1034, 1035, 1036, 1037, 1038, 1039, 1040, 1041, 1042, 1043, 1044, 1045, 1046, 1047, 1048, 1049]
+
+tensorboard:
+  enabled: true
+  root_dir: "safe_rl_output/tensorboard"
+  run_name: "shield_trace_pair_bootstrap"
+  flush_secs: 10

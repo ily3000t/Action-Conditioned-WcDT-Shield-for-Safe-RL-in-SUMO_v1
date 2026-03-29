@@ -44,6 +44,17 @@ class DatasetConfig:
 
 
 @dataclass
+class Stage1CollectionConfig:
+    probe_enabled: bool = True
+    probe_horizon_steps: int = 8
+    probe_max_steps_per_episode: int = 4
+    probe_action_set: str = "all_9"
+    probe_trigger_ttc_threshold: float = 3.0
+    probe_trigger_min_distance: float = 12.0
+    exclude_structural_from_main: bool = True
+
+
+@dataclass
 class LightRiskConfig:
     enable_v2: bool = True
     pair_finetune: bool = True
@@ -76,6 +87,7 @@ class WorldModelConfig:
     pair_ft_eval_max_samples: int = 2048
     stage5_pair_max_seen_per_epoch: int = 8
     pair_ft_patience: int = 2
+    min_stage5_pairs_for_world_ft: int = 50
     multimodal: int = 6
     future_steps: int = 20
     hidden_dim: int = 256
@@ -167,6 +179,7 @@ class TensorboardConfig:
 class SafeRLConfig:
     sim: SimConfig = field(default_factory=SimConfig)
     dataset: DatasetConfig = field(default_factory=DatasetConfig)
+    stage1_collection: Stage1CollectionConfig = field(default_factory=Stage1CollectionConfig)
     light_risk: LightRiskConfig = field(default_factory=LightRiskConfig)
     world_model: WorldModelConfig = field(default_factory=WorldModelConfig)
     shield: ShieldConfig = field(default_factory=ShieldConfig)
@@ -197,6 +210,8 @@ def load_safe_rl_config(path: Optional[str] = None) -> SafeRLConfig:
         _update_dataclass(config.sim, data["sim"])
     if "dataset" in data:
         _update_dataclass(config.dataset, data["dataset"])
+    if "stage1_collection" in data:
+        _update_dataclass(config.stage1_collection, data["stage1_collection"])
     if "light_risk" in data:
         _update_dataclass(config.light_risk, data["light_risk"])
     if "world_model" in data:

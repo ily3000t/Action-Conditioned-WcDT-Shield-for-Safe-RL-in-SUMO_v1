@@ -122,6 +122,7 @@ class StepLog:
     final_reward: float
     done: bool
     risk_labels: RiskLabels
+    meta: Dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass
@@ -129,6 +130,7 @@ class EpisodeLog:
     episode_id: str
     risky_mode: bool
     steps: List[StepLog]
+    meta: Dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass

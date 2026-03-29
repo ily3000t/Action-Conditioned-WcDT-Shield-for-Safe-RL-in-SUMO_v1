@@ -1,4 +1,4 @@
-﻿from dataclasses import dataclass
+from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Protocol, Tuple
 
 from safe_rl.config.config import ShieldConfig
@@ -215,6 +215,30 @@ class SafetyShield:
         raw_action_type = action_name(policy_action)
         replacement_happened = final_action != policy_action
         lane_change_involved = bool(decode_action(policy_action).lateral != 0 or decode_action(final_action).lateral != 0)
+        fallback_action = fallback_action_id()
+        nonfallback_evaluations = [
+            ev
+            for ev in evaluations.values()
+            if ev.evaluated and ev.fine_risk is not None and int(ev.action_id) != int(fallback_action)
+        ]
+        nonfallback_evaluations.sort(key=lambda ev: (float(ev.fine_risk or 0.0), float(ev.uncertainty or 0.0), ev.distance_to_raw, ev.action_id))
+        best_eval = nonfallback_evaluations[0] if nonfallback_evaluations else raw_eval
+        best_candidate_action = int(best_eval.action_id) if best_eval is not None else int(policy_action)
+        raw_action_fine_risk = float(raw_eval.fine_risk or 0.0)
+        best_candidate_fine_risk = float(best_eval.fine_risk or raw_action_fine_risk) if best_eval is not None else raw_action_fine_risk
+        best_margin = float(raw_action_fine_risk - best_candidate_fine_risk)
+        no_safe_candidate = bool(reason == "all_candidates_high_risk_or_uncertain")
+        raw_already_best = bool(not replacement_happened and not fallback_used and best_candidate_action == int(policy_action))
+        primary_nonreplacement_reason = ""
+        if not replacement_happened:
+            if constraint_reason:
+                primary_nonreplacement_reason = str(constraint_reason)
+            elif raw_already_best:
+                primary_nonreplacement_reason = "raw_already_best"
+            elif no_safe_candidate:
+                primary_nonreplacement_reason = "no_safe_candidate"
+            else:
+                primary_nonreplacement_reason = str(reason)
         meta = {
             "candidate_count": int(len(candidates)),
             "evaluated_candidate_count": int(sum(1 for ev in evaluations.values() if ev.evaluated)),
@@ -230,6 +254,13 @@ class SafetyShield:
             "lane_change_involved": lane_change_involved,
             "constraint_reason": str(constraint_reason),
             "replacement_margin": float(replacement_margin),
+            "best_candidate_action": int(best_candidate_action),
+            "best_candidate_fine_risk": float(best_candidate_fine_risk),
+            "raw_action_fine_risk": float(raw_action_fine_risk),
+            "best_margin": float(best_margin),
+            "no_safe_candidate": bool(no_safe_candidate),
+            "raw_already_best": bool(raw_already_best),
+            "primary_nonreplacement_reason": str(primary_nonreplacement_reason),
             "candidate_evaluations": self._serialize_candidate_evaluations(candidates, evaluations),
             "merge_phase_active": bool(merge_phase_active),
         }

@@ -210,6 +210,13 @@ class SafeRLEvaluator:
             "collision": bool(info.get("collision", False)),
             "constraint_reason": str(info.get("constraint_reason", "")),
             "replacement_margin": float(info.get("replacement_margin", 0.0)),
+            "best_candidate_action": int(info.get("best_candidate_action", -1)),
+            "best_candidate_fine_risk": None if info.get("best_candidate_fine_risk") is None else float(info.get("best_candidate_fine_risk", 0.0)),
+            "raw_action_fine_risk": float(info.get("raw_action_fine_risk", info.get("risk_raw", 0.0))),
+            "best_margin": None if info.get("best_margin") is None else float(info.get("best_margin", 0.0)),
+            "no_safe_candidate": bool(info.get("no_safe_candidate", False)),
+            "raw_already_best": bool(info.get("raw_already_best", False)),
+            "primary_nonreplacement_reason": str(info.get("primary_nonreplacement_reason", "")),
             "reward": float(info.get("reward", 0.0)),
             "task_reward": float(info.get("task_reward", 0.0)),
         }
