@@ -183,6 +183,45 @@ def test_shield_trace_f3_config_loads():
     assert config.shield_trace.trace_dir_name == "shield_trace_f3"
     assert config.eval.seed_list == [42, 123, 2024]
 
+def test_shield_trace_g1_config_loads():
+    config = load_safe_rl_config("safe_rl/config/shield_trace_g1.yaml")
+    assert config.shield.replacement_min_risk_margin == 0.05
+    assert config.shield.raw_passthrough_risk_threshold == 0.24
+    assert config.shield_trace.trace_dir_name == "shield_trace_g1"
+    assert config.eval.seed_list == [42, 123, 2024]
+
+
+def test_shield_trace_g2_config_loads():
+    config = load_safe_rl_config("safe_rl/config/shield_trace_g2.yaml")
+    assert config.shield.replacement_min_risk_margin == 0.06
+    assert config.shield.raw_passthrough_risk_threshold == 0.24
+    assert config.shield_trace.trace_dir_name == "shield_trace_g2"
+    assert config.eval.seed_list == [42, 123, 2024]
+
+
+def test_shield_trace_g3_config_loads():
+    config = load_safe_rl_config("safe_rl/config/shield_trace_g3.yaml")
+    assert config.shield.replacement_min_risk_margin == 0.07
+    assert config.shield.raw_passthrough_risk_threshold == 0.24
+    assert config.shield_trace.trace_dir_name == "shield_trace_g3"
+    assert config.eval.seed_list == [42, 123, 2024]
+
+
+def test_shield_trace_g4_config_loads():
+    config = load_safe_rl_config("safe_rl/config/shield_trace_g4.yaml")
+    assert config.shield.replacement_min_risk_margin == 0.08
+    assert config.shield.raw_passthrough_risk_threshold == 0.24
+    assert config.shield_trace.trace_dir_name == "shield_trace_g4"
+    assert config.eval.seed_list == [42, 123, 2024]
+
+
+def test_shield_trace_g5_config_loads():
+    config = load_safe_rl_config("safe_rl/config/shield_trace_g5.yaml")
+    assert config.shield.replacement_min_risk_margin == 0.09
+    assert config.shield.raw_passthrough_risk_threshold == 0.24
+    assert config.shield_trace.trace_dir_name == "shield_trace_g5"
+    assert config.eval.seed_list == [42, 123, 2024]
+
 
 def test_stage2_world_base_only_config_loads():
     config = load_safe_rl_config("safe_rl/config/stage2_world_base_only.yaml")

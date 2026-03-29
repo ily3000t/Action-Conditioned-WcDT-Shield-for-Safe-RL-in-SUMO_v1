@@ -1836,7 +1836,7 @@ class SafeRLPipeline:
         variants = list(tuning_summary.get("variants", []) or [])
         if not variants:
             return None
-        preferred = ["D1", "E2", "F1", "HOLDOUT_C1", "F2", "F3", "C_baseline"]
+        preferred = ["G1", "G2", "G3", "G4", "G5", "C_baseline", "C1", "C2", "D1", "E2", "F1", "HOLDOUT_C1", "F2", "F3"]
         by_name = {str(item.get("variant_name", "")): item for item in variants}
         for name in preferred:
             if name in by_name:
@@ -1844,7 +1844,7 @@ class SafeRLPipeline:
         return dict(variants[0])
 
     def _trace_eval_variant_names(self) -> List[str]:
-        return ["D1", "E2", "F1", "HOLDOUT_C1"]
+        return ["G1", "G2", "G3", "G4", "G5"]
 
     def _snapshot_from_tuning_entry(self, entry: Dict[str, Any]) -> Dict[str, Any]:
         return {
@@ -2112,7 +2112,7 @@ class SafeRLPipeline:
         margin_summary_payload = self._write_shield_margin_analysis_summary(trace_dirs=trace_dirs, tuning_variants=variants)
         margin_summary_path = margin_summary_payload["summary_path"] if margin_summary_payload is not None else None
 
-        order = {"C_baseline": 0, "C1": 1, "C2": 2, "D1": 3, "E2": 4, "F1": 5, "HOLDOUT_C1": 6, "F2": 7, "F3": 8, "E1": 9, "E3": 10, "D2": 11, "D3": 12, "C_strong": 13}
+        order = {"C_baseline": 0, "G1": 1, "G2": 2, "G3": 3, "G4": 4, "G5": 5, "C1": 6, "C2": 7, "D1": 8, "E2": 9, "F1": 10, "HOLDOUT_C1": 11, "F2": 12, "F3": 13, "E1": 14, "E3": 15, "D2": 16, "D3": 17, "C_strong": 18}
         variants.sort(key=lambda item: (order.get(str(item.get("variant_name", "")), 99), str(item.get("variant_name", ""))))
 
         summary = {
@@ -2247,11 +2247,11 @@ class SafeRLPipeline:
         if not entries:
             return None
 
-        order = {"D1": 0, "E2": 1, "F1": 2, "HOLDOUT_C1": 3, "F2": 4, "F3": 5}
+        order = {"G1": 0, "G2": 1, "G3": 2, "G4": 3, "G5": 4, "D1": 5, "E2": 6, "F1": 7, "HOLDOUT_C1": 8, "F2": 9, "F3": 10}
         entries.sort(key=lambda item: (order.get(str(item.get("variant_name", "")), 99), str(item.get("variant_name", ""))))
         summary = {
             "run_id": str(self.run_id or ""),
-            "focus_variants": ["D1", "E2", "F1", "HOLDOUT_C1", "F2", "F3"],
+            "focus_variants": ["G1", "G2", "G3", "G4", "G5", "D1", "E2", "F1", "HOLDOUT_C1", "F2", "F3"],
             "variants": entries,
         }
         self._write_json(self.shield_margin_analysis_summary_path, summary)
@@ -2405,6 +2405,16 @@ class SafeRLPipeline:
             return "C_baseline"
         if normalized == "shield_trace_c1":
             return "C1"
+        if normalized == "shield_trace_g1":
+            return "G1"
+        if normalized == "shield_trace_g2":
+            return "G2"
+        if normalized == "shield_trace_g3":
+            return "G3"
+        if normalized == "shield_trace_g4":
+            return "G4"
+        if normalized == "shield_trace_g5":
+            return "G5"
         if normalized == "shield_trace_c2":
             return "C2"
         if normalized == "shield_trace_d1":
