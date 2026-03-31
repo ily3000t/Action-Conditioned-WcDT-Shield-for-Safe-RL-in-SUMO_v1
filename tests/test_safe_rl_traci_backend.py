@@ -60,6 +60,44 @@ class _WarmupController(_DummyController):
         return True
 
 
+class _LabelAwareConnection:
+    class _VehicleAPI:
+        def getIDList(self):
+            return []
+
+    class _SimulationAPI:
+        def getTime(self):
+            return 0.0
+
+    def __init__(self):
+        self.close_calls = []
+        self.vehicle = self._VehicleAPI()
+        self.simulation = self._SimulationAPI()
+
+    def simulationStep(self):
+        return None
+
+    def close(self, *args):
+        self.close_calls.append(args)
+
+
+class _LabelAwareTraci:
+    class exceptions:
+        FatalTraCIError = _FatalTraCIError
+
+    def __init__(self):
+        self.start_calls = []
+        self.connection = _LabelAwareConnection()
+
+    def start(self, args, label=None):
+        self.start_calls.append({"args": list(args), "label": label})
+
+    def getConnection(self, label):
+        return self.connection if label else None
+
+
+
+
 def test_traci_backend_handles_fatal_simulation_step():
     config = SimConfig(force_mock=False, runtime_log_dir="safe_rl_output/test_artifacts")
     backend = TraciBackend(config)
@@ -141,3 +179,22 @@ def test_traci_backend_reset_raises_structured_backend_reset_error_on_restart_fa
     assert exc_info.value.backend_type == "traci"
     assert exc_info.value.episode_id == "stage3_train_ep_000123"
     assert "stage3_train_ep_000123_sess_02.log" in exc_info.value.sumo_log_path
+
+
+def test_traci_backend_start_real_session_uses_labeled_connection_object():
+    config = SimConfig(force_mock=False, runtime_log_dir="safe_rl_output/test_artifacts")
+    backend = TraciBackend(config)
+    backend._traci = _LabelAwareTraci()
+    backend._sumo_binary = "sumo"
+    backend._cfg_path = Path("scenarios/highway_merge/highway_merge.sumocfg")
+    backend._runtime_log_path = Path("safe_rl_output/test_artifacts/traci_runtime.log")
+
+    backend._start_real_session(seed=123, reason="test", bump_session_log=False)
+    backend._use_mock = False
+
+    assert backend._traci.start_calls[0]["label"] == backend._connection_label
+    assert backend._traci_conn is backend._traci.connection
+    assert backend._controller is not None
+    backend._started = True
+    backend.close()
+    assert backend._traci.connection.close_calls
