@@ -1,4 +1,5 @@
 import datetime as dt
+import itertools
 import logging
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
@@ -17,12 +18,15 @@ from safe_rl.sim.sumo_utils import (
 
 
 _LOGGER = logging.getLogger(__name__)
+_CONNECTION_LABEL_COUNTER = itertools.count(1)
 
 
 class TraciBackend(ISumoBackend):
     def __init__(self, config: SimConfig):
         self.config = config
         self._traci = None
+        self._traci_conn = None
+        self._connection_label = f"safe_rl_traci_{next(_CONNECTION_LABEL_COUNTER)}"
         self._controller: Optional[RealSumoController] = None
         self._sumo_binary: Optional[str] = None
         self._started = False
@@ -117,7 +121,8 @@ class TraciBackend(ISumoBackend):
             return
 
         self._traci = traci
-        self._controller = RealSumoController(self._traci, self.config, _LOGGER)
+        self._traci_conn = None
+        self._controller = None
         self._sumo_binary = resolve_sumo_binary(self.config, use_gui=self.config.use_gui)
 
         if not cfg_path.is_file():
@@ -282,9 +287,9 @@ class TraciBackend(ISumoBackend):
     def close(self):
         if not self._started:
             return
-        if not self._use_mock and self._traci is not None and self._session_active:
+        if not self._use_mock and self._session_active:
             try:
-                self._traci.close()
+                self._close_traci_connection()
             except Exception:
                 pass
         self._record_session_event("close_backend")
@@ -328,6 +333,42 @@ class TraciBackend(ISumoBackend):
             "true" if self.config.collision_check_junctions else "false",
         ]
 
+    def _open_traci_connection(self, args: List[str]):
+        try:
+            self._traci.start(args, label=self._connection_label)
+        except TypeError:
+            self._traci.start(args)
+            return self._traci
+        return self._resolve_traci_connection()
+
+    def _resolve_traci_connection(self):
+        get_connection = getattr(self._traci, "getConnection", None)
+        if callable(get_connection):
+            return get_connection(self._connection_label)
+        return self._traci
+
+    def _ensure_traci_connection(self):
+        if self._traci_conn is None:
+            self._traci_conn = self._resolve_traci_connection()
+        return self._traci_conn
+
+    def _close_traci_connection(self):
+        conn = self._traci_conn
+        self._traci_conn = None
+        self._controller = None
+        if conn is not None and hasattr(conn, "close"):
+            try:
+                conn.close(False)
+                return
+            except TypeError:
+                conn.close()
+                return
+        if self._traci is not None and hasattr(self._traci, "close"):
+            try:
+                self._traci.close(False)
+            except TypeError:
+                self._traci.close()
+
     def _start_real_session(self, seed: Optional[int], reason: str, bump_session_log: bool):
         if bump_session_log:
             self._advance_episode_session_log()
@@ -336,15 +377,17 @@ class TraciBackend(ISumoBackend):
         args = [self._sumo_binary] + self._runtime_args(seed)
         self._last_seed = int(seed if seed is not None else self.config.random_seed)
         self._last_runtime_args = list(args)
-        self._traci.start(args)
+        self._traci_conn = self._open_traci_connection(args)
+        if hasattr(self._traci_conn, "vehicle") and hasattr(self._traci_conn, "simulation"):
+            self._controller = RealSumoController(self._traci_conn, self.config, _LOGGER)
         self._session_active = True
         self._connection_healthy = True
-        self._record_session_event("start_real_session", reason=reason, seed=self._last_seed)
+        self._record_session_event("start_real_session", reason=reason, seed=self._last_seed, connection_label=self._connection_label)
 
     def _restart_real_session(self, seed: Optional[int], cause: str, bump_session_log: bool):
         self._record_session_event("restart_real_session", cause=cause, seed=int(seed if seed is not None else self.config.random_seed))
         try:
-            self._traci.close()
+            self._close_traci_connection()
         except Exception:
             pass
         self._start_real_session(seed, reason=f"restart:{cause}", bump_session_log=bump_session_log)
@@ -353,8 +396,8 @@ class TraciBackend(ISumoBackend):
         args = self._runtime_args(seed)
         self._last_seed = int(seed if seed is not None else self.config.random_seed)
         self._last_runtime_args = list(args)
-        self._traci.load(args)
-        self._record_session_event("load_session", seed=self._last_seed)
+        self._ensure_traci_connection().load(args)
+        self._record_session_event("load_session", seed=self._last_seed, connection_label=self._connection_label)
 
     def _warmup_after_reset(self) -> Dict[str, bool]:
         max_steps = max(10, int(5.0 / max(self.config.step_length, 1e-3)))

@@ -260,6 +260,15 @@ def test_shield_trace_holdout_c1_config_loads():
     assert config.tensorboard.run_name == "shield_trace_holdout_c1"
 
 
+def test_partial_trace_config_inherits_default_sim_settings():
+    default_config = load_safe_rl_config("safe_rl/config/default_safe_rl.yaml")
+    config = load_safe_rl_config("safe_rl/config/shield_trace_holdout_c1.yaml")
+    assert config.sim.sumo_cfg == default_config.sim.sumo_cfg
+    assert config.sim.sumo_home == default_config.sim.sumo_home
+    assert config.sim.sumo_bin == default_config.sim.sumo_bin
+    assert config.sim.runtime_log_dir == default_config.sim.runtime_log_dir
+
+
 def test_stage5_pair_bootstrap_config_loads():
     config = load_safe_rl_config("safe_rl/config/stage5_pair_bootstrap.yaml")
     assert config.shield.risk_threshold == 0.30

@@ -198,14 +198,7 @@ def _update_dataclass(instance, values: dict):
         setattr(instance, key, value)
 
 
-def load_safe_rl_config(path: Optional[str] = None) -> SafeRLConfig:
-    config = SafeRLConfig()
-    if path is None:
-        path = str(Path(__file__).resolve().parent / "default_safe_rl.yaml")
-
-    with open(path, "r", encoding="utf-8") as f:
-        data = yaml.safe_load(f) or {}
-
+def _apply_config_data(config: SafeRLConfig, data: dict):
     if "sim" in data:
         _update_dataclass(config.sim, data["sim"])
     if "dataset" in data:
@@ -237,4 +230,20 @@ def load_safe_rl_config(path: Optional[str] = None) -> SafeRLConfig:
         _update_dataclass(config.eval, data["eval"])
     if "tensorboard" in data:
         _update_dataclass(config.tensorboard, data["tensorboard"])
+
+
+def _load_yaml_dict(path: Path) -> dict:
+    with open(path, "r", encoding="utf-8") as f:
+        return yaml.safe_load(f) or {}
+
+
+def load_safe_rl_config(path: Optional[str] = None) -> SafeRLConfig:
+    config = SafeRLConfig()
+    default_path = (Path(__file__).resolve().parent / "default_safe_rl.yaml").resolve()
+    target_path = default_path if path is None else Path(path).resolve()
+
+    if target_path != default_path:
+        _apply_config_data(config, _load_yaml_dict(default_path))
+
+    _apply_config_data(config, _load_yaml_dict(target_path))
     return config
