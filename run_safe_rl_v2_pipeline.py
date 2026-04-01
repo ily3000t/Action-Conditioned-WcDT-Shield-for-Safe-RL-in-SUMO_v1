@@ -6,7 +6,7 @@ import sys
 from pathlib import Path
 from typing import Sequence
 
-DEFAULT_RUN_ID = "20260320_210439"
+DEFAULT_RUN_ID = "20260331_172102"
 
 STEPS: tuple[tuple[str, str, str], ...] = (
     (
@@ -15,17 +15,32 @@ STEPS: tuple[tuple[str, str, str], ...] = (
         "stage1",
     ),
     (
-        "Stage 5 - bootstrap strong pairs",
-        "safe_rl/config/stage5_pair_bootstrap.yaml",
-        "stage5",
-    ),
-    (
-        "Stage 2 - world-focused v2 training",
+        "Stage 2a - world-focused base training (pre-bootstrap)",
         "safe_rl/config/stage2_v2_world_pair_focus.yaml",
         "stage2",
     ),
     (
-        "Stage 5 - held-out after-trace validation",
+        "Stage 3 - train online policy",
+        "safe_rl/config/default_safe_rl.yaml",
+        "stage3",
+    ),
+    (
+        "Stage 4 - collect intervention buffer",
+        "safe_rl/config/default_safe_rl.yaml",
+        "stage4",
+    ),
+    (
+        "Stage 5a - bootstrap strong pairs",
+        "safe_rl/config/stage5_pair_bootstrap.yaml",
+        "stage5",
+    ),
+    (
+        "Stage 2b - world-focused v2 training with bootstrap pairs",
+        "safe_rl/config/stage2_v2_world_pair_focus.yaml",
+        "stage2",
+    ),
+    (
+        "Stage 5b - held-out after-trace validation",
         "safe_rl/config/shield_trace_holdout_c1.yaml",
         "stage5",
     ),
