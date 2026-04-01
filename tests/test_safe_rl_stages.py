@@ -1021,6 +1021,73 @@ def test_shield_trace_tuning_summary_supports_legacy_trace_file_names():
     assert margin_by_name["D1"]["unique_margin_count"] == 1
 
 
+def test_shield_trace_tuning_summary_prefers_pair_scalar_summaries_for_large_pairs():
+    config = _tiny_config()
+    config.shield_trace.enabled = True
+    config.shield_trace.trace_dir_name = "shield_trace_pair_bootstrap"
+
+    pipeline = SafeRLPipeline(config)
+    run_id = f"ut_trace_pair_scalars_{uuid.uuid4().hex[:8]}"
+    pipeline._prepare_run_context(stage="stage5", run_id=run_id)
+
+    assert pipeline.reports_dir is not None
+    trace_dir = pipeline.reports_dir / "shield_trace_pair_bootstrap"
+    trace_dir.mkdir(parents=True, exist_ok=True)
+    pair_path = trace_dir / "pair_00_seed_1000.json"
+    pair_path.write_text("{not-valid-json", encoding="utf-8")
+    pair_scalar_path = trace_dir / "pair_scalar_summaries.json"
+    pipeline._write_json(
+        pair_scalar_path,
+        {
+            "pairs": [
+                {
+                    "pair_index": 0,
+                    "seed": 1000,
+                    "baseline_collision": False,
+                    "shielded_collision": False,
+                    "baseline_reward": 0.3,
+                    "shielded_reward": 0.25,
+                    "intervention_count": 8,
+                    "replacement_count": 0,
+                    "fallback_action_count": 0,
+                    "mean_risk_reduction": 0.0,
+                }
+            ]
+        },
+    )
+    pipeline._write_json(
+        trace_dir / "trace_summary.json",
+        {
+            "variant_name": "PAIR_BOOTSTRAP",
+            "seeds": [1000],
+            "effective_shield_config": {
+                "risk_threshold": 0.30,
+                "uncertainty_threshold": 0.45,
+                "replacement_min_risk_margin": 0.02,
+                "raw_passthrough_risk_threshold": 0.24,
+                "effective_raw_passthrough_threshold": 0.24,
+                "merge_override_margin": 0.12,
+            },
+            "regression_pair_count": 0,
+            "blocked_by_margin_count": 0,
+            "raw_passthrough_count": 10,
+            "merge_lateral_guard_block_count": 0,
+            "candidate_selected_count": 0,
+            "pair_files": [str(pair_path)],
+            "pair_scalar_summaries_path": str(pair_scalar_path),
+        },
+    )
+
+    payload = pipeline._write_shield_trace_tuning_summary()
+    assert payload is not None
+    summary = json.loads(Path(payload["summary_path"]).read_text(encoding="utf-8"))
+    by_name = {entry["variant_name"]: entry for entry in summary["variants"]}
+    assert by_name["PAIR_BOOTSTRAP"]["pair_count"] == 1
+    assert by_name["PAIR_BOOTSTRAP"]["mean_intervention_count"] == 8.0
+    assert by_name["PAIR_BOOTSTRAP"]["mean_reward_gap_to_baseline_policy"] == pytest.approx(-0.05)
+    assert by_name["PAIR_BOOTSTRAP"]["margin_analysis_path"] == ""
+
+
 def test_shield_trace_tuning_summary_supports_d_variants_in_order():
     config = _tiny_config()
     config.shield_trace.enabled = True

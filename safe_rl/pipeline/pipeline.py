@@ -30,6 +30,7 @@ TRACE_TRUST_DISTANCE_DELTA = 2.0
 TRACE_TRUST_REWARD_DELTA = 0.10
 TRACE_TRUST_TTC_SUPPORT = 0.50
 TRACE_TRUST_DISTANCE_SUPPORT = 1.50
+TRACE_TUNING_MAX_FULL_PAIR_BYTES = 256 * 1024 * 1024
 
 
 @dataclass
@@ -2222,6 +2223,7 @@ class SafeRLPipeline:
 
         save_pair_traces = bool(getattr(stage_config.shield_trace, "save_pair_traces", True))
         pair_payloads: List[Dict[str, Any]] = []
+        pair_scalar_summaries: List[Dict[str, Any]] = []
         for pair_index in range(pair_count):
             baseline = dict(baseline_details[pair_index])
             shielded = dict(shielded_details[pair_index])
@@ -2235,6 +2237,7 @@ class SafeRLPipeline:
             seed_value = pair_payload["seed"]
             pair_path = trace_dir / f"pair_{pair_index:02d}_seed_{seed_value}.json"
             pair_payloads.append(pair_payload)
+            pair_scalar_summaries.append(self._build_trace_pair_scalar_summary(pair_payload))
             if save_pair_traces:
                 self._write_json(pair_path, pair_payload)
                 summary["pair_files"].append(str(pair_path))
@@ -2258,6 +2261,10 @@ class SafeRLPipeline:
             counts = Counter(dict(summary.get("primary_nonreplacement_reason_counts", {})))
             counts.update(dict(pair_payload.get("primary_nonreplacement_reason_counts", {})))
             summary["primary_nonreplacement_reason_counts"] = dict(sorted(counts.items()))
+
+        pair_scalar_summaries_path = trace_dir / "pair_scalar_summaries.json"
+        self._write_json(pair_scalar_summaries_path, {"pairs": pair_scalar_summaries})
+        summary["pair_scalar_summaries_path"] = str(pair_scalar_summaries_path)
 
         margin_analysis = self._ensure_trace_margin_analysis(
             trace_dir=trace_dir,
@@ -2326,24 +2333,20 @@ class SafeRLPipeline:
             return None
 
         trace_summary = self._read_json(trace_summary_path)
-        pair_paths = [Path(path) for path in list(trace_summary.get("pair_files", []) or []) if Path(path).exists()]
-        if not pair_paths:
-            pair_paths = self._find_trace_pair_paths(trace_dir)
-
-        pair_payloads = [self._read_json(path) for path in pair_paths if path.exists()]
-        if pair_payloads:
-            mean_intervention_count = sum(int(item.get("intervention_count", 0)) for item in pair_payloads) / len(pair_payloads)
-            mean_risk_reduction = sum(float(item.get("mean_risk_reduction", 0.0)) for item in pair_payloads) / len(pair_payloads)
+        pair_scalar_summaries = self._load_trace_pair_scalar_summaries(trace_dir, trace_summary)
+        if pair_scalar_summaries:
+            mean_intervention_count = sum(int(item.get("intervention_count", 0)) for item in pair_scalar_summaries) / len(pair_scalar_summaries)
+            mean_risk_reduction = sum(float(item.get("mean_risk_reduction", 0.0)) for item in pair_scalar_summaries) / len(pair_scalar_summaries)
             reward_deltas = [
                 float(item.get("shielded_reward", 0.0)) - float(item.get("baseline_reward", 0.0))
-                for item in pair_payloads
+                for item in pair_scalar_summaries
             ]
             mean_reward_gap = sum(reward_deltas) / len(reward_deltas)
-            mean_replacement_count = sum(int(item.get("replacement_count", 0)) for item in pair_payloads) / len(pair_payloads)
-            mean_fallback_count = sum(int(item.get("fallback_action_count", 0)) for item in pair_payloads) / len(pair_payloads)
+            mean_replacement_count = sum(int(item.get("replacement_count", 0)) for item in pair_scalar_summaries) / len(pair_scalar_summaries)
+            mean_fallback_count = sum(int(item.get("fallback_action_count", 0)) for item in pair_scalar_summaries) / len(pair_scalar_summaries)
             all_pairs_collision_free = all(
                 not bool(item.get("baseline_collision", False)) and not bool(item.get("shielded_collision", False))
-                for item in pair_payloads
+                for item in pair_scalar_summaries
             )
         else:
             mean_intervention_count = 0.0
@@ -2354,10 +2357,9 @@ class SafeRLPipeline:
             mean_fallback_count = 0.0
             all_pairs_collision_free = False
 
-        margin_analysis = self._ensure_trace_margin_analysis(
+        margin_analysis = self._load_or_build_trace_margin_analysis(
             trace_dir=trace_dir,
             trace_summary=trace_summary,
-            pair_payloads=pair_payloads,
             trace_summary_path=trace_summary_path,
         )
         margin_analysis_path = margin_analysis["analysis_path"] if margin_analysis is not None else None
@@ -2370,7 +2372,7 @@ class SafeRLPipeline:
             "trace_dir_name": trace_dir.name,
             "trace_summary_path": str(trace_summary_path),
             "margin_analysis_path": str(margin_analysis_path) if margin_analysis_path is not None else "",
-            "pair_count": len(pair_payloads),
+            "pair_count": len(pair_scalar_summaries),
             "seeds": list(trace_summary.get("seeds", [])),
             "effective_shield_config": dict(trace_summary.get("effective_shield_config", {})),
             "regression_pair_count": int(trace_summary.get("regression_pair_count", 0)),
@@ -2471,6 +2473,112 @@ class SafeRLPipeline:
         self._write_json(self.shield_margin_analysis_summary_path, summary)
         self.manifest.setdefault("artifact_paths", {})["shield_margin_analysis_summary_report"] = str(self.shield_margin_analysis_summary_path)
         return {"summary_path": self.shield_margin_analysis_summary_path, "summary": summary}
+
+    def _build_trace_pair_scalar_summary(self, pair_payload: Dict[str, Any]) -> Dict[str, Any]:
+        return {
+            "pair_index": int(pair_payload.get("pair_index", -1)),
+            "seed": int(pair_payload.get("seed", -1)),
+            "baseline_collision": bool(pair_payload.get("baseline_collision", False)),
+            "shielded_collision": bool(pair_payload.get("shielded_collision", False)),
+            "baseline_reward": float(pair_payload.get("baseline_reward", 0.0)),
+            "shielded_reward": float(pair_payload.get("shielded_reward", 0.0)),
+            "intervention_count": int(pair_payload.get("intervention_count", 0)),
+            "replacement_count": int(pair_payload.get("replacement_count", 0)),
+            "fallback_action_count": int(pair_payload.get("fallback_action_count", 0)),
+            "mean_risk_reduction": float(pair_payload.get("mean_risk_reduction", 0.0)),
+        }
+
+    def _load_trace_pair_scalar_summaries(self, trace_dir: Path, trace_summary: Dict[str, Any]) -> List[Dict[str, Any]]:
+        configured_path = str(trace_summary.get("pair_scalar_summaries_path", "") or "").strip()
+        candidates: List[Path] = []
+        if configured_path:
+            candidates.append(Path(configured_path))
+        candidates.append(trace_dir / "pair_scalar_summaries.json")
+
+        for path in candidates:
+            if path.exists():
+                payload = self._read_json(path)
+                return [dict(item) for item in list(payload.get("pairs", []) or [])]
+
+        pair_paths = [Path(path) for path in list(trace_summary.get("pair_files", []) or []) if Path(path).exists()]
+        if not pair_paths:
+            pair_paths = self._find_trace_pair_paths(trace_dir)
+        total_bytes = sum(path.stat().st_size for path in pair_paths if path.exists())
+        if pair_paths and total_bytes <= TRACE_TUNING_MAX_FULL_PAIR_BYTES:
+            return [self._build_trace_pair_scalar_summary(self._read_json(path)) for path in pair_paths if path.exists()]
+
+        paired_results_path = self.reports_dir / "stage5_paired_episode_results.json" if self.reports_dir is not None else None
+        if paired_results_path is not None and paired_results_path.exists():
+            payload = self._read_json(paired_results_path)
+            return [dict(item) for item in list(payload.get("pairs", []) or [])]
+        return []
+
+    def _empty_trace_margin_analysis(self, trace_dir: Path, trace_summary: Dict[str, Any]) -> Dict[str, Any]:
+        return {
+            "variant_name": self._shield_trace_variant_name(trace_dir.name),
+            "run_id": str(self.run_id or ""),
+            "seeds": list(trace_summary.get("seeds", [])),
+            "replacement_step_count": 0,
+            "replacement_margin_stats": self._numeric_stats([]),
+            "selected_candidate_fine_risk_stats": self._numeric_stats([]),
+            "raw_action_fine_risk_stats": self._numeric_stats([]),
+            "risk_improvement_stats": self._numeric_stats([]),
+            "selected_action_type_counts": {},
+            "raw_action_type_counts": {},
+            "chosen_candidate_rank_counts": {},
+            "unique_margin_count": int(trace_summary.get("unique_margin_count", 0)),
+            "margin_range": float(trace_summary.get("margin_range", 0.0)),
+            "margin_near_threshold_band_count": int(trace_summary.get("margin_near_threshold_band_count", 0)),
+            "margin_near_threshold_band_ratio": float(trace_summary.get("margin_near_threshold_band_ratio", 0.0)),
+            "best_margin_stats": dict(trace_summary.get("best_margin_stats", self._numeric_stats([]))),
+            "best_candidate_fine_risk_stats": self._numeric_stats([]),
+            "best_margin_raw_action_fine_risk_stats": self._numeric_stats([]),
+            "best_margin_unique_count": int(trace_summary.get("best_margin_unique_count", 0)),
+            "best_margin_range": float(trace_summary.get("best_margin_range", 0.0)),
+            "best_margin_near_threshold_band_count": int(trace_summary.get("best_margin_near_threshold_band_count", 0)),
+            "best_margin_near_threshold_band_ratio": float(trace_summary.get("best_margin_near_threshold_band_ratio", 0.0)),
+        }
+
+    def _load_or_build_trace_margin_analysis(
+        self,
+        trace_dir: Path,
+        trace_summary: Dict[str, Any],
+        trace_summary_path: Path,
+    ) -> Optional[Dict[str, Any]]:
+        configured_path = str(trace_summary.get("margin_analysis_path", "") or "").strip()
+        analysis_candidates: List[Path] = []
+        if configured_path:
+            analysis_candidates.append(Path(configured_path))
+        analysis_candidates.append(trace_dir / "margin_analysis.json")
+
+        for path in analysis_candidates:
+            if path.exists():
+                return {"analysis_path": path, "analysis": self._read_json(path)}
+
+        if trace_summary.get("replacement_margin_stats") or trace_summary.get("best_margin_stats"):
+            analysis = self._empty_trace_margin_analysis(trace_dir, trace_summary)
+            analysis["replacement_margin_stats"] = dict(trace_summary.get("replacement_margin_stats", analysis["replacement_margin_stats"]))
+            analysis["best_margin_stats"] = dict(trace_summary.get("best_margin_stats", analysis["best_margin_stats"]))
+            return {"analysis_path": None, "analysis": analysis}
+
+        pair_paths = [Path(path) for path in list(trace_summary.get("pair_files", []) or []) if Path(path).exists()]
+        if not pair_paths:
+            pair_paths = self._find_trace_pair_paths(trace_dir)
+
+        if int(trace_summary.get("candidate_selected_count", 0)) == 0:
+            return {"analysis_path": None, "analysis": self._empty_trace_margin_analysis(trace_dir, trace_summary)}
+
+        total_bytes = sum(path.stat().st_size for path in pair_paths if path.exists())
+        if pair_paths and total_bytes <= TRACE_TUNING_MAX_FULL_PAIR_BYTES:
+            pair_payloads = [self._read_json(path) for path in pair_paths if path.exists()]
+            return self._ensure_trace_margin_analysis(
+                trace_dir=trace_dir,
+                trace_summary=trace_summary,
+                pair_payloads=pair_payloads,
+                trace_summary_path=trace_summary_path,
+            )
+
+        return {"analysis_path": None, "analysis": self._empty_trace_margin_analysis(trace_dir, trace_summary)}
 
     def _ensure_trace_margin_analysis(
         self,
