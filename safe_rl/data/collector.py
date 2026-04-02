@@ -135,21 +135,43 @@ class SumoDataCollector:
 
         risk_event_schedule: List[Dict[str, Any]] = []
         raw_action_prefix: List[int] = []
-        if risky_mode:
+        warmup_steps = max(
+            int(self.config.sim.history_steps),
+            int(getattr(self.config.stage1_collection, 'probe_warmup_steps', 0) or 0),
+            int(getattr(self.config.stage1_collection, 'initial_risk_event_step', 0) or 0),
+        )
+        min_gap = max(1, int(getattr(self.config.stage1_collection, 'min_gap_between_risk_events', 1) or 1))
+        next_schedulable_event_step = int(warmup_steps)
+        if risky_mode and next_schedulable_event_step < int(self.config.sim.episode_steps):
             requested_event = str(self._rng.choice(RISK_EVENTS))
-            self.backend.inject_risk_event(requested_event)
-            risk_event_schedule.append({'before_step': 0, 'event_type': requested_event})
+            risk_event_schedule.append({'before_step': next_schedulable_event_step, 'event_type': requested_event})
+            next_schedulable_event_step += min_gap
 
         for step_idx in range(self.config.sim.episode_steps):
+            applied_event_types: List[str] = []
+            for scheduled_event in risk_event_schedule:
+                if int(scheduled_event.get('before_step', -1)) != int(step_idx):
+                    continue
+                event_type = str(scheduled_event.get('event_type', '')) or None
+                self.backend.inject_risk_event(event_type)
+                if event_type:
+                    applied_event_types.append(str(event_type))
+
             raw_action = self._rng.choice(all_action_ids())
             result = self.backend.step(raw_action)
             raw_action_prefix.append(int(raw_action))
 
             next_event_type = ''
-            if risky_mode and (step_idx + 1) < self.config.sim.episode_steps and self._rng.random() < self.config.sim.risk_event_prob:
+            next_event_step = int(step_idx) + 1
+            if (
+                risky_mode
+                and next_event_step < int(self.config.sim.episode_steps)
+                and next_event_step >= int(next_schedulable_event_step)
+                and self._rng.random() < self.config.sim.risk_event_prob
+            ):
                 next_event_type = str(self._rng.choice(RISK_EVENTS))
-                self.backend.inject_risk_event(next_event_type)
-                risk_event_schedule.append({'before_step': step_idx + 1, 'event_type': next_event_type})
+                risk_event_schedule.append({'before_step': next_event_step, 'event_type': next_event_type})
+                next_schedulable_event_step = next_event_step + min_gap
 
             labels = self.probe_runner.compute_risk_labels(result.scene, result.info)
             shield_decision = ShieldDecision(
@@ -174,6 +196,7 @@ class SumoDataCollector:
                     risk_labels=labels,
                     meta={
                         'risk_event_next_type': next_event_type,
+                        'risk_event_applied_types': list(applied_event_types),
                         'probe_triggered': False,
                         'probe_bucket': '',
                         'same_state_proof': self.probe_runner.same_state_proof_from_scene(result.scene, history_scene=[]),

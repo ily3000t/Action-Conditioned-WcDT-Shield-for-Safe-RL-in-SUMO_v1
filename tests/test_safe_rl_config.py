@@ -19,6 +19,9 @@ def test_default_config_loads():
     assert config.stage1_collection.probe_enabled is True
     assert config.stage1_collection.probe_horizon_steps == 8
     assert config.stage1_collection.probe_action_set == "all_9"
+    assert config.stage1_collection.probe_warmup_steps == 12
+    assert config.stage1_collection.initial_risk_event_step == 12
+    assert config.stage1_collection.min_gap_between_risk_events == 8
     assert config.stage1_collection.exclude_structural_from_main is True
     assert config.world_model.min_stage5_pairs_for_world_ft == 50
 

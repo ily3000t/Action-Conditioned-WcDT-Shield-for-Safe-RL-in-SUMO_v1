@@ -187,6 +187,9 @@ def test_collector_stage1_probe_generates_same_state_pairs():
     config.sim.episode_steps = 6
     config.sim.history_steps = 2
     config.sim.risk_event_prob = 0.0
+    config.stage1_collection.probe_warmup_steps = 2
+    config.stage1_collection.initial_risk_event_step = 2
+    config.stage1_collection.min_gap_between_risk_events = 2
     config.dataset.raw_log_dir = "safe_rl_output/test_artifacts/raw_probe"
     config.dataset.dataset_dir = "safe_rl_output/test_artifacts/datasets_probe"
 
@@ -199,6 +202,7 @@ def test_collector_stage1_probe_generates_same_state_pairs():
 
     assert len(episodes) == 1
     assert collector.probe_summary["episodes_probed"] == 1
+    assert collector.probe_summary["selected_by_event_window"] > 0
     assert collector.probe_summary["pairs_created"] > 0
     assert collector.probe_pairs
     assert all(sample.source == "stage1_probe_same_state" for sample in collector.probe_pairs)
@@ -206,4 +210,5 @@ def test_collector_stage1_probe_generates_same_state_pairs():
     assert collector.probe_events
     assert any(event.get("status") == "ok" for event in collector.probe_events)
     assert collector.bucket_summary()["episodes_by_bucket"]["clean_risky"] == 1
+    assert collector.bucket_summary()["episodes_too_short_for_probe"] == 0
     assert episodes[0].meta["collection_bucket"] == "clean_risky"

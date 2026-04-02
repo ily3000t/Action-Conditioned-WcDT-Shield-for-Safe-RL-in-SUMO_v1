@@ -51,6 +51,9 @@ class Stage1CollectionConfig:
     probe_action_set: str = "all_9"
     probe_trigger_ttc_threshold: float = 3.0
     probe_trigger_min_distance: float = 12.0
+    probe_warmup_steps: int = 12
+    initial_risk_event_step: int = 12
+    min_gap_between_risk_events: int = 8
     exclude_structural_from_main: bool = True
 
 

@@ -45,6 +45,13 @@ class Stage1ProbeRunner:
             'skipped_missing_probe_backend': 0,
             'skipped_short_episode': 0,
             'skipped_replay_failed': 0,
+            'skipped_before_history_window': 0,
+            'skipped_done_step': 0,
+            'skipped_safe_step': 0,
+            'selected_by_event_window': 0,
+            'selected_by_risk_signal': 0,
+            'episodes_with_event_window': 0,
+            'episodes_with_actual_risk_signal': 0,
         }
         self.bucket_summary = {}
 
@@ -75,7 +82,15 @@ class Stage1ProbeRunner:
         episode_bucket_counts = Counter()
         step_bucket_counts = Counter()
         structural_excluded = 0
+        history_steps = int(self.config.sim.history_steps)
+        main_window_steps = history_steps + int(self.config.sim.future_steps) + 1
+        episodes_too_short_for_probe = 0
+        episodes_too_short_for_main = 0
         for episode in episodes:
+            if len(episode.steps) <= history_steps:
+                episodes_too_short_for_probe += 1
+            if len(episode.steps) < main_window_steps:
+                episodes_too_short_for_main += 1
             warning_record = dict(warning_by_episode.get(episode.episode_id, {}))
             structural_counts = {
                 bucket: int(dict(warning_record.get('buckets', {})).get(bucket, 0))
@@ -103,6 +118,8 @@ class Stage1ProbeRunner:
             'steps_by_bucket': dict(sorted(step_bucket_counts.items())),
             'structural_excluded_episodes': int(structural_excluded),
             'exclude_structural_from_main': bool(getattr(self.config.stage1_collection, 'exclude_structural_from_main', True)),
+            'episodes_too_short_for_probe': int(episodes_too_short_for_probe),
+            'episodes_too_short_for_main': int(episodes_too_short_for_main),
         }
         return dict(self.bucket_summary)
 
@@ -128,8 +145,6 @@ class Stage1ProbeRunner:
             self.events.append(event)
 
     def _episode_is_clean_risky(self, episode: EpisodeLog) -> bool:
-        if bool(episode.risky_mode):
-            return True
         for step in episode.steps:
             labels = step.risk_labels
             if bool(labels.collision):
@@ -138,34 +153,88 @@ class Stage1ProbeRunner:
                 return True
             if float(labels.min_distance) <= float(self.config.stage1_collection.probe_trigger_min_distance):
                 return True
+        scheduled_event_steps = self._scheduled_event_steps(episode)
+        min_probe_length = max(
+            int(self.config.sim.history_steps) + 1,
+            int(getattr(self.config.stage1_collection, 'probe_warmup_steps', 0) or 0) + 1,
+        )
+        if scheduled_event_steps and len(episode.steps) >= min_probe_length:
+            return True
         return False
 
     def _select_probe_steps(self, episode: EpisodeLog) -> List[int]:
-        candidates: List[Tuple[Tuple[float, float, float, int], int]] = []
+        candidates: List[Tuple[Tuple[float, float, float, float, int], int, bool, bool]] = []
+        history_steps = int(self.config.sim.history_steps)
+        scheduled_event_steps = self._scheduled_event_steps(episode)
+        event_window_steps = self._event_window_steps(episode, scheduled_event_steps)
+        saw_risk_signal = False
+        if event_window_steps:
+            self.summary['episodes_with_event_window'] += 1
         for step in episode.steps:
-            if int(step.step_index) < int(self.config.sim.history_steps):
+            step_index = int(step.step_index)
+            if step_index < history_steps:
+                self.summary['skipped_before_history_window'] += 1
                 continue
             if bool(step.done):
+                self.summary['skipped_done_step'] += 1
                 continue
             labels = step.risk_labels
-            should_probe = (
+            selected_by_risk = (
                 bool(labels.collision)
                 or float(labels.min_ttc) <= float(self.config.stage1_collection.probe_trigger_ttc_threshold)
                 or float(labels.min_distance) <= float(self.config.stage1_collection.probe_trigger_min_distance)
-                or bool(episode.risky_mode)
             )
-            if not should_probe:
+            selected_by_event = step_index in event_window_steps
+            if selected_by_risk:
+                saw_risk_signal = True
+            if not (selected_by_risk or selected_by_event):
+                self.summary['skipped_safe_step'] += 1
                 continue
             priority = (
+                0.0 if selected_by_risk else 1.0,
+                float(self._nearest_event_distance(step_index, scheduled_event_steps)) if selected_by_event else 1e6,
                 -float(labels.overall_risk),
                 float(labels.min_ttc),
                 float(labels.min_distance),
-                int(step.step_index),
+                step_index,
             )
-            candidates.append((priority, int(step.step_index)))
+            candidates.append((priority, step_index, selected_by_event, selected_by_risk))
+        if saw_risk_signal:
+            self.summary['episodes_with_actual_risk_signal'] += 1
         candidates.sort(key=lambda item: item[0])
         max_steps = max(0, int(getattr(self.config.stage1_collection, 'probe_max_steps_per_episode', 0) or 0))
-        return [step_index for _, step_index in candidates[:max_steps]]
+        selected_items = candidates[:max_steps]
+        self.summary['selected_by_event_window'] += sum(1 for _, _, selected_by_event, _ in selected_items if selected_by_event)
+        self.summary['selected_by_risk_signal'] += sum(1 for _, _, _, selected_by_risk in selected_items if selected_by_risk)
+        return [step_index for _, step_index, _, _ in selected_items]
+
+    def _scheduled_event_steps(self, episode: EpisodeLog) -> List[int]:
+        steps = []
+        for item in list(episode.meta.get('risk_event_schedule', [])):
+            before_step = int(item.get('before_step', -1))
+            if before_step >= 0:
+                steps.append(before_step)
+        return sorted(set(steps))
+
+    def _event_window_steps(self, episode: EpisodeLog, scheduled_event_steps: Sequence[int]) -> set[int]:
+        if not scheduled_event_steps:
+            return set()
+        horizon = max(1, int(getattr(self.config.stage1_collection, 'probe_horizon_steps', 0) or 0))
+        max_step_index = max(0, len(episode.steps) - 1)
+        history_steps = int(self.config.sim.history_steps)
+        selected: set[int] = set()
+        for event_step in scheduled_event_steps:
+            start = max(history_steps, int(event_step))
+            end = min(max_step_index, int(event_step) + horizon)
+            for step_index in range(start, end + 1):
+                selected.add(step_index)
+        return selected
+
+    @staticmethod
+    def _nearest_event_distance(step_index: int, scheduled_event_steps: Sequence[int]) -> int:
+        if not scheduled_event_steps:
+            return 1_000_000
+        return min(abs(int(step_index) - int(event_step)) for event_step in scheduled_event_steps)
 
     def _probe_step_candidates(self, episode: EpisodeLog, step_index: int) -> Dict[str, Any]:
         history_steps = int(self.config.sim.history_steps)
