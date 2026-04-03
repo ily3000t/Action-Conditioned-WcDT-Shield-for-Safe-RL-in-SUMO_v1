@@ -198,3 +198,96 @@ def test_traci_backend_start_real_session_uses_labeled_connection_object():
     backend._started = True
     backend.close()
     assert backend._traci.connection.close_calls
+
+class _DivergentConnection:
+    class _VehicleAPI:
+        def getIDList(self):
+            return ["ego"]
+
+    class _SimulationAPI:
+        def __init__(self, expected_number: int, sim_time: float):
+            self._expected_number = expected_number
+            self._sim_time = sim_time
+
+        def getMinExpectedNumber(self):
+            return self._expected_number
+
+        def getTime(self):
+            return self._sim_time
+
+    def __init__(self, expected_number: int, sim_time: float):
+        self.vehicle = self._VehicleAPI()
+        self.simulation = self._SimulationAPI(expected_number=expected_number, sim_time=sim_time)
+        self.simulation_step_calls = 0
+
+    def simulationStep(self):
+        self.simulation_step_calls += 1
+
+
+class _DivergentTraci:
+    class exceptions:
+        FatalTraCIError = _FatalTraCIError
+
+    class _GlobalSimulationAPI:
+        def getMinExpectedNumber(self):
+            return 0
+
+        def getTime(self):
+            return 999.0
+
+    def __init__(self):
+        self.connection = _DivergentConnection(expected_number=5, sim_time=12.5)
+        self.simulation = self._GlobalSimulationAPI()
+
+    def getConnection(self, _label):
+        return self.connection
+
+
+class _SteppingController(_DummyController):
+    def build_scene(self):
+        return SceneState(
+            timestamp=1.5,
+            ego_id="ego",
+            vehicles=[VehicleState("ego", 10.0, 4.0, 20.0, 0.0, 0.0, 0.0, 0.0, 1)],
+        )
+
+    def summarize_step(self, _scene, action_meta, _risk_meta):
+        return {
+            "collision": False,
+            "ego_speed": 20.0,
+            "lane_violation": bool(action_meta.get("lane_violation", False)),
+        }
+
+
+def test_traci_backend_step_uses_connection_done_state_instead_of_global_traci():
+    config = SimConfig(force_mock=False, runtime_log_dir="safe_rl_output/test_artifacts")
+    backend = TraciBackend(config)
+    backend._use_mock = False
+    backend._started = True
+    backend._session_active = True
+    backend._connection_healthy = True
+    backend._traci = _DivergentTraci()
+    backend._traci_conn = backend._traci.connection
+    backend._controller = _SteppingController()
+    backend._runtime_log_path = Path("safe_rl_output/test_artifacts/traci_runtime.log")
+
+    result = backend.step(4)
+
+    assert backend._traci.connection.simulation_step_calls == 1
+    assert result.done is False
+    assert result.info["sumo_log_path"].endswith("traci_runtime.log")
+
+
+def test_traci_backend_runtime_time_uses_connection_time_instead_of_global_traci():
+    config = SimConfig(force_mock=False, runtime_log_dir="safe_rl_output/test_artifacts")
+    backend = TraciBackend(config)
+    backend._use_mock = False
+    backend._started = True
+    backend._session_active = True
+    backend._connection_healthy = True
+    backend._traci = _DivergentTraci()
+    backend._traci_conn = backend._traci.connection
+
+    diagnostics = backend.get_runtime_diagnostics()
+
+    assert diagnostics["sim_time"] == pytest.approx(12.5)

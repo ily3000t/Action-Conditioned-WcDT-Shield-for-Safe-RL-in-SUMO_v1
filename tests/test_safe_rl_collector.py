@@ -212,3 +212,52 @@ def test_collector_stage1_probe_generates_same_state_pairs():
     assert collector.bucket_summary()["episodes_by_bucket"]["clean_risky"] == 1
     assert collector.bucket_summary()["episodes_too_short_for_probe"] == 0
     assert episodes[0].meta["collection_bucket"] == "clean_risky"
+
+
+def test_stage1_probe_bucket_keeps_short_risky_episode_as_clean_risky():
+    from safe_rl.data.stage1_probe import Stage1ProbeRunner
+    from safe_rl.data.types import EpisodeLog, RiskLabels, ShieldDecision, StepLog
+
+    config = SafeRLConfig()
+    config.sim.history_steps = 10
+    config.stage1_collection.probe_warmup_steps = 12
+
+    step = StepLog(
+        step_index=0,
+        scene=_scene(),
+        raw_action=4,
+        final_action=4,
+        shield_decision=ShieldDecision(
+            raw_action=4,
+            final_action=4,
+            intervened=False,
+            reason="collector_no_shield",
+            risk_raw=0.0,
+            risk_final=0.0,
+            candidate_risks={4: 0.0},
+        ),
+        task_reward=0.0,
+        final_reward=0.0,
+        done=True,
+        risk_labels=RiskLabels(
+            collision=False,
+            ttc_risk=False,
+            lane_violation=False,
+            overall_risk=0.0,
+            min_ttc=40.0,
+            min_distance=50.0,
+        ),
+        meta={},
+    )
+    episode = EpisodeLog(
+        episode_id="ep_short_risky",
+        risky_mode=True,
+        steps=[step],
+        meta={"risk_event_schedule": [{"before_step": 12, "event_type": "close_follow"}]},
+    )
+
+    runner = Stage1ProbeRunner(config=config, probe_backend=None)
+    summary = runner.assign_collection_buckets([episode], warning_by_episode={})
+
+    assert episode.meta["collection_bucket"] == "clean_risky"
+    assert summary["episodes_by_bucket"]["clean_risky"] == 1

@@ -154,6 +154,8 @@ class Stage1ProbeRunner:
             if float(labels.min_distance) <= float(self.config.stage1_collection.probe_trigger_min_distance):
                 return True
         scheduled_event_steps = self._scheduled_event_steps(episode)
+        if scheduled_event_steps and bool(episode.risky_mode):
+            return True
         min_probe_length = max(
             int(self.config.sim.history_steps) + 1,
             int(getattr(self.config.stage1_collection, 'probe_warmup_steps', 0) or 0) + 1,

@@ -250,9 +250,10 @@ class TraciBackend(ISumoBackend):
             self._last_scene = scene
             return BackendStepResult(scene=scene, task_reward=task_reward, done=done, info=info)
 
+        conn = self._ensure_traci_connection()
         action_meta = self._controller.apply_action(action_id)
         try:
-            self._traci.simulationStep()
+            conn.simulationStep()
         except Exception as exc:
             if self._is_fatal_traci_error(exc):
                 return self._handle_fatal_step(exc, action_meta)
@@ -260,7 +261,7 @@ class TraciBackend(ISumoBackend):
 
         scene = self.get_state()
         self._last_scene = scene
-        done = self._traci.simulation.getMinExpectedNumber() <= 0
+        done = conn.simulation.getMinExpectedNumber() <= 0
         info = self._controller.summarize_step(scene, action_meta, self._last_risk_meta)
         info["sumo_log_path"] = self.runtime_log_path
         task_reward = float(info.get("ego_speed", 0.0) * self.config.step_length * 0.1)
@@ -471,8 +472,8 @@ class TraciBackend(ISumoBackend):
         if self._use_mock:
             return float(self._mock.step_index * self.config.step_length)
         try:
-            if self._traci is not None and self._session_active:
-                return float(self._traci.simulation.getTime())
+            if self._session_active:
+                return float(self._ensure_traci_connection().simulation.getTime())
         except Exception:
             pass
         if self._last_scene is not None:
