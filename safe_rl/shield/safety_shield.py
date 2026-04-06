@@ -75,7 +75,7 @@ class SafetyShield:
         raw_eval = evaluations[policy_action]
         raw_threshold = min(float(self.config.risk_threshold), float(self.config.raw_passthrough_risk_threshold))
         shield_blocked = bool(
-            (raw_eval.fine_risk is not None and raw_eval.fine_risk > self.config.risk_threshold)
+            (raw_eval.fine_risk is not None and raw_eval.fine_risk > raw_threshold)
             or (raw_eval.uncertainty is not None and raw_eval.uncertainty > self.config.uncertainty_threshold)
         )
         merge_phase_active = self._is_merge_coordination_phase(history_scene)

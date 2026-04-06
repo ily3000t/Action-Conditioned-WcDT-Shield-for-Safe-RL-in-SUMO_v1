@@ -1,0 +1,3 @@
+shield:
+  raw_passthrough_risk_threshold: 0.193
+  replacement_min_risk_margin: 0.104

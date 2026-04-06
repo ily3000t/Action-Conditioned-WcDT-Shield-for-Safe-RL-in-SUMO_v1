@@ -101,6 +101,25 @@ def test_shield_marks_raw_passthrough_for_low_risk_action():
     assert decision.meta["constraint_reason"] == "raw_passthrough"
 
 
+def test_shield_blocks_when_raw_exceeds_passthrough_threshold():
+    config = ShieldConfig(
+        risk_threshold=0.60,
+        uncertainty_threshold=0.30,
+        candidate_count=7,
+        coarse_top_k=4,
+        replacement_min_risk_margin=0.05,
+        raw_passthrough_risk_threshold=0.20,
+    )
+    predictor = DummyWorldPredictor({4: 0.25, 1: 0.10})
+    shield = SafetyShield(config=config, light_predictor=DummyLightPredictor(), world_predictor=predictor)
+
+    decision = shield.select_action(_history_scene(), 4)
+    assert decision.intervened is True
+    assert decision.final_action != 4
+    assert decision.risk_final < decision.risk_raw
+    assert decision.meta["replacement_happened"] is True
+
+
 def test_shield_merge_guard_blocks_cross_lateral_replacement():
     config = ShieldConfig(
         risk_threshold=0.40,
