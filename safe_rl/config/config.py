@@ -91,6 +91,7 @@ class WorldModelConfig:
     stage5_pair_max_seen_per_epoch: int = 8
     pair_ft_patience: int = 2
     min_stage5_pairs_for_world_ft: int = 50
+    pair_finetune_gate_mode: str = "fallback_all_pairs"
     multimodal: int = 6
     future_steps: int = 20
     hidden_dim: int = 256
@@ -103,6 +104,7 @@ class WorldModelConfig:
 @dataclass
 class ShieldConfig:
     candidate_count: int = 7
+    profile: str = "legacy"
     coarse_top_k: int = 4
     tail_quantile: float = 0.9
     risk_threshold: float = 0.45
@@ -111,6 +113,10 @@ class ShieldConfig:
     fallback_action: str = "DECEL_KEEP"
     replacement_min_risk_margin: float = 0.05
     raw_passthrough_risk_threshold: float = 0.20
+    legacy_replacement_min_risk_margin: float = 0.05
+    legacy_raw_passthrough_risk_threshold: float = 0.20
+    balanced_replacement_min_risk_margin: float = 0.104
+    balanced_raw_passthrough_risk_threshold: float = 0.193
     protect_merge_lateral_decisions: bool = True
     merge_override_margin: float = 0.12
 
@@ -240,13 +246,43 @@ def _load_yaml_dict(path: Path) -> dict:
         return yaml.safe_load(f) or {}
 
 
+def _resolve_shield_profile(config: SafeRLConfig, shield_data: Optional[dict] = None):
+    payload = dict(shield_data or {})
+    profile = str(getattr(config.shield, "profile", "legacy") or "legacy").strip().lower()
+    if profile not in ("legacy", "balanced"):
+        raise ValueError(f"Unknown shield.profile: {profile}. Expected one of: legacy, balanced")
+
+    explicit_threshold_keys = {
+        "replacement_min_risk_margin": "replacement_min_risk_margin",
+        "raw_passthrough_risk_threshold": "raw_passthrough_risk_threshold",
+    }
+    explicit_replacement = explicit_threshold_keys["replacement_min_risk_margin"] in payload
+    explicit_passthrough = explicit_threshold_keys["raw_passthrough_risk_threshold"] in payload
+
+    if profile == "balanced":
+        profile_replacement = float(config.shield.balanced_replacement_min_risk_margin)
+        profile_passthrough = float(config.shield.balanced_raw_passthrough_risk_threshold)
+    else:
+        profile_replacement = float(config.shield.legacy_replacement_min_risk_margin)
+        profile_passthrough = float(config.shield.legacy_raw_passthrough_risk_threshold)
+
+    if not explicit_replacement:
+        config.shield.replacement_min_risk_margin = profile_replacement
+    if not explicit_passthrough:
+        config.shield.raw_passthrough_risk_threshold = profile_passthrough
+
+
 def load_safe_rl_config(path: Optional[str] = None) -> SafeRLConfig:
     config = SafeRLConfig()
     default_path = (Path(__file__).resolve().parent / "default_safe_rl.yaml").resolve()
     target_path = default_path if path is None else Path(path).resolve()
+    default_data = _load_yaml_dict(default_path)
 
     if target_path != default_path:
-        _apply_config_data(config, _load_yaml_dict(default_path))
+        _apply_config_data(config, default_data)
+        _resolve_shield_profile(config, shield_data=dict(default_data.get("shield", {}) or {}))
 
-    _apply_config_data(config, _load_yaml_dict(target_path))
+    target_data = default_data if target_path == default_path else _load_yaml_dict(target_path)
+    _apply_config_data(config, target_data)
+    _resolve_shield_profile(config, shield_data=dict(target_data.get("shield", {}) or {}))
     return config

@@ -17,6 +17,7 @@ from safe_rl.data.dataset_builder import ActionConditionedDatasetBuilder
 from safe_rl.data.pair_dataset import load_risk_pairs, save_risk_pairs, summarize_pair_sources
 from safe_rl.data.types import InterventionRecord, RiskPairSample, dataclass_to_dict, scene_state_list_from_dicts
 from safe_rl.eval import SafeRLEvaluator
+from safe_rl.models.features import encode_history
 from safe_rl.pipeline.session_event_logger import IncrementalSessionEventLogger
 from safe_rl.pipeline.telemetry import BufferTelemetryTracker, Stage3TelemetryTracker
 from safe_rl.pipeline.tensorboard_logger import TensorboardManager
@@ -81,6 +82,8 @@ class SafeRLPipeline:
         self.stage3_session_events_path: Optional[Path] = None
         self.stage4_buffer_report_path: Optional[Path] = None
         self.stage5_paired_episode_results_path: Optional[Path] = None
+        self.distill_supervision_path: Optional[Path] = None
+        self.distill_training_report_path: Optional[Path] = None
         self.risk_v2_eval_summary_path: Optional[Path] = None
         self.shield_sweep_summary_path: Optional[Path] = None
         self.shield_trace_dir: Optional[Path] = None
@@ -190,6 +193,8 @@ class SafeRLPipeline:
         self.stage3_session_events_path = self.reports_dir / "stage3_session_events.json"
         self.stage4_buffer_report_path = self.reports_dir / "stage4_buffer_report.json"
         self.stage5_paired_episode_results_path = self.reports_dir / "stage5_paired_episode_results.json"
+        self.distill_supervision_path = self.datasets_dir / "distill_supervision.json"
+        self.distill_training_report_path = self.reports_dir / "distill_training_report.json"
         self.risk_v2_eval_summary_path = self.reports_dir / "risk_v2_eval_summary.json"
         self.shield_sweep_summary_path = self.reports_dir / "shield_sweep_summary.json"
         self.shield_trace_dir = self.reports_dir / str(self.config.shield_trace.trace_dir_name)
@@ -235,6 +240,8 @@ class SafeRLPipeline:
                 "stage3_session_events_report": str(self.stage3_session_events_path),
                 "stage4_buffer_report": str(self.stage4_buffer_report_path),
                 "stage5_paired_episode_results": str(self.stage5_paired_episode_results_path),
+                "distill_supervision_dataset": str(self.distill_supervision_path),
+                "distill_training_report": str(self.distill_training_report_path),
                 "risk_v2_eval_summary_report": str(self.risk_v2_eval_summary_path),
                 "shield_sweep_summary_report": str(self.shield_sweep_summary_path),
                 "shield_trace_summary_report": str(self.shield_trace_summary_path),
@@ -340,13 +347,54 @@ class SafeRLPipeline:
             return False
         if name.startswith("shield_trace_holdout"):
             return False
-        return self._find_trace_summary_path(trace_dir) is not None
+        return self._find_trace_summary_path(trace_dir) is not None and bool(self._find_trace_pair_paths(trace_dir))
 
     def _include_trace_dir_for_trace_reports(self, trace_dir: Path) -> bool:
         name = str(trace_dir.name or "").strip().lower()
         if "_pre_v2" in name:
             return False
         return self._find_trace_summary_path(trace_dir) is not None
+
+    def _discover_trace_dirs(self, for_stage5_pair_mining: bool) -> Dict[str, Any]:
+        summary = {
+            "candidate_dirs_seen": 0,
+            "selected_dirs": 0,
+            "selected_dir_names": [],
+            "skipped_non_directory": 0,
+            "skipped_pre_v2": 0,
+            "skipped_holdout": 0,
+            "skipped_missing_trace_summary": 0,
+            "skipped_missing_pair_files": 0,
+            "trace_dirs": [],
+        }
+        if self.reports_dir is None or not self.reports_dir.exists():
+            return summary
+
+        trace_dirs: List[Path] = []
+        for path in sorted(self.reports_dir.iterdir()):
+            if not path.is_dir():
+                summary["skipped_non_directory"] += 1
+                continue
+            summary["candidate_dirs_seen"] += 1
+            name = str(path.name or "").strip().lower()
+            if "_pre_v2" in name:
+                summary["skipped_pre_v2"] += 1
+                continue
+            if for_stage5_pair_mining and name.startswith("shield_trace_holdout"):
+                summary["skipped_holdout"] += 1
+                continue
+            if self._find_trace_summary_path(path) is None:
+                summary["skipped_missing_trace_summary"] += 1
+                continue
+            if for_stage5_pair_mining and not self._find_trace_pair_paths(path):
+                summary["skipped_missing_pair_files"] += 1
+                continue
+            trace_dirs.append(path)
+            summary["selected_dir_names"].append(path.name)
+
+        summary["trace_dirs"] = trace_dirs
+        summary["selected_dirs"] = len(trace_dirs)
+        return summary
 
     def _build_pair_datasets_for_stage2(self) -> Dict[str, Any]:
         pair_source_weights = self._effective_pair_source_weights()
@@ -383,6 +431,7 @@ class SafeRLPipeline:
     def _build_stage5_pair_samples(self, stage5_weight: Optional[float] = None):
         summary = {
             "trace_dirs_seen": 0,
+            "trace_dir_names": [],
             "pair_files_seen": 0,
             "pairs_created": 0,
             "skipped_missing_same_state_proof": 0,
@@ -391,17 +440,22 @@ class SafeRLPipeline:
             "skipped_missing_actions": 0,
             "skipped_no_replacement": 0,
             "skipped_no_preference": 0,
+            "discovery": {},
         }
         pair_samples: List[RiskPairSample] = []
         stage5_weight = float(self.config.light_risk.stage5_pair_weight if stage5_weight is None else stage5_weight)
         if self.reports_dir is None:
             return pair_samples, summary
 
-        trace_dirs = sorted(
-            path for path in self.reports_dir.glob("shield_trace*")
-            if path.is_dir() and self._include_trace_dir_for_stage5_pair_mining(path)
-        )
+        discovery = self._discover_trace_dirs(for_stage5_pair_mining=True)
+        trace_dirs = list(discovery.get("trace_dirs", []))
+        summary["discovery"] = {
+            key: value
+            for key, value in discovery.items()
+            if key != "trace_dirs"
+        }
         summary["trace_dirs_seen"] = len(trace_dirs)
+        summary["trace_dir_names"] = [path.name for path in trace_dirs]
         for trace_dir in trace_dirs:
             for pair_path in self._find_trace_pair_paths(trace_dir):
                 summary["pair_files_seen"] += 1
@@ -912,6 +966,16 @@ class SafeRLPipeline:
         stage5_pairs_created = int(dict(pair_payload.get("generation_summary", {}).get("stage5", {})).get("pairs_created", 0))
         stage1_probe_pairs_created = int(dict(pair_payload.get("generation_summary", {}).get("stage1_probe", {})).get("pairs_created", 0))
         stage4_pairs_created = int(dict(pair_payload.get("generation_summary", {}).get("stage4", {})).get("pairs_created", 0))
+        stage2_pair_source_health = self._build_stage2_pair_source_health(
+            stage5_pairs_created=stage5_pairs_created,
+            stage1_probe_pairs_created=stage1_probe_pairs_created,
+            stage4_pairs_created=stage4_pairs_created,
+            world_pair_finetune_mode=str(getattr(self.config.world_model, "pair_finetune_gate_mode", "strict")),
+            stage5_requirement_met=stage5_pairs_created >= int(getattr(self.config.world_model, "min_stage5_pairs_for_world_ft", 0) or 0),
+            trace_artifact_available=stage5_pairs_created > 0,
+        )
+        self._print_stage2_pair_source_preflight(stage2_pair_source_health)
+        self._update_warning_summary_with_stage2_pair_source_health(stage2_pair_source_health)
         print(
             f"[Pipeline] stage2: pair datasets stage5_pairs_created={stage5_pairs_created}, stage1_probe_pairs_created={stage1_probe_pairs_created}, stage4_pairs_created={stage4_pairs_created}",
             flush=True,
@@ -961,6 +1025,12 @@ class SafeRLPipeline:
             "world_eval_metrics": world_eval_metrics,
             "pair_generation": dict(pair_payload.get("generation_summary", {})),
             "world_pair_finetune_skipped_reason": str(training_meta.get("world_pair_finetune_skipped_reason", "")),
+            "world_pair_finetune_mode": str(training_meta.get("world_pair_finetune_mode", "")),
+            "stage5_requirement_met": bool(training_meta.get("stage5_requirement_met", False)),
+            "world_pair_gate_degraded": bool(training_meta.get("world_pair_gate_degraded", False)),
+            "world_pair_stage5_pairs_required": int(training_meta.get("world_pair_stage5_pairs_required", 0)),
+            "world_pair_stage5_pairs_available": int(training_meta.get("world_pair_stage5_pairs_available", 0)),
+            "world_pair_total_pairs_available": int(training_meta.get("world_pair_total_pairs_available", 0)),
             "light_training": dict(training_meta.get("light_training", {})),
             "world_training": dict(training_meta.get("world_training", {})),
             "base_train_metrics": {
@@ -989,7 +1059,15 @@ class SafeRLPipeline:
             "world_pair_ft_best_epoch": int(world_pair_ft_report.get("world_pair_ft_best_epoch", -1)),
             "world_pair_ft_best_metrics": dict(world_pair_ft_report.get("world_pair_ft_best_metrics", {})),
             "world_pair_ft_restored_best": bool(world_pair_ft_report.get("world_pair_ft_restored_best", False)),
+            "stage2_pair_source_health": stage2_pair_source_health,
         }
+        stage2_report["stage2_pair_source_health"]["stage5_requirement_met"] = bool(stage2_report["stage5_requirement_met"])
+        stage2_report["stage2_pair_source_health"]["world_pair_finetune_mode"] = str(stage2_report["world_pair_finetune_mode"])
+        stage2_report["stage2_pair_source_health"]["world_pair_gate_degraded"] = bool(stage2_report["world_pair_gate_degraded"])
+        stage2_report["stage2_pair_source_health"]["trace_artifact_available"] = bool(stage5_pairs_created > 0)
+        if bool(stage2_report["stage5_requirement_met"]):
+            stage2_report["stage2_pair_source_health"]["status"] = "healthy"
+        self._update_warning_summary_with_stage2_pair_source_health(stage2_report["stage2_pair_source_health"])
         self._write_json(self.stage2_training_report_path, stage2_report)
         self._write_risk_v2_eval_summary_from_stage2(stage2_report)
 
@@ -1005,6 +1083,87 @@ class SafeRLPipeline:
             "pair_finetune_applied": pair_finetune_applied,
             "training_report": str(self.stage2_training_report_path),
         }
+
+    def _build_stage2_pair_source_health(
+        self,
+        stage5_pairs_created: int,
+        stage1_probe_pairs_created: int,
+        stage4_pairs_created: int,
+        world_pair_finetune_mode: str,
+        stage5_requirement_met: bool,
+        trace_artifact_available: bool,
+    ) -> Dict[str, Any]:
+        recommendation_commands: List[str] = []
+        if self.run_id:
+            recommendation_commands.append(
+                f"python safe_rl_main.py --config safe_rl/config/stage5_pair_bootstrap.yaml --stage stage5 --run-id {self.run_id}"
+            )
+            recommendation_commands.append(
+                f"python safe_rl_main.py --config safe_rl/config/stage2_v2_world_pair_focus.yaml --stage stage2 --run-id {self.run_id}"
+            )
+        else:
+            recommendation_commands.append(
+                "python safe_rl_main.py --config safe_rl/config/stage5_pair_bootstrap.yaml --stage stage5 --run-id <run_id>"
+            )
+            recommendation_commands.append(
+                "python safe_rl_main.py --config safe_rl/config/stage2_v2_world_pair_focus.yaml --stage stage2 --run-id <run_id>"
+            )
+
+        if stage5_requirement_met:
+            status = "healthy"
+        elif stage5_pairs_created > 0 or stage1_probe_pairs_created > 0 or stage4_pairs_created > 0:
+            status = "degraded"
+        else:
+            status = "critical"
+
+        health = {
+            "run_id": str(self.run_id or ""),
+            "created_at": dt.datetime.now().isoformat(timespec="seconds"),
+            "status": status,
+            "world_pair_finetune_mode": str(world_pair_finetune_mode),
+            "world_pair_gate_degraded": False,
+            "stage5_pairs_created": int(stage5_pairs_created),
+            "stage1_probe_pairs_created": int(stage1_probe_pairs_created),
+            "stage4_pairs_created": int(stage4_pairs_created),
+            "stage5_pairs_required_for_world_ft": int(getattr(self.config.world_model, "min_stage5_pairs_for_world_ft", 0) or 0),
+            "stage5_requirement_met": bool(stage5_requirement_met),
+            "trace_artifact_available": bool(trace_artifact_available),
+            "recommendation_commands": recommendation_commands,
+        }
+        if status != "healthy":
+            health["message"] = (
+                "Stage2 did not observe enough stage5 trace pairs. "
+                "World pair finetune may run in degraded mode or be skipped depending on pair_finetune_gate_mode."
+            )
+        else:
+            health["message"] = "Stage2 pair sources look healthy."
+        return health
+
+    def _print_stage2_pair_source_preflight(self, health: Dict[str, Any]):
+        if str(health.get("status", "healthy")) == "healthy":
+            return
+        print(
+            "[Pipeline][Stage2][Preflight] stage5 trace pairs are insufficient for strict world pair-ft gating.",
+            flush=True,
+        )
+        print(
+            f"[Pipeline][Stage2][Preflight] stage5_pairs={int(health.get('stage5_pairs_created', 0))}, "
+            f"stage1_probe_pairs={int(health.get('stage1_probe_pairs_created', 0))}, "
+            f"stage4_pairs={int(health.get('stage4_pairs_created', 0))}, "
+            f"gate_mode={str(health.get('world_pair_finetune_mode', ''))}",
+            flush=True,
+        )
+        for command in list(health.get("recommendation_commands", []) or []):
+            print(f"[Pipeline][Stage2][Preflight] suggestion: {command}", flush=True)
+
+    def _update_warning_summary_with_stage2_pair_source_health(self, health: Dict[str, Any]):
+        if self.warning_summary_report_path is None:
+            return
+        warning_summary: Dict[str, Any] = {}
+        if self.warning_summary_report_path.exists():
+            warning_summary = self._read_json(self.warning_summary_report_path)
+        warning_summary["stage2_pair_source_health"] = dict(health)
+        self._write_json(self.warning_summary_report_path, warning_summary)
 
     def _run_stage3(self, tb_manager: TensorboardManager) -> Dict:
         print("[Pipeline] stage3: train online policy with shield", flush=True)
@@ -1048,14 +1207,26 @@ class SafeRLPipeline:
             policy,
             shield,
             save_path=self.buffer_path,
+            distill_supervision_path=self.distill_supervision_path,
             tb_writer=tb_manager.get_writer("buffer"),
         )
         stats = intervention_buffer.stats()
         buffer_metadata = self._build_stage4_buffer_metadata(stage_config, policy_meta)
+        distill_supervision_summary = {}
+        if self.distill_supervision_path is not None and self.distill_supervision_path.exists():
+            distill_payload = self._read_json(self.distill_supervision_path)
+            distill_supervision_summary = {
+                "sample_count": int(distill_payload.get("sample_count", 0)),
+                "intervened_sample_count": int(distill_payload.get("intervened_sample_count", 0)),
+                "non_intervened_sample_count": int(distill_payload.get("non_intervened_sample_count", 0)),
+                "skipped_invalid_history_feature_count": int(distill_payload.get("skipped_invalid_history_feature_count", 0)),
+            }
         stage4_report = {
             **buffer_metadata,
             "buffer_path": str(self.buffer_path),
             "buffer_stats": stats,
+            "distill_supervision_path": str(self.distill_supervision_path),
+            "distill_supervision_summary": distill_supervision_summary,
         }
         self._write_json(self.stage4_buffer_report_path, stage4_report)
 
@@ -1085,22 +1256,46 @@ class SafeRLPipeline:
 
         buffer = InterventionBuffer(capacity=max(10000, self.config.distill.trigger_buffer_size * 4))
         buffer.load(str(self.buffer_path))
+        distill_supervision_payload: Dict[str, Any] = {}
+        distill_supervision_samples: List[Dict[str, Any]] = []
+        if self.distill_supervision_path is not None and self.distill_supervision_path.exists():
+            distill_supervision_payload = self._read_json(self.distill_supervision_path)
+            distill_supervision_samples = [dict(item) for item in list(distill_supervision_payload.get("samples", []) or [])]
 
         from safe_rl.rl import PolicyDistiller
 
         distilled_policy = None
+        distill_training_report: Dict[str, Any] = {}
         distill_writer = tb_manager.get_writer("distill")
         if distill_writer is not None:
             distill_writer.add_scalar("status/buffer_size", float(len(buffer)), 0)
+            distill_writer.add_scalar("status/supervision_sample_count", float(len(distill_supervision_samples)), 0)
 
         if PolicyDistiller is not None:
             distiller = PolicyDistiller(config=self.config.distill)
-            can_distill = distiller.should_distill(buffer)
+            can_distill = distiller.should_distill(buffer, supervision_samples=distill_supervision_samples)
             if distill_writer is not None:
                 distill_writer.add_scalar("status/triggered", float(can_distill), 0)
                 distill_writer.add_scalar("status/skipped", float(not can_distill), 0)
             if can_distill:
-                distilled_policy = distiller.distill(buffer, tb_writer=distill_writer)
+                distilled_policy = distiller.distill(
+                    buffer,
+                    supervision_samples=distill_supervision_samples,
+                    tb_writer=distill_writer,
+                )
+            else:
+                distill_training_report = {
+                    "skipped": True,
+                    "skip_reason": "below_trigger_buffer_size",
+                    "trigger_buffer_size": int(self.config.distill.trigger_buffer_size),
+                    "buffer_size": int(len(buffer)),
+                    "supervision_sample_count": int(len(distill_supervision_samples)),
+                    "source": "stage4_supervision_dataset" if distill_supervision_samples else "intervention_buffer",
+                }
+            if not distill_training_report:
+                distill_training_report = dict(getattr(distiller, "last_training_report", {}))
+            if self.distill_training_report_path is not None:
+                self._write_json(self.distill_training_report_path, distill_training_report)
 
         evaluation = self.evaluate(
             stage_config=stage_config,
@@ -1115,6 +1310,17 @@ class SafeRLPipeline:
         buffer_metadata = self._load_stage4_buffer_report() or self._build_stage4_buffer_metadata(stage_config, policy_meta)
         evaluation["intervention_buffer"] = buffer_stats
         evaluation.update(buffer_metadata)
+        if distill_supervision_payload:
+            evaluation["distill_supervision"] = {
+                "path": str(self.distill_supervision_path),
+                "sample_count": int(distill_supervision_payload.get("sample_count", 0)),
+                "intervened_sample_count": int(distill_supervision_payload.get("intervened_sample_count", 0)),
+                "non_intervened_sample_count": int(distill_supervision_payload.get("non_intervened_sample_count", 0)),
+                "skipped_invalid_history_feature_count": int(distill_supervision_payload.get("skipped_invalid_history_feature_count", 0)),
+            }
+        if distill_training_report:
+            evaluation["distill_training"] = distill_training_report
+            evaluation["distill_training_report_path"] = str(self.distill_training_report_path)
         evaluation["performance_passed"] = bool(evaluation.get("acceptance_passed", False))
         evaluation["acceptance_passed"] = bool(evaluation["performance_passed"])
         evaluation["attribution_passed"] = self._compute_attribution_passed(evaluation.get("system_shielded", {}))
@@ -1167,7 +1373,22 @@ class SafeRLPipeline:
         )
         world_predictor = world_trainer.fit(train_samples, val_samples, tb_writer=tb_world_base_writer)
         world_pair_finetune_skipped_reason = ""
-        if len(stage5_pair_samples) < int(getattr(self.config.world_model, "min_stage5_pairs_for_world_ft", 0) or 0):
+        world_pair_finetune_mode = str(getattr(self.config.world_model, "pair_finetune_gate_mode", "strict") or "strict").strip().lower()
+        if world_pair_finetune_mode not in ("strict", "fallback_all_pairs"):
+            world_pair_finetune_mode = "strict"
+        min_stage5_pairs = int(getattr(self.config.world_model, "min_stage5_pairs_for_world_ft", 0) or 0)
+        stage5_requirement_met = len(stage5_pair_samples) >= min_stage5_pairs
+        world_pair_gate_degraded = bool(
+            world_pair_finetune_mode == "fallback_all_pairs"
+            and not stage5_requirement_met
+            and len(all_pair_samples) > 0
+        )
+        world_pair_trainable_under_gate = bool(
+            len(all_pair_samples) > 0
+            and (stage5_requirement_met or world_pair_finetune_mode == "fallback_all_pairs")
+        )
+
+        if not world_pair_trainable_under_gate:
             eval_replay_samples = world_trainer._select_pair_ft_eval_samples(train_samples)
             before_pair_metrics = world_trainer.evaluate_pairs(all_pair_samples)
             before_stage5_metrics = world_trainer.evaluate_pairs(stage5_pair_samples)
@@ -1221,7 +1442,12 @@ class SafeRLPipeline:
                 "world_pair_ft_best_metrics": dict(before_stage5_metrics),
                 "world_pair_ft_restored_best": False,
             }
-            world_pair_finetune_skipped_reason = "insufficient_stage5_pairs"
+            if len(all_pair_samples) == 0:
+                world_pair_finetune_skipped_reason = "no_pair_samples_available"
+            elif not stage5_requirement_met:
+                world_pair_finetune_skipped_reason = "insufficient_stage5_pairs"
+            else:
+                world_pair_finetune_skipped_reason = "gate_blocked"
         else:
             world_pair_metrics = world_trainer.fine_tune_pairs(
                 all_pair_samples,
@@ -1250,6 +1476,12 @@ class SafeRLPipeline:
             "light_pair_ft": light_pair_report,
             "world_pair_ft": world_pair_report,
             "world_pair_finetune_skipped_reason": world_pair_finetune_skipped_reason,
+            "world_pair_finetune_mode": world_pair_finetune_mode,
+            "stage5_requirement_met": bool(stage5_requirement_met),
+            "world_pair_gate_degraded": bool(world_pair_gate_degraded),
+            "world_pair_stage5_pairs_required": int(min_stage5_pairs),
+            "world_pair_stage5_pairs_available": int(len(stage5_pair_samples)),
+            "world_pair_total_pairs_available": int(len(all_pair_samples)),
             "world_pair_ft_source_mix": dict(world_pair_report.get("world_pair_ft_source_mix", {})),
         }
         return light_predictor, world_predictor, training_meta
@@ -1344,6 +1576,7 @@ class SafeRLPipeline:
         policy,
         shield,
         save_path: Optional[Path] = None,
+        distill_supervision_path: Optional[Path] = None,
         tb_writer=None,
     ) -> InterventionBuffer:
         from safe_rl.rl.env import create_env
@@ -1359,6 +1592,10 @@ class SafeRLPipeline:
         )
         telemetry = BufferTelemetryTracker(tb_writer)
         buffer = InterventionBuffer(capacity=max(10000, stage_config.distill.trigger_buffer_size * 4))
+        distill_supervision_samples: List[Dict[str, Any]] = []
+        distill_intervened_count = 0
+        distill_non_intervened_count = 0
+        distill_skipped_invalid_feature_count = 0
 
         eval_seeds = self._resolve_eval_seeds(stage_config.eval.eval_episodes)
         for episode_index in range(stage_config.eval.eval_episodes):
@@ -1371,6 +1608,32 @@ class SafeRLPipeline:
                 telemetry.on_step(info)
                 done = terminated or truncated
                 last_episode_id = str(info.get("episode_id", "") or last_episode_id)
+                if distill_supervision_path is not None and env.last_transition is not None:
+                    history_scene = env.last_transition["history_scene"]
+                    history_feature = encode_history(history_scene)
+                    if history_feature.shape[0] != history_feature.size:
+                        history_feature = history_feature.reshape(-1)
+                    if history_feature.size <= 0:
+                        distill_skipped_invalid_feature_count += 1
+                    else:
+                        sample_payload = {
+                            "history_feature": history_feature.astype(float).tolist(),
+                            "raw_action": int(env.last_transition["raw_action"]),
+                            "final_action": int(env.last_transition["final_action"]),
+                            "intervened": bool(info.get("intervened", False)),
+                            "raw_risk": float(info.get("risk_raw", 0.0)),
+                            "final_risk": float(info.get("risk_final", 0.0)),
+                            "reason": str(info.get("intervention_reason", "")),
+                            "meta": {
+                                "episode_id": str(info.get("episode_id", "")),
+                                "episode_step": int(env.step_count),
+                            },
+                        }
+                        distill_supervision_samples.append(sample_payload)
+                        if sample_payload["intervened"]:
+                            distill_intervened_count += 1
+                        else:
+                            distill_non_intervened_count += 1
                 if info.get("intervened", False) and env.last_transition is not None:
                     decision = env.last_transition["decision"]
                     shield_meta = info.get("shield_meta", {})
@@ -1392,6 +1655,20 @@ class SafeRLPipeline:
         if save_path is not None:
             save_path.parent.mkdir(parents=True, exist_ok=True)
             buffer.save(str(save_path))
+
+        if distill_supervision_path is not None:
+            self._write_json(
+                distill_supervision_path,
+                {
+                    "run_id": str(self.run_id or ""),
+                    "created_at": dt.datetime.now().isoformat(timespec="seconds"),
+                    "sample_count": int(len(distill_supervision_samples)),
+                    "intervened_sample_count": int(distill_intervened_count),
+                    "non_intervened_sample_count": int(distill_non_intervened_count),
+                    "skipped_invalid_history_feature_count": int(distill_skipped_invalid_feature_count),
+                    "samples": distill_supervision_samples,
+                },
+            )
 
         env.close()
         return buffer
@@ -2062,6 +2339,26 @@ class SafeRLPipeline:
         names = self._trace_eval_variant_names()
         return all(snapshots.get(name) is not None for name in names)
 
+    def _trace_artifact_available(self, summary: Dict[str, Any]) -> bool:
+        if bool(str(summary.get("stage5_trace_summary_path", "")).strip()):
+            return True
+        if bool(str(summary.get("stage5_trace_tuning_summary_path", "")).strip()):
+            return True
+        if bool(str(summary.get("stage5_margin_analysis_summary_path", "")).strip()):
+            return True
+        if bool(summary.get("after_trace_metrics_complete", False)):
+            return True
+        after_trace = dict(summary.get("after_trace_metrics", {}) or {})
+        return any(item is not None for item in after_trace.values())
+
+    def _pair_source_consistency(self, summary: Dict[str, Any]) -> bool:
+        stage2_snapshot = dict(summary.get("stage2_snapshot", {}) or {})
+        stage5_pairs_created = int(stage2_snapshot.get("stage5_pairs_created", summary.get("stage5_pairs_created", 0)) or 0)
+        trace_artifact_available = bool(summary.get("trace_artifact_available", False))
+        if stage5_pairs_created > 0:
+            return trace_artifact_available
+        return not trace_artifact_available
+
     def _write_risk_v2_eval_summary_from_stage2(self, stage2_report: Dict[str, Any]):
         if self.risk_v2_eval_summary_path is None:
             return None
@@ -2069,9 +2366,9 @@ class SafeRLPipeline:
         world_pair_ft = dict(stage2_report.get("pair_finetune_metrics", {}).get("world", {}))
         before_trace = self._read_trace_variant_snapshots()
         empty_after = {name: None for name in self._trace_eval_variant_names()}
-        summary = {
-            "run_id": str(self.run_id or ""),
-            "updated_at": dt.datetime.now().isoformat(timespec="seconds"),
+        updated_at = dt.datetime.now().isoformat(timespec="seconds")
+        stage2_snapshot = {
+            "updated_at": updated_at,
             "stage2_training_report_path": str(self.stage2_training_report_path),
             "model_variants": {
                 "light": str(stage2_report.get("light_model_variant", "")),
@@ -2081,7 +2378,15 @@ class SafeRLPipeline:
             "light_pair_finetune_applied": bool(stage2_report.get("light_pair_finetune_applied", False)),
             "world_pair_finetune_applied": bool(stage2_report.get("world_pair_finetune_applied", False)),
             "world_pair_finetune_skipped_reason": str(stage2_report.get("world_pair_finetune_skipped_reason", "")),
+            "world_pair_finetune_mode": str(stage2_report.get("world_pair_finetune_mode", "")),
+            "stage5_requirement_met": bool(stage2_report.get("stage5_requirement_met", False)),
+            "world_pair_gate_degraded": bool(stage2_report.get("world_pair_gate_degraded", False)),
+            "world_pair_stage5_pairs_required": int(stage2_report.get("world_pair_stage5_pairs_required", 0)),
+            "world_pair_stage5_pairs_available": int(stage2_report.get("world_pair_stage5_pairs_available", 0)),
+            "world_pair_total_pairs_available": int(stage2_report.get("world_pair_total_pairs_available", 0)),
+            "stage5_pairs_created": int(stage2_report.get("stage5_pairs_created", 0)),
             "stage1_probe_pairs_created": int(stage2_report.get("stage1_probe_pairs_created", 0)),
+            "stage4_pairs_created": int(stage2_report.get("stage4_pairs_created", 0)),
             "pair_source_weights": dict(stage2_report.get("pair_source_weights", {})),
             "world_pair_ft_source_mix": dict(stage2_report.get("world_pair_ft_source_mix", {})),
             "stage5_pair_ranking_accuracy_before_after": dict(stage2_report.get("stage5_pair_ranking_accuracy_before_after", {})),
@@ -2103,6 +2408,42 @@ class SafeRLPipeline:
             "pair_finetune_metrics": dict(stage2_report.get("pair_finetune_metrics", {})),
             "world_pair_ft_frozen_modules": list(stage2_report.get("world_pair_ft_frozen_modules", [])),
             "world_pair_ft_trainable_modules": list(stage2_report.get("world_pair_ft_trainable_modules", [])),
+        }
+        summary = {
+            "run_id": str(self.run_id or ""),
+            "updated_at": updated_at,
+            "stage2_snapshot_updated_at": updated_at,
+            "stage5_snapshot_updated_at": None,
+            "stage2_snapshot": stage2_snapshot,
+            "stage5_snapshot": {},
+            "stage2_training_report_path": stage2_snapshot["stage2_training_report_path"],
+            "model_variants": dict(stage2_snapshot["model_variants"]),
+            "pair_finetune_applied": bool(stage2_snapshot["pair_finetune_applied"]),
+            "light_pair_finetune_applied": bool(stage2_snapshot["light_pair_finetune_applied"]),
+            "world_pair_finetune_applied": bool(stage2_snapshot["world_pair_finetune_applied"]),
+            "world_pair_finetune_skipped_reason": str(stage2_snapshot["world_pair_finetune_skipped_reason"]),
+            "stage1_probe_pairs_created": int(stage2_snapshot["stage1_probe_pairs_created"]),
+            "pair_source_weights": dict(stage2_snapshot["pair_source_weights"]),
+            "world_pair_ft_source_mix": dict(stage2_snapshot["world_pair_ft_source_mix"]),
+            "stage5_pair_ranking_accuracy_before_after": dict(stage2_snapshot["stage5_pair_ranking_accuracy_before_after"]),
+            "stage1_probe_pair_ranking_accuracy_before_after": dict(stage2_snapshot["stage1_probe_pair_ranking_accuracy_before_after"]),
+            "stage4_pair_ranking_accuracy_before_after": dict(stage2_snapshot["stage4_pair_ranking_accuracy_before_after"]),
+            "stage5_same_state_score_gap_before_after": dict(stage2_snapshot["stage5_same_state_score_gap_before_after"]),
+            "stage1_probe_same_state_score_gap_before_after": dict(stage2_snapshot["stage1_probe_same_state_score_gap_before_after"]),
+            "stage4_same_state_score_gap_before_after": dict(stage2_snapshot["stage4_same_state_score_gap_before_after"]),
+            "stage5_score_spread_before_after": dict(stage2_snapshot["stage5_score_spread_before_after"]),
+            "stage1_probe_score_spread_before_after": dict(stage2_snapshot["stage1_probe_score_spread_before_after"]),
+            "stage4_score_spread_before_after": dict(stage2_snapshot["stage4_score_spread_before_after"]),
+            "stage5_spread_eligible_pair_count": int(stage2_snapshot["stage5_spread_eligible_pair_count"]),
+            "stage1_probe_spread_eligible_pair_count": int(stage2_snapshot["stage1_probe_spread_eligible_pair_count"]),
+            "stage4_spread_eligible_pair_count": int(stage2_snapshot["stage4_spread_eligible_pair_count"]),
+            "world_pair_ft_best_epoch": int(stage2_snapshot["world_pair_ft_best_epoch"]),
+            "world_pair_ft_best_metrics": dict(stage2_snapshot["world_pair_ft_best_metrics"]),
+            "world_pair_ft_restored_best": bool(stage2_snapshot["world_pair_ft_restored_best"]),
+            "base_train_metrics": dict(stage2_snapshot["base_train_metrics"]),
+            "pair_finetune_metrics": dict(stage2_snapshot["pair_finetune_metrics"]),
+            "world_pair_ft_frozen_modules": list(stage2_snapshot["world_pair_ft_frozen_modules"]),
+            "world_pair_ft_trainable_modules": list(stage2_snapshot["world_pair_ft_trainable_modules"]),
             "before_trace_metrics": before_trace,
             "after_trace_metrics": empty_after,
             "after_trace_metrics_complete": False,
@@ -2124,7 +2465,11 @@ class SafeRLPipeline:
             },
             "margin_near_threshold_band_ratio_before_after": self._trace_metric_before_after(before_trace, empty_after, "margin_near_threshold_band_ratio"),
             "best_margin_near_threshold_band_ratio_before_after": self._trace_metric_before_after(before_trace, empty_after, "best_margin_near_threshold_band_ratio"),
+            "trace_artifact_available": any(item is not None for item in before_trace.values()),
+            "pair_source_consistency": True,
+            "distill_action_collapse_flag": None,
         }
+        summary["pair_source_consistency"] = self._pair_source_consistency(summary)
         self._write_json(self.risk_v2_eval_summary_path, summary)
         self.manifest.setdefault("artifact_paths", {})["risk_v2_eval_summary_report"] = str(self.risk_v2_eval_summary_path)
         return summary
@@ -2137,7 +2482,8 @@ class SafeRLPipeline:
         else:
             summary = {"run_id": str(self.run_id or "")}
         after_trace = self._read_trace_variant_snapshots()
-        summary["updated_at"] = dt.datetime.now().isoformat(timespec="seconds")
+        updated_at = dt.datetime.now().isoformat(timespec="seconds")
+        summary["updated_at"] = updated_at
         summary["stage5_report_path"] = str(self.report_path)
         summary["after_trace_metrics"] = after_trace
         summary["after_trace_metrics_complete"] = self._trace_snapshot_map_complete(after_trace)
@@ -2149,6 +2495,24 @@ class SafeRLPipeline:
         before_trace = dict(summary.get("before_trace_metrics", {}))
         summary["margin_near_threshold_band_ratio_before_after"] = self._trace_metric_before_after(before_trace, after_trace, "margin_near_threshold_band_ratio")
         summary["best_margin_near_threshold_band_ratio_before_after"] = self._trace_metric_before_after(before_trace, after_trace, "best_margin_near_threshold_band_ratio")
+        distill_training = dict(evaluation.get("distill_training", {}))
+        stage5_snapshot = {
+            "updated_at": updated_at,
+            "stage5_report_path": str(self.report_path),
+            "stage5_effective_shield_config": dict(evaluation.get("effective_shield_config", {})),
+            "stage5_paired_episode_results_path": str(evaluation.get("stage5_paired_episode_results_path", "")),
+            "stage5_trace_summary_path": str(evaluation.get("shield_trace_summary_path", "")),
+            "stage5_trace_tuning_summary_path": str(evaluation.get("shield_trace_tuning_summary_path", "")),
+            "stage5_margin_analysis_summary_path": str(evaluation.get("shield_margin_analysis_summary_path", "")),
+            "after_trace_metrics_complete": bool(summary.get("after_trace_metrics_complete", False)),
+            "distill_training_report_path": str(evaluation.get("distill_training_report_path", "")),
+            "distill_action_collapse_flag": bool(distill_training.get("collapsed", False)) if distill_training else None,
+        }
+        summary["stage5_snapshot"] = stage5_snapshot
+        summary["stage5_snapshot_updated_at"] = updated_at
+        summary["trace_artifact_available"] = self._trace_artifact_available(summary)
+        summary["distill_action_collapse_flag"] = stage5_snapshot.get("distill_action_collapse_flag")
+        summary["pair_source_consistency"] = self._pair_source_consistency(summary)
         self._write_json(self.risk_v2_eval_summary_path, summary)
         self.manifest.setdefault("artifact_paths", {})["risk_v2_eval_summary_report"] = str(self.risk_v2_eval_summary_path)
         return summary
@@ -2295,10 +2659,8 @@ class SafeRLPipeline:
         if self.reports_dir is None or self.shield_trace_tuning_summary_path is None:
             return None
 
-        trace_dirs = sorted(
-            path for path in self.reports_dir.glob("shield_trace*")
-            if path.is_dir() and self._include_trace_dir_for_trace_reports(path)
-        )
+        discovery = self._discover_trace_dirs(for_stage5_pair_mining=False)
+        trace_dirs = list(discovery.get("trace_dirs", []))
         if not trace_dirs:
             return None
 
@@ -2413,10 +2775,8 @@ class SafeRLPipeline:
             return None
 
         if trace_dirs is None:
-            trace_dirs = sorted(
-                path for path in self.reports_dir.glob("shield_trace*")
-                if path.is_dir() and self._find_trace_summary_path(path) is not None
-            )
+            discovery = self._discover_trace_dirs(for_stage5_pair_mining=False)
+            trace_dirs = list(discovery.get("trace_dirs", []))
         if not trace_dirs:
             return None
 

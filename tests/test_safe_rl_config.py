@@ -24,6 +24,10 @@ def test_default_config_loads():
     assert config.stage1_collection.min_gap_between_risk_events == 8
     assert config.stage1_collection.exclude_structural_from_main is True
     assert config.world_model.min_stage5_pairs_for_world_ft == 50
+    assert config.world_model.pair_finetune_gate_mode == "fallback_all_pairs"
+    assert config.shield.profile == "legacy"
+    assert config.shield.legacy_raw_passthrough_risk_threshold == 0.20
+    assert config.shield.balanced_raw_passthrough_risk_threshold == 0.193
 
 
 def test_tensorboard_config_override():
@@ -302,3 +306,31 @@ def test_risk_model_v2_defaults_enabled():
     assert config.world_model.pair_ft_patience == 2
     assert config.world_model.pair_ft_freeze_traj_decoder is True
     assert config.world_model.pair_ft_freeze_backbone == "partial"
+
+
+def test_safe_rl_balanced_profile_config_loads():
+    config = load_safe_rl_config("safe_rl/config/safe_rl_balanced_profile.yaml")
+    assert config.shield.profile == "balanced"
+    assert config.shield.raw_passthrough_risk_threshold == 0.193
+    assert config.shield.replacement_min_risk_margin == 0.104
+
+
+def test_explicit_shield_thresholds_override_profile_defaults():
+    temp_dir = Path("safe_rl_output/test_artifacts")
+    temp_dir.mkdir(parents=True, exist_ok=True)
+    yaml_path = temp_dir / "shield_profile_override.yaml"
+    yaml_path.write_text(
+        "\n".join(
+            [
+                "shield:",
+                "  profile: balanced",
+                "  raw_passthrough_risk_threshold: 0.22",
+                "  replacement_min_risk_margin: 0.11",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    config = load_safe_rl_config(str(yaml_path))
+    assert config.shield.profile == "balanced"
+    assert config.shield.raw_passthrough_risk_threshold == 0.22
+    assert config.shield.replacement_min_risk_margin == 0.11

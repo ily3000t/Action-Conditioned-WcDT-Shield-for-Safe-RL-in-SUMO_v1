@@ -36,6 +36,12 @@ def _tiny_config() -> SafeRLConfig:
     return config
 
 
+def _local_test_tmp_dir(tag: str) -> Path:
+    path = Path("safe_rl_output/test_artifacts") / f"{tag}_{uuid.uuid4().hex[:8]}"
+    path.mkdir(parents=True, exist_ok=True)
+    return path
+
+
 def test_cli_stage_requires_run_id_for_single_stage():
     with pytest.raises(SystemExit):
         parse_args(["--stage", "stage2"])
@@ -175,6 +181,7 @@ def test_stage4_result_includes_buffer_policy_metadata(monkeypatch):
     assert result["buffer_eval_seeds"] == [11, 22]
     assert result["buffer_risky_mode"] is True
     assert result["buffer_scenario_source"] == config.sim.sumo_cfg
+    assert result["distill_supervision_path"].endswith("distill_supervision.json")
     assert Path(pipeline.stage4_buffer_report_path).exists()
 
 
@@ -1344,6 +1351,12 @@ def test_stage2_report_includes_pair_finetune_metadata(monkeypatch):
             "pair_finetune_applied": True,
             "light_pair_finetune_applied": True,
             "world_pair_finetune_applied": True,
+            "world_pair_finetune_mode": "fallback_all_pairs",
+            "stage5_requirement_met": True,
+            "world_pair_gate_degraded": False,
+            "world_pair_stage5_pairs_required": 1,
+            "world_pair_stage5_pairs_available": 1,
+            "world_pair_total_pairs_available": 2,
             "ranking_metrics": {"light": {"pair_ranking_accuracy": 1.0}, "world": {"pair_ranking_accuracy": 1.0}},
             "light_training": {"variant": "v2"},
             "world_training": {"variant": "v2"},
@@ -1394,11 +1407,14 @@ def test_stage2_report_includes_pair_finetune_metadata(monkeypatch):
     assert report["world_pair_ft_trainable_modules"] == ["fusion", "risk_score_head"]
     assert report["world_pair_ft_source_mix"]["stage5_steps"] == 3
     assert report["world_pair_ft_source_mix"]["stage4_steps"] == 1
+    assert report["stage2_pair_source_health"]["status"] == "healthy"
     risk_v2_summary = json.loads(Path(pipeline.risk_v2_eval_summary_path).read_text(encoding="utf-8"))
     assert risk_v2_summary["pair_finetune_applied"] is True
     assert risk_v2_summary["light_pair_finetune_applied"] is True
     assert risk_v2_summary["world_pair_finetune_applied"] is True
     assert risk_v2_summary["world_pair_ft_source_mix"]["stage5_steps"] == 3
+    assert "stage2_snapshot" in risk_v2_summary
+    assert "pair_source_consistency" in risk_v2_summary
     assert risk_v2_summary["after_trace_metrics"] == {"ANCHOR": None, "BOUNDARY": None, "CONSERVATIVE": None, "HOLDOUT": None}
     assert risk_v2_summary["after_trace_metrics_complete"] is False
     assert risk_v2_summary["score_spread_before_after"]["light"]["before"]["score_spread"] == pytest.approx(0.01)
@@ -1409,8 +1425,264 @@ def test_stage2_report_includes_pair_finetune_metadata(monkeypatch):
     assert report["stage4_spread_eligible_pair_count"] == 0
     assert report["world_pair_ft_best_epoch"] == 1
     assert report["world_pair_ft_restored_best"] is True
+    assert report["world_pair_finetune_mode"] == "fallback_all_pairs"
+    assert report["stage5_requirement_met"] is True
+    assert report["world_pair_gate_degraded"] is False
     assert risk_v2_summary["stage5_pair_ranking_accuracy_before_after"]["after"] == pytest.approx(0.75)
     assert risk_v2_summary["stage4_pair_ranking_accuracy_before_after"]["after"] == pytest.approx(0.65)
+
+
+def test_train_models_world_pair_gate_fallback_all_pairs_applies_when_stage5_missing(monkeypatch):
+    from safe_rl.data.types import RiskPairSample, SceneState, VehicleState
+    pytest.importorskip("torch")
+
+    config = _tiny_config()
+    config.world_model.pair_finetune_gate_mode = "fallback_all_pairs"
+    config.world_model.min_stage5_pairs_for_world_ft = 3
+    pipeline = SafeRLPipeline(config)
+    model_dir = _local_test_tmp_dir("ut_world_pair_gate_fallback")
+    pipeline.light_model_path = model_dir / "light.pt"
+    pipeline.world_model_path = model_dir / "world.pt"
+
+    history = [SceneState(timestamp=0.0, ego_id="ego", vehicles=[VehicleState("ego", 0.0, 0.0, 10.0, 0.0, 0.0, 0.0, 0.0, 1)])] * 2
+    stage1_pair = RiskPairSample(
+        history_scene=history,
+        action_a=4,
+        action_b=3,
+        preferred_action=4,
+        source="stage1_probe_same_state",
+        weight=1.0,
+    )
+
+    class _DummyLightTrainer:
+        def __init__(self, cfg, seed=0):
+            _ = (cfg, seed)
+            self.last_pair_ft_report = {"enabled": False, "pair_count": 0}
+            self.last_train_report = {}
+
+        def fit(self, train_samples, val_samples, tb_writer=None):
+            _ = (train_samples, val_samples, tb_writer)
+            return SimpleNamespace(device="cpu")
+
+        def fine_tune_pairs(self, pair_samples, replay_samples=None, tb_writer=None):
+            _ = (pair_samples, replay_samples, tb_writer)
+            return {}
+
+        def save(self, path: str):
+            _ = path
+
+    class _DummyWorldTrainer:
+        def __init__(self, config, history_steps, seed=0):
+            _ = (config, history_steps, seed)
+            self.last_pair_ft_report = {}
+            self.last_train_report = {}
+
+        def fit(self, train_samples, val_samples, tb_writer=None):
+            _ = (train_samples, val_samples, tb_writer)
+            return SimpleNamespace(device="cpu")
+
+        def _select_pair_ft_eval_samples(self, train_samples):
+            _ = train_samples
+            return []
+
+        def evaluate_pairs(self, pair_samples):
+            _ = pair_samples
+            return {
+                "pair_count": float(len(pair_samples)),
+                "pair_ranking_accuracy": 0.5 if pair_samples else 0.0,
+                "same_state_score_gap": 0.1 if pair_samples else 0.0,
+                "score_spread": 0.1 if pair_samples else 0.0,
+                "hard_negative_accuracy": 0.5 if pair_samples else 0.0,
+            }
+
+        def _evaluate_risk_only_samples(self, eval_replay_samples):
+            _ = eval_replay_samples
+            return {}
+
+        def _spread_eligible_pair_count(self, pair_samples):
+            return len(pair_samples)
+
+        def fine_tune_pairs(
+            self,
+            pair_samples,
+            replay_samples=None,
+            tb_writer=None,
+            stage5_pair_samples=None,
+            stage1_probe_pair_samples=None,
+            stage4_pair_samples=None,
+        ):
+            _ = (replay_samples, tb_writer, stage4_pair_samples)
+            self.last_pair_ft_report = {
+                "enabled": True,
+                "pair_count": int(len(pair_samples)),
+                "world_pair_ft_source_mix": {
+                    "stage5_pair_count": int(len(stage5_pair_samples or [])),
+                    "stage1_probe_pair_count": int(len(stage1_probe_pair_samples or [])),
+                },
+                "stage5_pair_ranking_accuracy_before_after": {"before": 0.0, "after": 0.0},
+                "stage1_probe_pair_ranking_accuracy_before_after": {"before": 0.5, "after": 0.6},
+                "stage4_pair_ranking_accuracy_before_after": {"before": 0.0, "after": 0.0},
+                "stage5_same_state_score_gap_before_after": {"before": 0.0, "after": 0.0},
+                "stage1_probe_same_state_score_gap_before_after": {"before": 0.1, "after": 0.12},
+                "stage4_same_state_score_gap_before_after": {"before": 0.0, "after": 0.0},
+                "stage5_score_spread_before_after": {"before": 0.0, "after": 0.0},
+                "stage1_probe_score_spread_before_after": {"before": 0.1, "after": 0.12},
+                "stage4_score_spread_before_after": {"before": 0.0, "after": 0.0},
+                "stage5_spread_eligible_pair_count": 0,
+                "stage1_probe_spread_eligible_pair_count": int(len(stage1_probe_pair_samples or [])),
+                "stage4_spread_eligible_pair_count": 0,
+                "world_pair_ft_best_epoch": 0,
+                "world_pair_ft_best_metrics": {"pair_ranking_accuracy": 0.6},
+                "world_pair_ft_restored_best": True,
+            }
+            return {"pair_ranking_accuracy": 0.6}
+
+        def save(self, path: str):
+            _ = path
+
+    monkeypatch.setattr("safe_rl.models.light_risk_model.LightRiskTrainer", _DummyLightTrainer)
+    monkeypatch.setattr("safe_rl.models.world_model.WorldModelTrainer", _DummyWorldTrainer)
+
+    _, _, training_meta = pipeline.train_models(
+        train_samples=[],
+        val_samples=[],
+        model_dir=model_dir,
+        stage5_pair_samples=[],
+        stage1_probe_pair_samples=[stage1_pair],
+        stage4_pair_samples=[],
+    )
+
+    assert training_meta["world_pair_finetune_applied"] is True
+    assert training_meta["world_pair_finetune_mode"] == "fallback_all_pairs"
+    assert training_meta["stage5_requirement_met"] is False
+    assert training_meta["world_pair_gate_degraded"] is True
+    assert training_meta["world_pair_stage5_pairs_available"] == 0
+    assert training_meta["world_pair_total_pairs_available"] == 1
+
+
+def test_train_models_world_pair_gate_strict_skips_when_stage5_missing(monkeypatch):
+    from safe_rl.data.types import RiskPairSample, SceneState, VehicleState
+    pytest.importorskip("torch")
+
+    config = _tiny_config()
+    config.world_model.pair_finetune_gate_mode = "strict"
+    config.world_model.min_stage5_pairs_for_world_ft = 2
+    pipeline = SafeRLPipeline(config)
+    model_dir = _local_test_tmp_dir("ut_world_pair_gate_strict")
+    pipeline.light_model_path = model_dir / "light.pt"
+    pipeline.world_model_path = model_dir / "world.pt"
+
+    history = [SceneState(timestamp=0.0, ego_id="ego", vehicles=[VehicleState("ego", 0.0, 0.0, 10.0, 0.0, 0.0, 0.0, 0.0, 1)])] * 2
+    stage1_pair = RiskPairSample(
+        history_scene=history,
+        action_a=4,
+        action_b=3,
+        preferred_action=4,
+        source="stage1_probe_same_state",
+        weight=1.0,
+    )
+
+    class _DummyLightTrainer:
+        def __init__(self, cfg, seed=0):
+            _ = (cfg, seed)
+            self.last_pair_ft_report = {"enabled": False, "pair_count": 0}
+            self.last_train_report = {}
+
+        def fit(self, train_samples, val_samples, tb_writer=None):
+            _ = (train_samples, val_samples, tb_writer)
+            return SimpleNamespace(device="cpu")
+
+        def fine_tune_pairs(self, pair_samples, replay_samples=None, tb_writer=None):
+            _ = (pair_samples, replay_samples, tb_writer)
+            return {}
+
+        def save(self, path: str):
+            _ = path
+
+    class _DummyWorldTrainer:
+        def __init__(self, config, history_steps, seed=0):
+            _ = (config, history_steps, seed)
+            self.last_pair_ft_report = {}
+            self.last_train_report = {}
+
+        def fit(self, train_samples, val_samples, tb_writer=None):
+            _ = (train_samples, val_samples, tb_writer)
+            return SimpleNamespace(device="cpu")
+
+        def _select_pair_ft_eval_samples(self, train_samples):
+            _ = train_samples
+            return []
+
+        def evaluate_pairs(self, pair_samples):
+            return {
+                "pair_count": float(len(pair_samples)),
+                "pair_ranking_accuracy": 0.0,
+                "same_state_score_gap": 0.0,
+                "score_spread": 0.0,
+                "hard_negative_accuracy": 0.0,
+            }
+
+        def _evaluate_risk_only_samples(self, eval_replay_samples):
+            _ = eval_replay_samples
+            return {}
+
+        def _spread_eligible_pair_count(self, pair_samples):
+            _ = pair_samples
+            return 0
+
+        def fine_tune_pairs(self, *args, **kwargs):
+            raise AssertionError("fine_tune_pairs should not be called in strict mode without stage5 pairs")
+
+        def save(self, path: str):
+            _ = path
+
+    monkeypatch.setattr("safe_rl.models.light_risk_model.LightRiskTrainer", _DummyLightTrainer)
+    monkeypatch.setattr("safe_rl.models.world_model.WorldModelTrainer", _DummyWorldTrainer)
+
+    _, _, training_meta = pipeline.train_models(
+        train_samples=[],
+        val_samples=[],
+        model_dir=model_dir,
+        stage5_pair_samples=[],
+        stage1_probe_pair_samples=[stage1_pair],
+        stage4_pair_samples=[],
+    )
+
+    assert training_meta["world_pair_finetune_applied"] is False
+    assert training_meta["world_pair_finetune_mode"] == "strict"
+    assert training_meta["stage5_requirement_met"] is False
+    assert training_meta["world_pair_finetune_skipped_reason"] == "insufficient_stage5_pairs"
+
+
+def test_stage5_pair_mining_supports_non_shield_trace_prefix_directories():
+    from safe_rl.data.types import SceneState, VehicleState, dataclass_to_dict
+
+    config = _tiny_config()
+    pipeline = SafeRLPipeline(config)
+    run_id = f"ut_stage5_dir_discovery_{uuid.uuid4().hex[:8]}"
+    pipeline._prepare_run_context(stage="stage2", run_id=run_id)
+
+    history = [SceneState(timestamp=0.0, ego_id="ego", vehicles=[VehicleState("ego", 1.0, 2.0, 20.0, 0.0, 0.0, 0.0, 0.0, 1)])] * 2
+    trace_dir = pipeline.reports_dir / "balance_scan_custom"
+    trace_dir.mkdir(parents=True, exist_ok=True)
+    pair_path = trace_dir / "pair_00_seed_42.json"
+    pipeline._write_json(
+        pair_path,
+        {
+            "pair_index": 0,
+            "seed": 42,
+            "first_replacement_step": 0,
+            "baseline_steps": [{"step_index": 0, "raw_action": 4, "final_action": 4, "history_scene": dataclass_to_dict(history), "collision": False, "ttc": 5.0, "min_distance": 10.0, "reward": 0.3}],
+            "shielded_steps": [{"step_index": 0, "raw_action": 4, "final_action": 3, "history_scene": dataclass_to_dict(history), "collision": True, "ttc": 0.5, "min_distance": 0.5, "reward": -0.2}],
+        },
+    )
+    pipeline._write_json(trace_dir / "trace_summary.json", {"variant_name": "BALANCE_SCAN_CUSTOM", "pair_files": [str(pair_path)], "seeds": [42]})
+
+    stage5_pairs, summary = pipeline._build_stage5_pair_samples()
+    assert len(stage5_pairs) == 1
+    assert summary["trace_dirs_seen"] >= 1
+    assert "balance_scan_custom" in summary["trace_dir_names"]
+    assert summary["discovery"]["selected_dirs"] >= 1
 
 
 
@@ -1590,6 +1862,8 @@ def test_stage5_pair_from_payload_reports_missing_same_state_proof(monkeypatch):
 
 
 def test_stage5_pair_miner_ignores_pre_v2_and_holdout_trace_dirs():
+    from safe_rl.data.types import SceneState, VehicleState, dataclass_to_dict
+
     config = _tiny_config()
     pipeline = SafeRLPipeline(config)
     run_id = f"ut_stage5_pair_filter_{uuid.uuid4().hex[:8]}"
@@ -1599,9 +1873,19 @@ def test_stage5_pair_miner_ignores_pre_v2_and_holdout_trace_dirs():
     included = pipeline.reports_dir / "shield_trace_d1"
     excluded_pre = pipeline.reports_dir / "shield_trace_d1_pre_v2"
     excluded_holdout = pipeline.reports_dir / "shield_trace_holdout_c1"
+    history = [SceneState(timestamp=0.0, ego_id="ego", vehicles=[VehicleState("ego", 1.0, 2.0, 20.0, 0.0, 0.0, 0.0, 0.0, 1)])] * 2
+    pair_payload = {
+        "pair_index": 0,
+        "seed": 42,
+        "first_replacement_step": 0,
+        "baseline_steps": [{"step_index": 0, "raw_action": 4, "final_action": 4, "history_scene": dataclass_to_dict(history), "collision": False, "ttc": 5.0, "min_distance": 10.0, "reward": 0.3}],
+        "shielded_steps": [{"step_index": 0, "raw_action": 4, "final_action": 3, "history_scene": dataclass_to_dict(history), "collision": True, "ttc": 0.5, "min_distance": 0.5, "reward": -0.2}],
+    }
     for path in [included, excluded_pre, excluded_holdout]:
         path.mkdir(parents=True, exist_ok=True)
-        pipeline._write_json(path / "trace_summary.json", {"variant_name": path.name, "pair_files": [], "seeds": [42]})
+        pair_path = path / "pair_00_seed_42.json"
+        pipeline._write_json(pair_path, pair_payload)
+        pipeline._write_json(path / "trace_summary.json", {"variant_name": path.name, "pair_files": [str(pair_path)], "seeds": [42]})
 
     payload = pipeline._build_pair_datasets_for_stage2()
 
@@ -1754,6 +2038,9 @@ def test_risk_v2_summary_tracks_after_trace_metrics_by_role():
     summary = pipeline._write_risk_v2_eval_summary_from_stage5({})
 
     assert summary is not None
+    assert "stage2_snapshot" in summary
+    assert "stage5_snapshot" in summary
+    assert summary["stage2_snapshot"]["world_pair_finetune_applied"] is True
     assert summary["after_trace_metrics_complete"] is True
     assert summary["after_trace_metrics"]["ANCHOR"]["variant_name"] == "PAIR_BOOTSTRAP"
     assert summary["after_trace_metrics"]["BOUNDARY"]["variant_name"] == "G5"
@@ -1763,3 +2050,4 @@ def test_risk_v2_summary_tracks_after_trace_metrics_by_role():
     assert summary["margin_near_threshold_band_ratio_before_after"]["BOUNDARY"]["after"] == pytest.approx(0.55)
     assert summary["margin_near_threshold_band_ratio_before_after"]["CONSERVATIVE"]["after"] == pytest.approx(0.66)
     assert summary["margin_near_threshold_band_ratio_before_after"]["HOLDOUT"]["after"] == pytest.approx(0.77)
+    assert summary["stage5_snapshot"]["after_trace_metrics_complete"] is True

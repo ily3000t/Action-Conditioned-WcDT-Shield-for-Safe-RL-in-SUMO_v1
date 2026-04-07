@@ -47,9 +47,11 @@ world_model:
   batch_size: 16
   epochs: 20
   uncertainty_weight: 0.1
+  pair_finetune_gate_mode: "fallback_all_pairs"
 
 shield:
   candidate_count: 7
+  profile: "legacy"
   coarse_top_k: 4
   tail_quantile: 0.9
   risk_threshold: 0.45
@@ -58,6 +60,10 @@ shield:
   fallback_action: "DECEL_KEEP"
   replacement_min_risk_margin: 0.05
   raw_passthrough_risk_threshold: 0.20
+  legacy_replacement_min_risk_margin: 0.05
+  legacy_raw_passthrough_risk_threshold: 0.20
+  balanced_replacement_min_risk_margin: 0.104
+  balanced_raw_passthrough_risk_threshold: 0.193
   protect_merge_lateral_decisions: true
   merge_override_margin: 0.12
 

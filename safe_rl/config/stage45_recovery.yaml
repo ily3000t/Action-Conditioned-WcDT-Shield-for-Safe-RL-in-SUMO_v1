@@ -1,2 +1,4 @@
+# Emergency fallback profile for Stage4/5 only.
 shield:
+  profile: "legacy"
   raw_passthrough_risk_threshold: 0.18
