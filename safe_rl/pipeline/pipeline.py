@@ -630,43 +630,160 @@ class SafeRLPipeline:
             "pairs_created": 0,
             "skipped_same_action": 0,
             "skipped_equal_risk": 0,
+            "buffer_pairs_created": 0,
+            "candidate_rows_seen": 0,
+            "candidate_pairs_created": 0,
+            "skipped_candidate_missing_evaluations": 0,
+            "skipped_candidate_missing_history_scene": 0,
+            "skipped_candidate_missing_raw_eval": 0,
+            "skipped_candidate_no_alternative": 0,
+            "skipped_candidate_invalid_actions": 0,
+            "skipped_missing_buffer_file": 0,
+            "skipped_missing_distill_supervision_file": 0,
         }
         pair_samples: List[RiskPairSample] = []
         stage4_weight = float(self.config.light_risk.stage4_pair_weight if stage4_weight is None else stage4_weight)
-        if self.buffer_path is None or not self.buffer_path.exists():
-            return pair_samples, summary
+        if self.buffer_path is not None and self.buffer_path.exists():
+            buffer = InterventionBuffer(capacity=max(10000, self.config.distill.trigger_buffer_size * 4))
+            buffer.load(str(self.buffer_path))
+            for record in buffer.all_records():
+                summary["records_seen"] += 1
+                if int(record.raw_action) == int(record.final_action):
+                    summary["skipped_same_action"] += 1
+                    continue
+                if abs(float(record.raw_risk) - float(record.final_risk)) <= 1e-8:
+                    summary["skipped_equal_risk"] += 1
+                    continue
+                preferred_action = int(record.final_action if float(record.final_risk) < float(record.raw_risk) else record.raw_action)
+                proof = self._build_same_state_proof([dataclass_to_dict(scene) for scene in list(record.history_scene)], {})
+                sample = RiskPairSample(
+                    history_scene=list(record.history_scene),
+                    action_a=int(record.raw_action),
+                    action_b=int(record.final_action),
+                    preferred_action=preferred_action,
+                    source="stage4_buffer",
+                    weight=float(stage4_weight),
+                    meta={
+                        "target_risk_a": float(record.raw_risk),
+                        "target_risk_b": float(record.final_risk),
+                        "reason": str(record.reason),
+                        "episode_id": str(dict(record.meta or {}).get("episode_id", "")),
+                        "hard_negative": False,
+                        "trusted_for_spread": False,
+                        **proof,
+                    },
+                )
+                pair_samples.append(sample)
+                summary["pairs_created"] += 1
+                summary["buffer_pairs_created"] += 1
+        else:
+            summary["skipped_missing_buffer_file"] = 1
 
-        buffer = InterventionBuffer(capacity=max(10000, self.config.distill.trigger_buffer_size * 4))
-        buffer.load(str(self.buffer_path))
-        for record in buffer.all_records():
-            summary["records_seen"] += 1
-            if int(record.raw_action) == int(record.final_action):
-                summary["skipped_same_action"] += 1
+        supervision_samples: List[Dict[str, Any]] = []
+        if self.distill_supervision_path is not None and self.distill_supervision_path.exists():
+            distill_payload = self._read_json(self.distill_supervision_path)
+            supervision_samples = [dict(item) for item in list(distill_payload.get("samples", []) or [])]
+        else:
+            summary["skipped_missing_distill_supervision_file"] = 1
+
+        for item in supervision_samples:
+            summary["candidate_rows_seen"] += 1
+            payload = dict(item or {})
+            raw_action = int(payload.get("raw_action", -1))
+            if raw_action < 0 or raw_action > 8:
+                summary["skipped_candidate_invalid_actions"] += 1
                 continue
-            if abs(float(record.raw_risk) - float(record.final_risk)) <= 1e-8:
+
+            meta = dict(payload.get("meta", {}) or {})
+            history_scene_payload = list(meta.get("history_scene", []) or [])
+            if not history_scene_payload:
+                summary["skipped_candidate_missing_history_scene"] += 1
+                continue
+            history_scene = scene_state_list_from_dicts(history_scene_payload)
+            if not history_scene:
+                summary["skipped_candidate_missing_history_scene"] += 1
+                continue
+
+            candidate_evaluations = [dict(ev) for ev in list(payload.get("candidate_evaluations", []) or [])]
+            if not candidate_evaluations:
+                summary["skipped_candidate_missing_evaluations"] += 1
+                continue
+
+            raw_eval: Optional[Dict[str, Any]] = None
+            alternatives: List[Dict[str, Any]] = []
+            for candidate in candidate_evaluations:
+                action_id = int(candidate.get("action_id", -1))
+                if action_id < 0 or action_id > 8:
+                    continue
+                if not bool(candidate.get("evaluated", False)):
+                    continue
+                fine_risk = candidate.get("fine_risk")
+                if fine_risk is None:
+                    continue
+                candidate_view = {
+                    "action_id": int(action_id),
+                    "fine_risk": float(fine_risk),
+                    "uncertainty": float(candidate.get("uncertainty", 0.0) or 0.0),
+                    "distance_to_raw": int(candidate.get("distance_to_raw", 9999) or 9999),
+                }
+                if int(action_id) == int(raw_action):
+                    raw_eval = candidate_view
+                else:
+                    alternatives.append(candidate_view)
+
+            if raw_eval is None:
+                raw_risk = payload.get("raw_risk")
+                if raw_risk is None:
+                    summary["skipped_candidate_missing_raw_eval"] += 1
+                    continue
+                raw_eval = {
+                    "action_id": int(raw_action),
+                    "fine_risk": float(raw_risk),
+                    "uncertainty": float(payload.get("raw_uncertainty", 0.0) or 0.0),
+                    "distance_to_raw": 0,
+                }
+
+            if not alternatives:
+                summary["skipped_candidate_no_alternative"] += 1
+                continue
+
+            alternatives.sort(
+                key=lambda item: (
+                    float(item.get("fine_risk", 0.0)),
+                    float(item.get("uncertainty", 0.0)),
+                    int(item.get("distance_to_raw", 9999)),
+                    int(item.get("action_id", -1)),
+                )
+            )
+            best = alternatives[0]
+            raw_risk = float(raw_eval.get("fine_risk", 0.0))
+            best_risk = float(best.get("fine_risk", 0.0))
+            if abs(raw_risk - best_risk) <= 1e-8:
                 summary["skipped_equal_risk"] += 1
                 continue
-            preferred_action = int(record.final_action if float(record.final_risk) < float(record.raw_risk) else record.raw_action)
-            proof = self._build_same_state_proof([dataclass_to_dict(scene) for scene in list(record.history_scene)], {})
+            preferred_action = int(best["action_id"] if best_risk < raw_risk else raw_action)
+            proof = self._build_same_state_proof(history_scene_payload, {})
             sample = RiskPairSample(
-                history_scene=list(record.history_scene),
-                action_a=int(record.raw_action),
-                action_b=int(record.final_action),
+                history_scene=history_scene,
+                action_a=int(raw_action),
+                action_b=int(best["action_id"]),
                 preferred_action=preferred_action,
-                source="stage4_buffer",
+                source="stage4_candidate_rank",
                 weight=float(stage4_weight),
                 meta={
-                    "target_risk_a": float(record.raw_risk),
-                    "target_risk_b": float(record.final_risk),
-                    "reason": str(record.reason),
-                    "episode_id": str(dict(record.meta or {}).get("episode_id", "")),
+                    "target_risk_a": float(raw_risk),
+                    "target_risk_b": float(best_risk),
+                    "reason": str(payload.get("reason", "")),
+                    "episode_id": str(meta.get("episode_id", "")),
                     "hard_negative": False,
                     "trusted_for_spread": False,
+                    "candidate_rank_pair": True,
                     **proof,
                 },
             )
             pair_samples.append(sample)
             summary["pairs_created"] += 1
+            summary["candidate_pairs_created"] += 1
         return pair_samples, summary
 
     def _preferred_action_from_trace_suffix(
@@ -1158,24 +1275,30 @@ class SafeRLPipeline:
         world_same_state_score_gap = _to_optional_float(world_metrics.get("same_state_score_gap"))
         world_pair_ranking_accuracy = _to_optional_float(world_metrics.get("pair_ranking_accuracy"))
 
-        warnings: List[str] = []
+        critical_warnings: List[str] = []
+        degraded_warnings: List[str] = []
         if world_unique_score_count is not None and world_unique_score_count < 16.0:
-            warnings.append("world_unique_score_count_low")
+            critical_warnings.append("world_unique_score_count_low")
         if world_score_spread is not None and world_score_spread < 0.01:
-            warnings.append("world_score_spread_narrow")
+            critical_warnings.append("world_score_spread_narrow")
         if world_same_state_score_gap is not None and world_same_state_score_gap < 0.01:
-            warnings.append("world_same_state_score_gap_small")
+            degraded_warnings.append("world_same_state_score_gap_small")
 
-        status = "degraded" if warnings else "healthy"
-        message = (
-            "World pair metrics indicate limited risk-score resolution; consider stage5 bootstrap and stage2 replay."
-            if warnings
-            else "World pair metrics look healthy for current stage2 inputs."
-        )
+        if critical_warnings:
+            status = "critical"
+            message = "World pair metrics are critically under-resolved; downstream Stage4/5 will be blocked."
+        elif degraded_warnings:
+            status = "degraded"
+            message = "World pair metrics are degraded; monitor downstream shield activation carefully."
+        else:
+            status = "healthy"
+            message = "World pair metrics look healthy for current stage2 inputs."
         return {
             "status": status,
             "message": message,
-            "warnings": warnings,
+            "warnings": critical_warnings + degraded_warnings,
+            "critical_warnings": critical_warnings,
+            "degraded_warnings": degraded_warnings,
             "metrics": {
                 "world_pair_ranking_accuracy": world_pair_ranking_accuracy,
                 "world_score_spread": world_score_spread,
@@ -1188,6 +1311,71 @@ class SafeRLPipeline:
                 "min_same_state_score_gap": 0.01,
             },
         }
+
+    def _collect_stage2_model_quality_gate(self, stage_name: str) -> Dict[str, Any]:
+        checked_at = dt.datetime.now().isoformat(timespec="seconds")
+        payload: Dict[str, Any] = {
+            "stage": str(stage_name),
+            "checked_at": checked_at,
+            "stage2_training_report_path": str(self.stage2_training_report_path),
+            "gate_passed": True,
+            "status": "warning",
+            "warning_code": "",
+            "model_quality_status": "unknown",
+            "message": "",
+        }
+        if self.stage2_training_report_path is None or not self.stage2_training_report_path.exists():
+            payload["warning_code"] = "missing_stage2_training_report"
+            payload["message"] = (
+                "stage2_training_report.json not found. "
+                "Stage4/5 quality gate is skipped for this run."
+            )
+            print(
+                f"[Pipeline][{stage_name}] warning: {payload['message']}",
+                flush=True,
+            )
+            return payload
+
+        try:
+            stage2_report = self._read_json(self.stage2_training_report_path)
+        except Exception as exc:
+            payload["warning_code"] = "failed_to_read_stage2_training_report"
+            payload["message"] = (
+                "Failed to read stage2_training_report.json; "
+                f"Stage4/5 quality gate is skipped. error={exc}"
+            )
+            print(
+                f"[Pipeline][{stage_name}] warning: {payload['message']}",
+                flush=True,
+            )
+            return payload
+
+        stage2_health = dict(stage2_report.get("stage2_pair_source_health", {}) or {})
+        model_quality = dict(stage2_health.get("model_quality", {}) or {})
+        model_quality_status = str(model_quality.get("status", "") or "unknown").strip().lower()
+        payload["model_quality"] = model_quality
+        payload["model_quality_status"] = model_quality_status
+        payload["status"] = model_quality_status if model_quality_status in ("healthy", "degraded", "critical") else "warning"
+        payload["message"] = str(model_quality.get("message", "") or "")
+        if model_quality_status == "critical":
+            payload["gate_passed"] = False
+            if not payload["message"]:
+                payload["message"] = "Stage2 model quality is critical."
+        elif not payload["message"]:
+            payload["message"] = "Stage2 model quality gate passed."
+        return payload
+
+    def _enforce_stage2_model_quality_gate(self, stage_name: str) -> Dict[str, Any]:
+        gate = self._collect_stage2_model_quality_gate(stage_name)
+        if bool(gate.get("gate_passed", True)):
+            return gate
+        message = (
+            f"[Pipeline][{stage_name}] blocked by Stage2 model quality gate: "
+            f"status={gate.get('model_quality_status', 'unknown')}, "
+            f"report={gate.get('stage2_training_report_path', '')}, "
+            f"message={gate.get('message', '')}"
+        )
+        raise RuntimeError(message)
 
     def _print_stage2_pair_source_preflight(self, health: Dict[str, Any]):
         if str(health.get("status", "healthy")) == "healthy":
@@ -1403,6 +1591,7 @@ class SafeRLPipeline:
 
     def _run_stage4(self, tb_manager: TensorboardManager) -> Dict:
         print("[Pipeline] stage4: collect intervention buffer", flush=True)
+        stage2_model_quality_gate = self._enforce_stage2_model_quality_gate("stage4")
         self._require_files("stage4", [self.light_model_path, self.world_model_path, self.policy_meta_path])
 
         stage_config = self._config_with_run_paths()
@@ -1454,6 +1643,7 @@ class SafeRLPipeline:
             "buffer_stats": stats,
             "distill_supervision_path": str(self.distill_supervision_path),
             "distill_supervision_summary": distill_supervision_summary,
+            "stage2_model_quality_gate": stage2_model_quality_gate,
             "shield_activation_diagnostics": shield_activation_diagnostics,
             "stage4_intervention_health": stage4_intervention_health,
         }
@@ -1463,6 +1653,7 @@ class SafeRLPipeline:
 
     def _run_stage5(self, tb_manager: TensorboardManager) -> Dict:
         print("[Pipeline] stage5: distill and evaluate", flush=True)
+        stage2_model_quality_gate = self._enforce_stage2_model_quality_gate("stage5")
         stage_config = self._config_with_run_paths()
 
         if self._shield_sweep_enabled():
@@ -1559,6 +1750,7 @@ class SafeRLPipeline:
             buffer_stats=buffer_stats,
         )
         evaluation["shield_contribution_validated"] = bool(evaluation["attribution_passed"])
+        evaluation["stage2_model_quality_gate"] = stage2_model_quality_gate
         evaluation["conclusion_text"] = self._build_evaluation_conclusion(evaluation)
         self._save_report(evaluation)
         self._write_risk_v2_eval_summary_from_stage5(evaluation)
@@ -1897,9 +2089,11 @@ class SafeRLPipeline:
                             "raw_risk": float(info.get("risk_raw", 0.0)),
                             "final_risk": float(info.get("risk_final", 0.0)),
                             "reason": str(info.get("intervention_reason", "")),
+                            "candidate_evaluations": [dict(item) for item in list(info.get("candidate_evaluations", []) or [])],
                             "meta": {
                                 "episode_id": str(info.get("episode_id", "")),
                                 "episode_step": int(env.step_count),
+                                "history_scene": [dataclass_to_dict(scene) for scene in list(history_scene)],
                             },
                         }
                         distill_supervision_samples.append(sample_payload)

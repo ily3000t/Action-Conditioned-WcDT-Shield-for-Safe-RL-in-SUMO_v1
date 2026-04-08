@@ -84,11 +84,11 @@ class WorldModelConfig:
     spread_loss_weight: float = 0.05
     stage5_pair_weight: float = 1.0
     stage4_pair_weight: float = 0.2
-    pair_finetune_epochs: int = 3
+    pair_finetune_epochs: int = 6
     pair_ft_freeze_traj_decoder: bool = True
     pair_ft_freeze_backbone: str = "partial"
     pair_ft_eval_max_samples: int = 2048
-    stage5_pair_max_seen_per_epoch: int = 8
+    stage5_pair_max_seen_per_epoch: int = 32
     pair_ft_patience: int = 2
     min_stage5_pairs_for_world_ft: int = 50
     pair_finetune_gate_mode: str = "fallback_all_pairs"

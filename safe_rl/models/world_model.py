@@ -15,9 +15,9 @@ from safe_rl.data.risk import risk_targets
 from safe_rl.data.types import ActionConditionedSample, RiskLabels, RiskPairSample, RiskPrediction, SceneState, VehicleState, WorldPrediction
 from safe_rl.models.action_encoder import ActionEncoder
 
-PAIR_RANK_MARGIN = 0.02
+PAIR_RANK_MARGIN = 0.08
 SPREAD_TARGET_DELTA = 0.15
-SPREAD_MIN_GAP = 0.02
+SPREAD_MIN_GAP = 0.08
 STAGE4_MIX_EVERY_N_STEPS = 4
 
 
@@ -297,12 +297,14 @@ class ActionConditionedWorldModel(nn.Module):
         traj = _post_process_output(traj_delta, batch['predicted_his_traj'])
         pooled = torch.mean(fused_feature, dim=1)
         risk_type_logits = self.risk_type_head(pooled)
-        risk_score = torch.sigmoid(self.risk_score_head(pooled).squeeze(-1))
+        risk_score_logit = self.risk_score_head(pooled).squeeze(-1)
+        risk_score = torch.sigmoid(risk_score_logit)
         uncertainty = self.uncertainty_head(pooled).squeeze(-1)
         return {
             'traj': traj,
             'confidence': confidence,
             'risk_type_logits': risk_type_logits,
+            'risk_score_logit': risk_score_logit,
             'risk_score': risk_score,
             'uncertainty': uncertainty,
         }
@@ -330,8 +332,7 @@ class WorldModelPredictor:
         modality_risk: List[RiskPrediction] = []
         modality_scores = []
         for i in range(len(confidence)):
-            scale = float(0.6 + 0.8 * confidence[i])
-            risk_score = max(0.0, min(1.0, base_risk_score * scale))
+            risk_score = max(0.0, min(1.0, base_risk_score))
             modality_scores.append(risk_score)
             modality_risk.append(
                 RiskPrediction(
@@ -918,15 +919,21 @@ class WorldModelTrainer:
         out_b = self.model(batch_b)
         score_a = out_a['risk_score']
         score_b = out_b['risk_score']
+        score_a_logit = out_a.get('risk_score_logit')
+        score_b_logit = out_b.get('risk_score_logit')
+        if score_a_logit is None:
+            score_a_logit = torch.logit(torch.clamp(score_a, min=1e-6, max=1.0 - 1e-6))
+        if score_b_logit is None:
+            score_b_logit = torch.logit(torch.clamp(score_b, min=1e-6, max=1.0 - 1e-6))
 
-        safer = torch.where(preferred_a, score_a, score_b)
-        riskier = torch.where(preferred_a, score_b, score_a)
+        safer = torch.where(preferred_a, score_a_logit, score_b_logit)
+        riskier = torch.where(preferred_a, score_b_logit, score_a_logit)
         ranking_loss = torch.relu(PAIR_RANK_MARGIN - (riskier - safer))
         ranking_loss = torch.sum(ranking_loss * weight) / torch.clamp(torch.sum(weight), min=1.0)
 
         target_gap = torch.abs(target_a - target_b)
         spread_mask = ((target_gap > SPREAD_TARGET_DELTA) & trusted_for_spread).to(torch.float32)
-        spread_gap = torch.abs(score_a - score_b)
+        spread_gap = torch.abs(score_a_logit - score_b_logit)
         spread_loss = torch.relu(SPREAD_MIN_GAP - spread_gap) * spread_mask
         spread_denom = torch.clamp(torch.sum(spread_mask * weight), min=1.0)
         spread_loss = torch.sum(spread_loss * weight) / spread_denom

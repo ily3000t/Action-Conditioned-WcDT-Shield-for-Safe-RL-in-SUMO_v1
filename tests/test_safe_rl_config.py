@@ -253,7 +253,8 @@ def test_stage2_v2_world_pair_focus_config_loads():
     assert config.world_model.epochs == 20
     assert config.world_model.stage5_pair_weight == 1.0
     assert config.world_model.stage4_pair_weight == 0.2
-    assert config.world_model.stage5_pair_max_seen_per_epoch == 8
+    assert config.world_model.stage5_pair_max_seen_per_epoch == 32
+    assert config.world_model.pair_finetune_epochs == 6
     assert config.world_model.pair_ft_patience == 2
     assert config.tensorboard.run_name == "stage2_v2_world_pair_focus"
 
@@ -303,7 +304,8 @@ def test_risk_model_v2_defaults_enabled():
     assert config.world_model.ranking_loss_weight == 0.3
     assert config.world_model.stage5_pair_weight == 1.0
     assert config.world_model.stage4_pair_weight == 0.2
-    assert config.world_model.stage5_pair_max_seen_per_epoch == 8
+    assert config.world_model.stage5_pair_max_seen_per_epoch == 32
+    assert config.world_model.pair_finetune_epochs == 6
     assert config.world_model.pair_ft_patience == 2
     assert config.world_model.pair_ft_freeze_traj_decoder is True
     assert config.world_model.pair_ft_freeze_backbone == "partial"

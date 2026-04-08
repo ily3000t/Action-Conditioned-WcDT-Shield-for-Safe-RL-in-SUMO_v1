@@ -6,7 +6,7 @@ from safe_rl.config.config import LightRiskConfig, WorldModelConfig
 from safe_rl.data.pair_dataset import RiskPairDataset, collate_risk_pairs
 from safe_rl.data.types import RiskLabels, RiskPairSample, SceneState, VehicleState, ActionConditionedSample
 from safe_rl.models.light_risk_model import LightRiskMLP, LightRiskTrainer
-from safe_rl.models.world_model import ActionConditionedWorldModel, SceneTensorizer
+from safe_rl.models.world_model import ActionConditionedWorldModel, SceneTensorizer, WorldModelPredictor
 
 
 def _history_scene():
@@ -55,6 +55,7 @@ def test_world_model_v2_outputs_shapes():
     model = ActionConditionedWorldModel(config=config, history_steps=2)
     output = model(batch)
     assert output["risk_type_logits"].shape == (1, 3)
+    assert output["risk_score_logit"].shape == (1,)
     assert output["risk_score"].shape == (1,)
     assert output["uncertainty"].shape == (1,)
 
@@ -195,3 +196,67 @@ def test_world_pair_best_metric_prefers_accuracy_then_gap():
         {"pair_ranking_accuracy": 0.8, "same_state_score_gap": 0.04},
         {"pair_ranking_accuracy": 0.8, "same_state_score_gap": 0.05},
     ) is False
+
+
+def test_world_predictor_does_not_apply_confidence_risk_scaling():
+    class _DummyTensorizer:
+        def tensorize_inference(self, history_scene, action_id):
+            _ = (history_scene, action_id)
+            return {"candidate_action": torch.tensor([int(action_id)], dtype=torch.long)}
+
+    class _DummyModel(torch.nn.Module):
+        def forward(self, batch):
+            _ = batch
+            return {
+                "traj": torch.zeros((1, 1, 1, 1, 5), dtype=torch.float32),
+                "confidence": torch.tensor([[[2.0, 1.0, 0.5]]], dtype=torch.float32),
+                "risk_type_logits": torch.zeros((1, 3), dtype=torch.float32),
+                "risk_score_logit": torch.tensor([1.3862944], dtype=torch.float32),
+                "risk_score": torch.tensor([0.8], dtype=torch.float32),
+                "uncertainty": torch.tensor([0.1], dtype=torch.float32),
+            }
+
+    predictor = WorldModelPredictor(
+        model=_DummyModel(),
+        tensorizer=_DummyTensorizer(),
+        device=torch.device("cpu"),
+    )
+    prediction = predictor.predict(history_scene=_history_scene()[:2], action_id=4)
+    assert prediction.aggregated_risk == pytest.approx(0.8)
+    assert all(item.p_overall == pytest.approx(0.8) for item in prediction.modality_risk)
+
+
+def test_world_pair_losses_use_logit_space_when_available():
+    from safe_rl.models.world_model import WorldModelTrainer
+
+    trainer = WorldModelTrainer(config=WorldModelConfig(hidden_dim=64, future_steps=2, multimodal=2), history_steps=2, device="cpu")
+
+    class _LogitOnlyModel(torch.nn.Module):
+        def forward(self, batch):
+            actions = batch["candidate_action"]
+            action_float = actions.to(torch.float32)
+            logits = torch.where(action_float == 4.0, torch.full_like(action_float, -0.2), torch.full_like(action_float, 0.3))
+            probs = torch.full_like(action_float, 0.5)
+            bs = int(actions.shape[0])
+            return {
+                "traj": torch.zeros((bs, 1, 1, 1, 5), dtype=torch.float32),
+                "confidence": torch.zeros((bs, 1, 2), dtype=torch.float32),
+                "risk_type_logits": torch.zeros((bs, 3), dtype=torch.float32),
+                "risk_score_logit": logits,
+                "risk_score": probs,
+                "uncertainty": torch.zeros((bs,), dtype=torch.float32),
+            }
+
+    trainer.model = _LogitOnlyModel().to(trainer.device)
+    pair = RiskPairSample(
+        history_scene=_history_scene()[:2],
+        action_a=4,
+        action_b=3,
+        preferred_action=4,
+        source="stage1_probe_same_state",
+        weight=1.0,
+        meta={"target_risk_a": 0.1, "target_risk_b": 0.8, "trusted_for_spread": True},
+    )
+    ranking_loss, spread_loss = trainer._compute_pair_losses([pair])
+    assert float(ranking_loss.item()) == pytest.approx(0.0, abs=1e-6)
+    assert float(spread_loss.item()) == pytest.approx(0.0, abs=1e-6)

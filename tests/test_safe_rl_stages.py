@@ -182,6 +182,7 @@ def test_stage4_result_includes_buffer_policy_metadata(monkeypatch):
     assert result["buffer_risky_mode"] is True
     assert result["buffer_scenario_source"] == config.sim.sumo_cfg
     assert result["distill_supervision_path"].endswith("distill_supervision.json")
+    assert "stage2_model_quality_gate" in result
     assert "shield_activation_diagnostics" in result
     assert "stage4_intervention_health" in result
     assert Path(pipeline.stage4_buffer_report_path).exists()
@@ -280,6 +281,121 @@ def test_warning_summary_stage_merge_keeps_stage1_payload():
     assert merged["stage4_intervention_health"]["status"] == "critical"
     assert merged["by_stage"]["stage2"]["status"] == "degraded"
     assert merged["by_stage"]["stage4"]["status"] == "critical"
+
+
+def test_stage4_pair_builder_uses_candidate_rank_pairs_without_interventions():
+    from safe_rl.data.types import SceneState, VehicleState, dataclass_to_dict
+
+    config = _tiny_config()
+    pipeline = SafeRLPipeline(config)
+    run_id = f"ut_stage4_candidate_pairs_{uuid.uuid4().hex[:8]}"
+    pipeline._prepare_run_context(stage="stage2", run_id=run_id)
+
+    history = [SceneState(timestamp=0.0, ego_id="ego", vehicles=[VehicleState("ego", 0.0, 4.0, 20.0, 0.0, 0.0, 0.0, 0.0, 1)])] * 2
+    history_payload = dataclass_to_dict(history)
+    pipeline._write_json(
+        pipeline.distill_supervision_path,
+        {
+            "sample_count": 1,
+            "intervened_sample_count": 0,
+            "non_intervened_sample_count": 1,
+            "samples": [
+                {
+                    "history_feature": [],
+                    "raw_action": 4,
+                    "final_action": 4,
+                    "intervened": False,
+                    "raw_risk": 0.62,
+                    "final_risk": 0.62,
+                    "reason": "raw_passthrough",
+                    "candidate_evaluations": [
+                        {"action_id": 4, "evaluated": True, "fine_risk": 0.62, "uncertainty": 0.10, "distance_to_raw": 0},
+                        {"action_id": 3, "evaluated": True, "fine_risk": 0.21, "uncertainty": 0.09, "distance_to_raw": 1},
+                    ],
+                    "meta": {"episode_id": "ep_0", "episode_step": 3, "history_scene": history_payload},
+                }
+            ],
+        },
+    )
+
+    stage4_pairs, summary = pipeline._build_stage4_pair_samples()
+    candidate_pairs = [sample for sample in stage4_pairs if str(sample.source) == "stage4_candidate_rank"]
+    assert len(candidate_pairs) == 1
+    assert candidate_pairs[0].action_a == 4
+    assert candidate_pairs[0].action_b == 3
+    assert candidate_pairs[0].preferred_action == 3
+    assert candidate_pairs[0].meta["trusted_for_spread"] is False
+    assert summary["candidate_pairs_created"] == 1
+    assert summary["buffer_pairs_created"] == 0
+
+
+def test_stage2_model_quality_health_marks_critical_for_low_resolution():
+    config = _tiny_config()
+    pipeline = SafeRLPipeline(config)
+    run_id = f"ut_stage2_quality_{uuid.uuid4().hex[:8]}"
+    pipeline._prepare_run_context(stage="stage2", run_id=run_id)
+
+    critical = pipeline._build_stage2_model_quality_health(
+        {"ranking_metrics": {"world": {"unique_score_count": 8.0, "score_spread": 0.008, "same_state_score_gap": 0.02}}}
+    )
+    assert critical["status"] == "critical"
+    assert "world_unique_score_count_low" in critical["critical_warnings"]
+    assert "world_score_spread_narrow" in critical["critical_warnings"]
+
+    degraded = pipeline._build_stage2_model_quality_health(
+        {"ranking_metrics": {"world": {"unique_score_count": 20.0, "score_spread": 0.02, "same_state_score_gap": 0.005}}}
+    )
+    assert degraded["status"] == "degraded"
+    assert "world_same_state_score_gap_small" in degraded["degraded_warnings"]
+
+
+def test_stage2_quality_gate_missing_report_warns_and_continues():
+    config = _tiny_config()
+    pipeline = SafeRLPipeline(config)
+    run_id = f"ut_stage2_gate_missing_{uuid.uuid4().hex[:8]}"
+    pipeline._prepare_run_context(stage="stage4", run_id=run_id)
+
+    gate = pipeline._collect_stage2_model_quality_gate("stage4")
+    assert gate["gate_passed"] is True
+    assert gate["warning_code"] == "missing_stage2_training_report"
+    assert gate["status"] == "warning"
+
+
+def test_stage4_and_stage5_block_when_stage2_model_quality_is_critical():
+    config = _tiny_config()
+    pipeline = SafeRLPipeline(config)
+
+    run_id_stage4 = f"ut_stage4_gate_critical_{uuid.uuid4().hex[:8]}"
+    pipeline._prepare_run_context(stage="stage4", run_id=run_id_stage4)
+    pipeline._write_json(
+        pipeline.stage2_training_report_path,
+        {
+            "stage2_pair_source_health": {
+                "model_quality": {
+                    "status": "critical",
+                    "message": "critical for test",
+                }
+            }
+        },
+    )
+    with pytest.raises(RuntimeError, match="blocked by Stage2 model quality gate"):
+        pipeline.run(stage="stage4", run_id=run_id_stage4)
+
+    run_id_stage5 = f"ut_stage5_gate_critical_{uuid.uuid4().hex[:8]}"
+    pipeline._prepare_run_context(stage="stage5", run_id=run_id_stage5)
+    pipeline._write_json(
+        pipeline.stage2_training_report_path,
+        {
+            "stage2_pair_source_health": {
+                "model_quality": {
+                    "status": "critical",
+                    "message": "critical for test",
+                }
+            }
+        },
+    )
+    with pytest.raises(RuntimeError, match="blocked by Stage2 model quality gate"):
+        pipeline.run(stage="stage5", run_id=run_id_stage5)
 
 
 def test_evaluate_uses_same_policy_for_shield_off_on_and_shared_seeds(monkeypatch):

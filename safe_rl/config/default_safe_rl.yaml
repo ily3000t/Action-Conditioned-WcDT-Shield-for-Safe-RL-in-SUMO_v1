@@ -46,6 +46,8 @@ world_model:
   learning_rate: 0.0001
   batch_size: 16
   epochs: 20
+  pair_finetune_epochs: 6
+  stage5_pair_max_seen_per_epoch: 32
   uncertainty_weight: 0.1
   pair_finetune_gate_mode: "fallback_all_pairs"
 
