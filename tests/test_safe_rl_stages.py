@@ -182,8 +182,104 @@ def test_stage4_result_includes_buffer_policy_metadata(monkeypatch):
     assert result["buffer_risky_mode"] is True
     assert result["buffer_scenario_source"] == config.sim.sumo_cfg
     assert result["distill_supervision_path"].endswith("distill_supervision.json")
+    assert "shield_activation_diagnostics" in result
+    assert "stage4_intervention_health" in result
     assert Path(pipeline.stage4_buffer_report_path).exists()
 
+
+def test_stage4_intervention_health_threshold_diagnostics():
+    config = _tiny_config()
+    pipeline = SafeRLPipeline(config)
+    run_id = f"ut_stage4_health_{uuid.uuid4().hex[:8]}"
+    pipeline._prepare_run_context(stage="stage4", run_id=run_id)
+
+    diagnostics_critical = {
+        "total_steps": 9000,
+        "raw_risk_stats": {"p99": 0.12},
+        "thresholds": {"raw_threshold_used": 0.20},
+        "distill_supervision": {"intervened_sample_count": 0},
+        "replacement_happened_steps": 0,
+        "threshold_crossings": {},
+    }
+    health_critical = pipeline._build_stage4_intervention_health(
+        diagnostics=diagnostics_critical,
+        buffer_stats={"size": 0},
+    )
+    assert health_critical["status"] == "critical"
+    assert health_critical["raw_risk_p99"] == pytest.approx(0.12)
+    assert health_critical["raw_threshold_used"] == pytest.approx(0.20)
+
+    diagnostics_degraded = {
+        "total_steps": 9000,
+        "raw_risk_stats": {"p99": 0.19},
+        "thresholds": {"raw_threshold_used": 0.20},
+        "distill_supervision": {"intervened_sample_count": 0},
+        "replacement_happened_steps": 0,
+        "threshold_crossings": {},
+    }
+    health_degraded = pipeline._build_stage4_intervention_health(
+        diagnostics=diagnostics_degraded,
+        buffer_stats={"size": 0},
+    )
+    assert health_degraded["status"] == "degraded"
+    assert health_degraded["raw_vs_threshold_gap"] == pytest.approx(0.01)
+
+    diagnostics_uncertainty_degraded = {
+        "total_steps": 9000,
+        "raw_risk_stats": {"p99": 0.05},
+        "raw_uncertainty_stats": {"p99": 0.34},
+        "thresholds": {"raw_threshold_used": 0.20, "uncertainty_threshold": 0.35},
+        "distill_supervision": {"intervened_sample_count": 0},
+        "replacement_happened_steps": 0,
+        "threshold_crossings": {},
+    }
+    health_uncertainty_degraded = pipeline._build_stage4_intervention_health(
+        diagnostics=diagnostics_uncertainty_degraded,
+        buffer_stats={"size": 0},
+    )
+    assert health_uncertainty_degraded["status"] == "degraded"
+    assert health_uncertainty_degraded["raw_uncertainty_vs_threshold_gap"] == pytest.approx(0.01)
+
+    diagnostics_healthy = {
+        "total_steps": 9000,
+        "raw_risk_stats": {"p99": 0.19},
+        "thresholds": {"raw_threshold_used": 0.20},
+        "distill_supervision": {"intervened_sample_count": 12},
+        "replacement_happened_steps": 12,
+        "threshold_crossings": {},
+    }
+    health_healthy = pipeline._build_stage4_intervention_health(
+        diagnostics=diagnostics_healthy,
+        buffer_stats={"size": 12},
+    )
+    assert health_healthy["status"] == "healthy"
+
+
+
+def test_warning_summary_stage_merge_keeps_stage1_payload():
+    config = _tiny_config()
+    pipeline = SafeRLPipeline(config)
+    run_id = f"ut_warning_merge_{uuid.uuid4().hex[:8]}"
+    pipeline._prepare_run_context(stage="stage4", run_id=run_id)
+
+    stage1_payload = {
+        "overall": {"episode_count": 2},
+        "acceptance": {"passed": True},
+    }
+    pipeline._write_json(pipeline.warning_summary_report_path, stage1_payload)
+
+    stage2_health = {"status": "degraded", "message": "stage2 preflight degraded"}
+    stage4_health = {"status": "critical", "message": "stage4 zero interventions"}
+    pipeline._update_warning_summary_with_stage2_pair_source_health(stage2_health)
+    pipeline._update_warning_summary_with_stage4_intervention_health(stage4_health)
+
+    merged = pipeline._read_json(pipeline.warning_summary_report_path)
+    assert merged["overall"]["episode_count"] == 2
+    assert merged["acceptance"]["passed"] is True
+    assert merged["stage2_pair_source_health"]["status"] == "degraded"
+    assert merged["stage4_intervention_health"]["status"] == "critical"
+    assert merged["by_stage"]["stage2"]["status"] == "degraded"
+    assert merged["by_stage"]["stage4"]["status"] == "critical"
 
 
 def test_evaluate_uses_same_policy_for_shield_off_on_and_shared_seeds(monkeypatch):
@@ -2051,3 +2147,99 @@ def test_risk_v2_summary_tracks_after_trace_metrics_by_role():
     assert summary["margin_near_threshold_band_ratio_before_after"]["CONSERVATIVE"]["after"] == pytest.approx(0.66)
     assert summary["margin_near_threshold_band_ratio_before_after"]["HOLDOUT"]["after"] == pytest.approx(0.77)
     assert summary["stage5_snapshot"]["after_trace_metrics_complete"] is True
+
+
+def test_stage5_report_and_risk_v2_distill_collapse_flag_consistent(monkeypatch):
+    import pickle
+
+    config = _tiny_config()
+    config.shield_sweep.enabled = False
+    pipeline = SafeRLPipeline(config)
+    run_id = f"ut_stage5_distill_sync_{uuid.uuid4().hex[:8]}"
+    pipeline._prepare_run_context(stage="stage5", run_id=run_id)
+    pipeline.datasets_dir.mkdir(parents=True, exist_ok=True)
+    pipeline.models_dir.mkdir(parents=True, exist_ok=True)
+    pipeline.buffers_dir.mkdir(parents=True, exist_ok=True)
+
+    for path in [pipeline.train_pkl, pipeline.val_pkl, pipeline.test_pkl]:
+        with open(path, "wb") as f:
+            pickle.dump([], f)
+
+    pipeline.light_model_path.touch()
+    pipeline.world_model_path.touch()
+    pipeline._save_policy_artifact(HeuristicPolicy())
+    buffer = InterventionBuffer()
+    buffer.save(str(pipeline.buffer_path))
+    pipeline._build_predictors_from_saved_models = lambda: (None, None)
+
+    class _DummyDistiller:
+        def __init__(self, config):
+            _ = config
+            self.last_training_report = {}
+
+        def should_distill(self, buffer, supervision_samples=None):
+            _ = (buffer, supervision_samples)
+            return True
+
+        def distill(self, buffer, supervision_samples=None, tb_writer=None):
+            _ = (buffer, supervision_samples, tb_writer)
+            self.last_training_report = {
+                "source": "stage4_supervision_dataset",
+                "sample_count": 0,
+                "intervened_sample_count": 0,
+                "non_intervened_sample_count": 0,
+                "collapsed": True,
+                "skipped": False,
+            }
+            return None
+
+    def _fake_evaluate(
+        stage_config,
+        shield,
+        shielded_policy,
+        world_predictor,
+        test_samples,
+        distilled_policy=None,
+        tb_writer=None,
+        paired_results_path=None,
+        write_risk_v2_summary=True,
+    ):
+        _ = (shield, shielded_policy, world_predictor, test_samples, distilled_policy, tb_writer, write_risk_v2_summary)
+        assert write_risk_v2_summary is False
+        if paired_results_path is None:
+            paired_results_path = pipeline.stage5_paired_episode_results_path
+        paired_results_path.parent.mkdir(parents=True, exist_ok=True)
+        paired_results_path.write_text(json.dumps({"pairs": []}, ensure_ascii=False), encoding="utf-8")
+        return {
+            "comparison_mode": "same_policy_shield_off_vs_on",
+            "policy_source": str(pipeline.policy_meta_path),
+            "paired_eval": True,
+            "paired_risky_mode": True,
+            "paired_scenario_source": stage_config.sim.sumo_cfg,
+            "evaluation_seeds": [42],
+            "system_baseline": {"collision_rate": 0.2, "avg_speed": 10.0},
+            "system_shielded": {
+                "collision_rate": 0.1,
+                "avg_speed": 10.0,
+                "intervention_rate": 0.0,
+                "mean_risk_reduction": 0.0,
+                "replacement_count": 0.0,
+                "replacement_same_as_raw_count": 0.0,
+                "fallback_action_count": 0.0,
+            },
+            "delta": {"collision_reduction": 0.5, "efficiency_drop": 0.0},
+            "acceptance_passed": True,
+            "stage5_paired_episode_results_path": str(paired_results_path),
+        }
+
+    monkeypatch.setattr("safe_rl.rl.PolicyDistiller", _DummyDistiller)
+    pipeline.evaluate = _fake_evaluate
+
+    pipeline.run(stage="stage5", run_id=run_id)
+    report = json.loads(Path(pipeline.report_path).read_text(encoding="utf-8"))
+    risk_v2 = json.loads(Path(pipeline.risk_v2_eval_summary_path).read_text(encoding="utf-8"))
+
+    assert report["distill_training"]["collapsed"] is True
+    assert risk_v2["distill_action_collapse_flag"] is True
+    assert risk_v2["stage5_snapshot"]["distill_action_collapse_flag"] is True
+    assert risk_v2["stage5_snapshot"]["distill_training_report_path"] == report["distill_training_report_path"]

@@ -14,7 +14,7 @@ def test_default_config_loads():
     assert config.sim.runtime_log_dir
     assert config.sim.collision_action == "teleport"
     assert config.sim.collision_check_junctions is True
-    assert config.shield.replacement_min_risk_margin == 0.05
+    assert config.shield.replacement_min_risk_margin == 0.104
     assert config.shield.protect_merge_lateral_decisions is True
     assert config.stage1_collection.probe_enabled is True
     assert config.stage1_collection.probe_horizon_steps == 8
@@ -25,9 +25,10 @@ def test_default_config_loads():
     assert config.stage1_collection.exclude_structural_from_main is True
     assert config.world_model.min_stage5_pairs_for_world_ft == 50
     assert config.world_model.pair_finetune_gate_mode == "fallback_all_pairs"
-    assert config.shield.profile == "legacy"
+    assert config.shield.profile == "balanced"
     assert config.shield.legacy_raw_passthrough_risk_threshold == 0.20
     assert config.shield.balanced_raw_passthrough_risk_threshold == 0.193
+    assert config.shield.raw_passthrough_risk_threshold == 0.193
 
 
 def test_tensorboard_config_override():

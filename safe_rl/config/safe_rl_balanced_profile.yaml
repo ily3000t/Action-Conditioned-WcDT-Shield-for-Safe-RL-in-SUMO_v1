@@ -1,2 +1,4 @@
+# Compatibility alias profile.
+# default_safe_rl.yaml already uses balanced profile by default.
 shield:
   profile: "balanced"

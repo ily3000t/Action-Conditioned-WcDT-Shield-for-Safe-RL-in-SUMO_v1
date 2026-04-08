@@ -1,102 +1,13 @@
-﻿sim:
-  backend: "traci"
-  sumo_cfg: "scenarios/highway_merge/highway_merge.sumocfg"
-  net_file: ""
-  route_file: ""
-  runtime_log_dir: "safe_rl_output/sumo_logs"
-  sumo_home: "E:/Program Files/sumo-1.22.0"
-  sumo_bin: "E:/Program Files/sumo-1.22.0/bin/sumo.exe"
-  sumo_gui_bin: "E:/Program Files/sumo-1.22.0/bin/sumo-gui.exe"
-  netconvert_bin: "E:/Program Files/sumo-1.22.0/bin/netconvert.exe"
-  auto_build_network: true
-  force_mock: false
-  use_gui: false
-  step_length: 0.1
-  episode_steps: 300
-  history_steps: 10
-  future_steps: 20
-  normal_episodes: 200
-  risky_episodes: 200
-  risk_event_prob: 0.35
-  random_seed: 42
-  ego_vehicle_id: "ego"
-  collision_action: "teleport"
-  collision_stoptime: 1.0
-  collision_check_junctions: true
-
-dataset:
-  raw_log_dir: "safe_rl_output/raw_logs"
-  dataset_dir: "safe_rl_output/datasets"
-  train_ratio: 0.8
-  val_ratio: 0.1
-  ttc_threshold: 2.0
-  lane_violation_margin: 0.2
+# Stage2 v2 specialist override.
+# This file intentionally stays thin and inherits all other fields from default_safe_rl.yaml.
 
 light_risk:
-  hidden_dim: 128
-  batch_size: 64
-  learning_rate: 0.001
-  weight_decay: 0.0001
-  epochs: 50
   pair_finetune: false
 
 world_model:
-  multimodal: 6
-  future_steps: 20
-  hidden_dim: 256
-  learning_rate: 0.0001
-  batch_size: 16
-  epochs: 20
-  uncertainty_weight: 0.1
   pair_finetune: true
   stage5_pair_weight: 1.0
   stage4_pair_weight: 0.2
 
-shield:
-  candidate_count: 7
-  coarse_top_k: 4
-  tail_quantile: 0.9
-  risk_threshold: 0.45
-  uncertainty_threshold: 0.35
-  uncertainty_weight: 0.2
-  fallback_action: "DECEL_KEEP"
-  replacement_min_risk_margin: 0.05
-  raw_passthrough_risk_threshold: 0.20
-  protect_merge_lateral_decisions: true
-  merge_override_margin: 0.12
-
-shield_trace:
-  enabled: false
-  seed_list: []
-  save_pair_traces: true
-  trace_dir_name: "shield_trace"
-
-ppo:
-  use_sb3: true
-  total_timesteps: 50000
-  learning_rate: 0.0003
-  gamma: 0.99
-  n_steps: 512
-  batch_size: 64
-  n_epochs: 10
-  intervene_penalty: 0.1
-  device: "cpu"
-
-distill:
-  trigger_buffer_size: 500
-  batch_size: 64
-  learning_rate: 0.0005
-  epochs: 10
-  interval_steps: 10000
-
-eval:
-  eval_episodes: 30
-  seed_list: [42, 123, 2024]
-  target_collision_reduction: 0.4
-  max_efficiency_drop: 0.1
-
 tensorboard:
-  enabled: true
-  root_dir: "safe_rl_output/tensorboard"
   run_name: "stage2_v2_world_pair_focus"
-  flush_secs: 10

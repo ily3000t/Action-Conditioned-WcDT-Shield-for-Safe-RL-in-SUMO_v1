@@ -51,15 +51,15 @@ world_model:
 
 shield:
   candidate_count: 7
-  profile: "legacy"
+  profile: "balanced"
   coarse_top_k: 4
   tail_quantile: 0.9
   risk_threshold: 0.45
   uncertainty_threshold: 0.35
   uncertainty_weight: 0.2
   fallback_action: "DECEL_KEEP"
-  replacement_min_risk_margin: 0.05
-  raw_passthrough_risk_threshold: 0.20
+  replacement_min_risk_margin: 0.104
+  raw_passthrough_risk_threshold: 0.193
   legacy_replacement_min_risk_margin: 0.05
   legacy_raw_passthrough_risk_threshold: 0.20
   balanced_replacement_min_risk_margin: 0.104

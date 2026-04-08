@@ -92,6 +92,7 @@ class SafeRLPipeline:
         self.shield_margin_analysis_summary_path: Optional[Path] = None
 
         self.manifest: Dict = {}
+        self._last_stage4_collection_diagnostics: Dict[str, Any] = {}
 
     def run(self, stage: str = "all", run_id: Optional[str] = None) -> Dict:
         stage = (stage or "all").strip().lower()
@@ -1067,6 +1068,7 @@ class SafeRLPipeline:
         stage2_report["stage2_pair_source_health"]["trace_artifact_available"] = bool(stage5_pairs_created > 0)
         if bool(stage2_report["stage5_requirement_met"]):
             stage2_report["stage2_pair_source_health"]["status"] = "healthy"
+        stage2_report["stage2_pair_source_health"]["model_quality"] = self._build_stage2_model_quality_health(stage2_report)
         self._update_warning_summary_with_stage2_pair_source_health(stage2_report["stage2_pair_source_health"])
         self._write_json(self.stage2_training_report_path, stage2_report)
         self._write_risk_v2_eval_summary_from_stage2(stage2_report)
@@ -1139,6 +1141,54 @@ class SafeRLPipeline:
             health["message"] = "Stage2 pair sources look healthy."
         return health
 
+    def _build_stage2_model_quality_health(self, stage2_report: Dict[str, Any]) -> Dict[str, Any]:
+        ranking_metrics = dict(stage2_report.get("ranking_metrics", {}) or {})
+        world_metrics = dict(ranking_metrics.get("world", {}) or {})
+
+        def _to_optional_float(value: Any) -> Optional[float]:
+            if value is None:
+                return None
+            try:
+                return float(value)
+            except Exception:
+                return None
+
+        world_unique_score_count = _to_optional_float(world_metrics.get("unique_score_count"))
+        world_score_spread = _to_optional_float(world_metrics.get("score_spread"))
+        world_same_state_score_gap = _to_optional_float(world_metrics.get("same_state_score_gap"))
+        world_pair_ranking_accuracy = _to_optional_float(world_metrics.get("pair_ranking_accuracy"))
+
+        warnings: List[str] = []
+        if world_unique_score_count is not None and world_unique_score_count < 16.0:
+            warnings.append("world_unique_score_count_low")
+        if world_score_spread is not None and world_score_spread < 0.01:
+            warnings.append("world_score_spread_narrow")
+        if world_same_state_score_gap is not None and world_same_state_score_gap < 0.01:
+            warnings.append("world_same_state_score_gap_small")
+
+        status = "degraded" if warnings else "healthy"
+        message = (
+            "World pair metrics indicate limited risk-score resolution; consider stage5 bootstrap and stage2 replay."
+            if warnings
+            else "World pair metrics look healthy for current stage2 inputs."
+        )
+        return {
+            "status": status,
+            "message": message,
+            "warnings": warnings,
+            "metrics": {
+                "world_pair_ranking_accuracy": world_pair_ranking_accuracy,
+                "world_score_spread": world_score_spread,
+                "world_same_state_score_gap": world_same_state_score_gap,
+                "world_unique_score_count": world_unique_score_count,
+            },
+            "thresholds": {
+                "min_unique_score_count": 16.0,
+                "min_score_spread": 0.01,
+                "min_same_state_score_gap": 0.01,
+            },
+        }
+
     def _print_stage2_pair_source_preflight(self, health: Dict[str, Any]):
         if str(health.get("status", "healthy")) == "healthy":
             return
@@ -1157,13 +1207,182 @@ class SafeRLPipeline:
             print(f"[Pipeline][Stage2][Preflight] suggestion: {command}", flush=True)
 
     def _update_warning_summary_with_stage2_pair_source_health(self, health: Dict[str, Any]):
+        self._merge_warning_summary_stage_payload(
+            stage_key="stage2",
+            top_level_key="stage2_pair_source_health",
+            payload=health,
+        )
+
+    def _merge_warning_summary_stage_payload(
+        self,
+        stage_key: str,
+        top_level_key: str,
+        payload: Dict[str, Any],
+    ):
         if self.warning_summary_report_path is None:
             return
         warning_summary: Dict[str, Any] = {}
         if self.warning_summary_report_path.exists():
             warning_summary = self._read_json(self.warning_summary_report_path)
-        warning_summary["stage2_pair_source_health"] = dict(health)
+        if not isinstance(warning_summary, dict):
+            warning_summary = {}
+
+        payload_dict = dict(payload or {})
+        warning_summary[str(top_level_key)] = payload_dict
+
+        by_stage = warning_summary.get("by_stage", {})
+        if not isinstance(by_stage, dict):
+            by_stage = {}
+        by_stage[str(stage_key)] = dict(payload_dict)
+        warning_summary["by_stage"] = by_stage
+
         self._write_json(self.warning_summary_report_path, warning_summary)
+
+    def _safe_ratio(self, numerator: float, denominator: float) -> float:
+        if float(denominator) <= 0.0:
+            return 0.0
+        return float(numerator) / float(denominator)
+
+    def _summarize_scalar_distribution(self, values: Sequence[float]) -> Dict[str, Any]:
+        ordered = sorted(float(item) for item in values)
+        if not ordered:
+            return {
+                "count": 0,
+                "min": None,
+                "mean": None,
+                "p50": None,
+                "p90": None,
+                "p99": None,
+                "max": None,
+            }
+        return {
+            "count": int(len(ordered)),
+            "min": float(ordered[0]),
+            "mean": float(sum(ordered) / float(len(ordered))),
+            "p50": self._quantile(ordered, 0.50),
+            "p90": self._quantile(ordered, 0.90),
+            "p99": self._quantile(ordered, 0.99),
+            "max": float(ordered[-1]),
+        }
+
+    def _build_stage4_intervention_health(self, diagnostics: Dict[str, Any], buffer_stats: Dict[str, Any]) -> Dict[str, Any]:
+        diagnostics = dict(diagnostics or {})
+        thresholds = dict(diagnostics.get("thresholds", {}) or {})
+        raw_stats = dict(diagnostics.get("raw_risk_stats", {}) or {})
+        raw_uncertainty_stats = dict(diagnostics.get("raw_uncertainty_stats", {}) or {})
+        distill_counts = dict(diagnostics.get("distill_supervision", {}) or {})
+        crossing = dict(diagnostics.get("threshold_crossings", {}) or {})
+
+        total_steps = int(diagnostics.get("total_steps", 0) or 0)
+        buffer_size = int(buffer_stats.get("size", 0) or 0)
+        replacement_happened_steps = int(diagnostics.get("replacement_happened_steps", 0) or 0)
+        intervened_sample_count = int(distill_counts.get("intervened_sample_count", 0) or 0)
+        raw_threshold_used = float(thresholds.get("raw_threshold_used", 0.0) or 0.0)
+        uncertainty_threshold = float(thresholds.get("uncertainty_threshold", 0.0) or 0.0)
+        p99_raw = raw_stats.get("p99", None)
+        if p99_raw is not None:
+            p99_raw = float(p99_raw)
+        p99_raw_uncertainty = raw_uncertainty_stats.get("p99", None)
+        if p99_raw_uncertainty is not None:
+            p99_raw_uncertainty = float(p99_raw_uncertainty)
+
+        has_intervention = bool(buffer_size > 0 or replacement_happened_steps > 0 or intervened_sample_count > 0)
+        near_threshold_abs_margin = 0.03
+        near_threshold_ratio = 0.15
+        recommendation_commands: List[str] = []
+        if self.run_id:
+            recommendation_commands.extend(
+                [
+                    f"python safe_rl_main.py --config safe_rl/config/safe_rl_balanced_profile.yaml --stage stage4 --run-id {self.run_id}",
+                    f"python safe_rl_main.py --config safe_rl/config/safe_rl_balanced_profile.yaml --stage stage5 --run-id {self.run_id}",
+                ]
+            )
+        else:
+            recommendation_commands.extend(
+                [
+                    "python safe_rl_main.py --config safe_rl/config/safe_rl_balanced_profile.yaml --stage stage4 --run-id <run_id>",
+                    "python safe_rl_main.py --config safe_rl/config/safe_rl_balanced_profile.yaml --stage stage5 --run-id <run_id>",
+                ]
+            )
+
+        if has_intervention:
+            status = "healthy"
+            message = "Stage4 intervention buffer has valid interventions."
+        else:
+            raw_near_margin = max(
+                float(near_threshold_abs_margin),
+                float(raw_threshold_used) * float(near_threshold_ratio),
+            )
+            uncertainty_near_margin = max(
+                float(near_threshold_abs_margin),
+                float(uncertainty_threshold) * float(near_threshold_ratio),
+            )
+            raw_near_threshold = bool(
+                raw_threshold_used > 0.0
+                and p99_raw is not None
+                and float(p99_raw) >= float(raw_threshold_used) - float(raw_near_margin)
+            )
+            uncertainty_near_threshold = bool(
+                uncertainty_threshold > 0.0
+                and p99_raw_uncertainty is not None
+                and float(p99_raw_uncertainty) >= float(uncertainty_threshold) - float(uncertainty_near_margin)
+            )
+            near_threshold = bool(raw_near_threshold or uncertainty_near_threshold)
+            if near_threshold:
+                status = "degraded"
+                message = (
+                    "Stage4 produced zero interventions, but raw risk/uncertainty is near the active shield threshold. "
+                    "Try the balanced profile to increase replacement likelihood."
+                )
+            else:
+                status = "critical"
+                message = (
+                    "Stage4 produced zero interventions and raw risk/uncertainty is far below active thresholds. "
+                    "This often indicates risk-model score resolution/calibration limits or conservative state-distribution shift, "
+                    "not a shield replacement logic bug. Run balanced Stage4/5 first, then bootstrap stage5 pairs and rerun stage2 if needed."
+                )
+                if self.run_id:
+                    recommendation_commands.extend(
+                        [
+                            f"python safe_rl_main.py --config safe_rl/config/stage5_pair_bootstrap.yaml --stage stage5 --run-id {self.run_id}",
+                            f"python safe_rl_main.py --config safe_rl/config/stage2_v2_world_pair_focus.yaml --stage stage2 --run-id {self.run_id}",
+                        ]
+                    )
+                else:
+                    recommendation_commands.extend(
+                        [
+                            "python safe_rl_main.py --config safe_rl/config/stage5_pair_bootstrap.yaml --stage stage5 --run-id <run_id>",
+                            "python safe_rl_main.py --config safe_rl/config/stage2_v2_world_pair_focus.yaml --stage stage2 --run-id <run_id>",
+                        ]
+                    )
+
+        return {
+            "run_id": str(self.run_id or ""),
+            "created_at": dt.datetime.now().isoformat(timespec="seconds"),
+            "status": status,
+            "message": message,
+            "buffer_size": int(buffer_size),
+            "total_steps": int(total_steps),
+            "replacement_happened_steps": int(replacement_happened_steps),
+            "intervened_sample_count": int(intervened_sample_count),
+            "raw_threshold_used": float(raw_threshold_used),
+            "uncertainty_threshold_used": float(uncertainty_threshold),
+            "raw_risk_p99": p99_raw,
+            "raw_vs_threshold_gap": None if p99_raw is None else float(raw_threshold_used - p99_raw),
+            "raw_uncertainty_p99": p99_raw_uncertainty,
+            "raw_uncertainty_vs_threshold_gap": (
+                None if p99_raw_uncertainty is None else float(uncertainty_threshold - p99_raw_uncertainty)
+            ),
+            "threshold_crossings": dict(crossing),
+            "recommendation_commands": recommendation_commands,
+        }
+
+    def _update_warning_summary_with_stage4_intervention_health(self, health: Dict[str, Any]):
+        self._merge_warning_summary_stage_payload(
+            stage_key="stage4",
+            top_level_key="stage4_intervention_health",
+            payload=health,
+        )
 
     def _run_stage3(self, tb_manager: TensorboardManager) -> Dict:
         print("[Pipeline] stage3: train online policy with shield", flush=True)
@@ -1212,6 +1431,7 @@ class SafeRLPipeline:
         )
         stats = intervention_buffer.stats()
         buffer_metadata = self._build_stage4_buffer_metadata(stage_config, policy_meta)
+        shield_activation_diagnostics = dict(getattr(self, "_last_stage4_collection_diagnostics", {}) or {})
         distill_supervision_summary = {}
         if self.distill_supervision_path is not None and self.distill_supervision_path.exists():
             distill_payload = self._read_json(self.distill_supervision_path)
@@ -1221,12 +1441,21 @@ class SafeRLPipeline:
                 "non_intervened_sample_count": int(distill_payload.get("non_intervened_sample_count", 0)),
                 "skipped_invalid_history_feature_count": int(distill_payload.get("skipped_invalid_history_feature_count", 0)),
             }
+            if shield_activation_diagnostics:
+                shield_activation_diagnostics["distill_supervision"] = dict(distill_supervision_summary)
+        stage4_intervention_health = self._build_stage4_intervention_health(
+            diagnostics=shield_activation_diagnostics,
+            buffer_stats=stats,
+        )
+        self._update_warning_summary_with_stage4_intervention_health(stage4_intervention_health)
         stage4_report = {
             **buffer_metadata,
             "buffer_path": str(self.buffer_path),
             "buffer_stats": stats,
             "distill_supervision_path": str(self.distill_supervision_path),
             "distill_supervision_summary": distill_supervision_summary,
+            "shield_activation_diagnostics": shield_activation_diagnostics,
+            "stage4_intervention_health": stage4_intervention_health,
         }
         self._write_json(self.stage4_buffer_report_path, stage4_report)
 
@@ -1305,6 +1534,7 @@ class SafeRLPipeline:
             test_samples=test_samples,
             distilled_policy=distilled_policy,
             tb_writer=tb_manager.get_writer("eval"),
+            write_risk_v2_summary=False,
         )
         buffer_stats = buffer.stats()
         buffer_metadata = self._load_stage4_buffer_report() or self._build_stage4_buffer_metadata(stage_config, policy_meta)
@@ -1331,6 +1561,7 @@ class SafeRLPipeline:
         evaluation["shield_contribution_validated"] = bool(evaluation["attribution_passed"])
         evaluation["conclusion_text"] = self._build_evaluation_conclusion(evaluation)
         self._save_report(evaluation)
+        self._write_risk_v2_eval_summary_from_stage5(evaluation)
         return evaluation
 
     def train_models(
@@ -1596,6 +1827,25 @@ class SafeRLPipeline:
         distill_intervened_count = 0
         distill_non_intervened_count = 0
         distill_skipped_invalid_feature_count = 0
+        raw_risk_values: List[float] = []
+        final_risk_values: List[float] = []
+        raw_uncertainty_values: List[float] = []
+        final_uncertainty_values: List[float] = []
+        threshold_crossings = {
+            "raw_ge_raw_passthrough_threshold_count": 0,
+            "raw_ge_risk_threshold_count": 0,
+            "raw_ge_uncertainty_threshold_count": 0,
+            "final_ge_raw_passthrough_threshold_count": 0,
+            "final_ge_risk_threshold_count": 0,
+            "final_ge_uncertainty_threshold_count": 0,
+        }
+        shield_blocked_steps = 0
+        replacement_happened_steps = 0
+        total_steps = 0
+        raw_passthrough_threshold = float(stage_config.shield.raw_passthrough_risk_threshold)
+        risk_threshold = float(stage_config.shield.risk_threshold)
+        uncertainty_threshold = float(stage_config.shield.uncertainty_threshold)
+        raw_threshold_used = min(risk_threshold, raw_passthrough_threshold)
 
         eval_seeds = self._resolve_eval_seeds(stage_config.eval.eval_episodes)
         for episode_index in range(stage_config.eval.eval_episodes):
@@ -1608,6 +1858,29 @@ class SafeRLPipeline:
                 telemetry.on_step(info)
                 done = terminated or truncated
                 last_episode_id = str(info.get("episode_id", "") or last_episode_id)
+                total_steps += 1
+                raw_risk = float(info.get("risk_raw", 0.0))
+                final_risk = float(info.get("risk_final", 0.0))
+                raw_uncertainty = float(info.get("raw_uncertainty", 0.0))
+                final_uncertainty = float(info.get("final_uncertainty", 0.0))
+                raw_risk_values.append(raw_risk)
+                final_risk_values.append(final_risk)
+                raw_uncertainty_values.append(raw_uncertainty)
+                final_uncertainty_values.append(final_uncertainty)
+                if raw_risk >= raw_passthrough_threshold:
+                    threshold_crossings["raw_ge_raw_passthrough_threshold_count"] += 1
+                if raw_risk >= risk_threshold:
+                    threshold_crossings["raw_ge_risk_threshold_count"] += 1
+                if raw_uncertainty >= uncertainty_threshold:
+                    threshold_crossings["raw_ge_uncertainty_threshold_count"] += 1
+                if final_risk >= raw_passthrough_threshold:
+                    threshold_crossings["final_ge_raw_passthrough_threshold_count"] += 1
+                if final_risk >= risk_threshold:
+                    threshold_crossings["final_ge_risk_threshold_count"] += 1
+                if final_uncertainty >= uncertainty_threshold:
+                    threshold_crossings["final_ge_uncertainty_threshold_count"] += 1
+                shield_blocked_steps += int(bool(info.get("shield_blocked_steps", 0)))
+                replacement_happened_steps += int(bool(info.get("replacement_happened", False)))
                 if distill_supervision_path is not None and env.last_transition is not None:
                     history_scene = env.last_transition["history_scene"]
                     history_feature = encode_history(history_scene)
@@ -1670,6 +1943,55 @@ class SafeRLPipeline:
                 },
             )
 
+        threshold_crossings["raw_ge_raw_passthrough_threshold_ratio"] = self._safe_ratio(
+            threshold_crossings["raw_ge_raw_passthrough_threshold_count"],
+            total_steps,
+        )
+        threshold_crossings["raw_ge_risk_threshold_ratio"] = self._safe_ratio(
+            threshold_crossings["raw_ge_risk_threshold_count"],
+            total_steps,
+        )
+        threshold_crossings["raw_ge_uncertainty_threshold_ratio"] = self._safe_ratio(
+            threshold_crossings["raw_ge_uncertainty_threshold_count"],
+            total_steps,
+        )
+        threshold_crossings["final_ge_raw_passthrough_threshold_ratio"] = self._safe_ratio(
+            threshold_crossings["final_ge_raw_passthrough_threshold_count"],
+            total_steps,
+        )
+        threshold_crossings["final_ge_risk_threshold_ratio"] = self._safe_ratio(
+            threshold_crossings["final_ge_risk_threshold_count"],
+            total_steps,
+        )
+        threshold_crossings["final_ge_uncertainty_threshold_ratio"] = self._safe_ratio(
+            threshold_crossings["final_ge_uncertainty_threshold_count"],
+            total_steps,
+        )
+        self._last_stage4_collection_diagnostics = {
+            "run_id": str(self.run_id or ""),
+            "created_at": dt.datetime.now().isoformat(timespec="seconds"),
+            "total_steps": int(total_steps),
+            "raw_risk_stats": self._summarize_scalar_distribution(raw_risk_values),
+            "final_risk_stats": self._summarize_scalar_distribution(final_risk_values),
+            "raw_uncertainty_stats": self._summarize_scalar_distribution(raw_uncertainty_values),
+            "final_uncertainty_stats": self._summarize_scalar_distribution(final_uncertainty_values),
+            "thresholds": {
+                "raw_passthrough_risk_threshold": float(raw_passthrough_threshold),
+                "risk_threshold": float(risk_threshold),
+                "raw_threshold_used": float(raw_threshold_used),
+                "uncertainty_threshold": float(uncertainty_threshold),
+            },
+            "threshold_crossings": dict(threshold_crossings),
+            "shield_blocked_steps": int(shield_blocked_steps),
+            "replacement_happened_steps": int(replacement_happened_steps),
+            "distill_supervision": {
+                "sample_count": int(len(distill_supervision_samples)),
+                "intervened_sample_count": int(distill_intervened_count),
+                "non_intervened_sample_count": int(distill_non_intervened_count),
+                "skipped_invalid_history_feature_count": int(distill_skipped_invalid_feature_count),
+            },
+        }
+
         env.close()
         return buffer
 
@@ -1683,6 +2005,7 @@ class SafeRLPipeline:
         distilled_policy=None,
         tb_writer=None,
         paired_results_path: Optional[Path] = None,
+        write_risk_v2_summary: bool = True,
     ) -> Dict:
         from safe_rl.rl.env import create_env
 
@@ -1817,7 +2140,8 @@ class SafeRLPipeline:
             distill_env.close()
             result["system_distilled"] = distilled_metrics
 
-        self._write_risk_v2_eval_summary_from_stage5(result)
+        if write_risk_v2_summary:
+            self._write_risk_v2_eval_summary_from_stage5(result)
         return result
 
     def _shield_sweep_enabled(self) -> bool:
@@ -1917,6 +2241,7 @@ class SafeRLPipeline:
                 tb_writer=tb_manager.get_writer(f"buffer_sweep_{variant_name}"),
             )
             stats = intervention_buffer.stats()
+            shield_activation_diagnostics = dict(getattr(self, "_last_stage4_collection_diagnostics", {}) or {})
             variant_report = {
                 "mode": "shield_sweep_variant",
                 "variant_name": variant_name,
@@ -1926,6 +2251,7 @@ class SafeRLPipeline:
                 **base_metadata,
                 "buffer_path": str(buffer_path),
                 "buffer_stats": stats,
+                "shield_activation_diagnostics": shield_activation_diagnostics,
             }
             self._write_json(report_path, variant_report)
             self._register_shield_sweep_artifacts(

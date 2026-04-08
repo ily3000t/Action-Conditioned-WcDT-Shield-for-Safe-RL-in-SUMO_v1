@@ -74,10 +74,8 @@ class SafetyShield:
 
         raw_eval = evaluations[policy_action]
         raw_threshold = min(float(self.config.risk_threshold), float(self.config.raw_passthrough_risk_threshold))
-        shield_blocked = bool(
-            (raw_eval.fine_risk is not None and raw_eval.fine_risk > raw_threshold)
-            or (raw_eval.uncertainty is not None and raw_eval.uncertainty > self.config.uncertainty_threshold)
-        )
+        block_trigger = self._resolve_block_trigger(raw_eval, raw_threshold)
+        shield_blocked = bool(block_trigger != "none")
         merge_phase_active = self._is_merge_coordination_phase(history_scene)
 
         if not shield_blocked:
@@ -95,6 +93,8 @@ class SafetyShield:
                 replacement_margin=0.0,
                 constraint_reason=constraint_reason,
                 merge_phase_active=merge_phase_active,
+                raw_threshold_used=raw_threshold,
+                block_trigger=block_trigger,
             )
 
         safe_candidates = [
@@ -131,6 +131,8 @@ class SafetyShield:
                 replacement_margin=margin,
                 constraint_reason="",
                 merge_phase_active=merge_phase_active,
+                raw_threshold_used=raw_threshold,
+                block_trigger=block_trigger,
             )
 
         if safe_candidates:
@@ -148,6 +150,8 @@ class SafetyShield:
                 replacement_margin=0.0,
                 constraint_reason=overall_reason,
                 merge_phase_active=merge_phase_active,
+                raw_threshold_used=raw_threshold,
+                block_trigger=block_trigger,
             )
 
         fallback = fallback_action_id()
@@ -173,6 +177,8 @@ class SafetyShield:
             replacement_margin=max(0.0, float(raw_eval.fine_risk or 0.0) - float(fallback_eval.fine_risk or 0.0)),
             constraint_reason="fallback_due_to_no_safe_candidate",
             merge_phase_active=merge_phase_active,
+            raw_threshold_used=raw_threshold,
+            block_trigger=block_trigger,
         )
 
     def _evaluate_candidate(
@@ -208,6 +214,8 @@ class SafetyShield:
         replacement_margin: float,
         constraint_reason: str,
         merge_phase_active: bool,
+        raw_threshold_used: float,
+        block_trigger: str,
     ) -> ShieldDecision:
         selected_eval.selected = True
         final_action = selected_eval.action_id
@@ -225,8 +233,13 @@ class SafetyShield:
         best_eval = nonfallback_evaluations[0] if nonfallback_evaluations else raw_eval
         best_candidate_action = int(best_eval.action_id) if best_eval is not None else int(policy_action)
         raw_action_fine_risk = float(raw_eval.fine_risk or 0.0)
+        raw_action_uncertainty = float(raw_eval.uncertainty or 0.0)
         best_candidate_fine_risk = float(best_eval.fine_risk or raw_action_fine_risk) if best_eval is not None else raw_action_fine_risk
+        best_candidate_uncertainty = float(best_eval.uncertainty or raw_action_uncertainty) if best_eval is not None else raw_action_uncertainty
         best_margin = float(raw_action_fine_risk - best_candidate_fine_risk)
+        raw_vs_threshold_margin = float(raw_action_fine_risk - float(raw_threshold_used))
+        uncertainty_threshold_used = float(self.config.uncertainty_threshold)
+        raw_uncertainty_vs_threshold_margin = float(raw_action_uncertainty - uncertainty_threshold_used)
         no_safe_candidate = bool(reason == "all_candidates_high_risk_or_uncertain")
         raw_already_best = bool(not replacement_happened and not fallback_used and best_candidate_action == int(policy_action))
         primary_nonreplacement_reason = ""
@@ -243,6 +256,9 @@ class SafetyShield:
             "candidate_count": int(len(candidates)),
             "evaluated_candidate_count": int(sum(1 for ev in evaluations.values() if ev.evaluated)),
             "shield_blocked": bool(reason != "raw_action_safe"),
+            "block_trigger": str(block_trigger),
+            "raw_threshold_used": float(raw_threshold_used),
+            "raw_vs_threshold_margin": float(raw_vs_threshold_margin),
             "raw_world_prediction": raw_eval.world_prediction,
             "fallback_used": bool(fallback_used),
             "replacement_happened": bool(replacement_happened),
@@ -257,6 +273,10 @@ class SafetyShield:
             "best_candidate_action": int(best_candidate_action),
             "best_candidate_fine_risk": float(best_candidate_fine_risk),
             "raw_action_fine_risk": float(raw_action_fine_risk),
+            "raw_action_uncertainty": float(raw_action_uncertainty),
+            "final_action_uncertainty": float(best_candidate_uncertainty),
+            "uncertainty_threshold_used": float(uncertainty_threshold_used),
+            "raw_uncertainty_vs_threshold_margin": float(raw_uncertainty_vs_threshold_margin),
             "best_margin": float(best_margin),
             "no_safe_candidate": bool(no_safe_candidate),
             "raw_already_best": bool(raw_already_best),
@@ -274,6 +294,17 @@ class SafetyShield:
             candidate_risks={k: float(v.fine_risk) for k, v in evaluations.items() if v.evaluated and v.fine_risk is not None},
             meta=meta,
         )
+
+    def _resolve_block_trigger(self, raw_eval: CandidateEvaluation, raw_threshold: float) -> str:
+        risk_blocked = bool(raw_eval.fine_risk is not None and raw_eval.fine_risk > raw_threshold)
+        uncertainty_blocked = bool(raw_eval.uncertainty is not None and raw_eval.uncertainty > self.config.uncertainty_threshold)
+        if risk_blocked and uncertainty_blocked:
+            return "risk_and_uncertainty"
+        if risk_blocked:
+            return "risk"
+        if uncertainty_blocked:
+            return "uncertainty"
+        return "none"
 
     def _serialize_candidate_evaluations(
         self,
