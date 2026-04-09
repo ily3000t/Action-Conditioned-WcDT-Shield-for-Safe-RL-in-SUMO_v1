@@ -32,6 +32,10 @@ dataset:
   ttc_threshold: 2.0
   lane_violation_margin: 0.2
 
+stage1_collection:
+  probe_pair_min_target_gap: 0.01
+  probe_pair_max_pairs_per_step: 12
+
 light_risk:
   hidden_dim: 128
   batch_size: 64
@@ -48,6 +52,9 @@ world_model:
   epochs: 20
   pair_finetune_epochs: 6
   stage5_pair_max_seen_per_epoch: 32
+  pair_ft_tie_gap_epsilon: 0.01
+  pair_ft_min_score_spread_floor: 0.008
+  pair_ft_min_same_state_gap_floor: 0.008
   uncertainty_weight: 0.1
   pair_finetune_gate_mode: "fallback_all_pairs"
 

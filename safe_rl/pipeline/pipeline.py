@@ -1365,9 +1365,24 @@ class SafeRLPipeline:
             payload["message"] = "Stage2 model quality gate passed."
         return payload
 
-    def _enforce_stage2_model_quality_gate(self, stage_name: str) -> Dict[str, Any]:
+    def _enforce_stage2_model_quality_gate(self, stage_name: str, allow_critical: bool = False) -> Dict[str, Any]:
         gate = self._collect_stage2_model_quality_gate(stage_name)
         if bool(gate.get("gate_passed", True)):
+            return gate
+        if bool(allow_critical) and str(gate.get("model_quality_status", "")).strip().lower() == "critical":
+            gate["gate_passed"] = True
+            gate["allowed_with_warning"] = True
+            gate["override_reason"] = "allow_critical_for_stage4_self_recovery"
+            gate["status"] = "degraded"
+            gate["message"] = (
+                str(gate.get("message", "")).strip()
+                + " Stage4 is allowed to proceed to collect self-recovery candidate pairs."
+            ).strip()
+            print(
+                f"[Pipeline][{stage_name}] warning: Stage2 model quality is critical, "
+                "but stage is allowed for self-recovery candidate collection.",
+                flush=True,
+            )
             return gate
         message = (
             f"[Pipeline][{stage_name}] blocked by Stage2 model quality gate: "
@@ -1572,6 +1587,13 @@ class SafeRLPipeline:
             payload=health,
         )
 
+    def _update_warning_summary_with_stage4_model_quality_gate(self, gate: Dict[str, Any]):
+        self._merge_warning_summary_stage_payload(
+            stage_key="stage4_gate",
+            top_level_key="stage4_model_quality_gate",
+            payload=gate,
+        )
+
     def _run_stage3(self, tb_manager: TensorboardManager) -> Dict:
         print("[Pipeline] stage3: train online policy with shield", flush=True)
         self._require_files("stage3", [self.light_model_path, self.world_model_path])
@@ -1591,7 +1613,8 @@ class SafeRLPipeline:
 
     def _run_stage4(self, tb_manager: TensorboardManager) -> Dict:
         print("[Pipeline] stage4: collect intervention buffer", flush=True)
-        stage2_model_quality_gate = self._enforce_stage2_model_quality_gate("stage4")
+        stage2_model_quality_gate = self._enforce_stage2_model_quality_gate("stage4", allow_critical=True)
+        self._update_warning_summary_with_stage4_model_quality_gate(stage2_model_quality_gate)
         self._require_files("stage4", [self.light_model_path, self.world_model_path, self.policy_meta_path])
 
         stage_config = self._config_with_run_paths()

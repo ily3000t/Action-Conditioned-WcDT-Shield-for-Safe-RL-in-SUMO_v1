@@ -361,12 +361,18 @@ def test_stage2_quality_gate_missing_report_warns_and_continues():
     assert gate["status"] == "warning"
 
 
-def test_stage4_and_stage5_block_when_stage2_model_quality_is_critical():
+def test_stage4_allows_critical_stage2_for_self_recovery_but_stage5_blocks():
     config = _tiny_config()
     pipeline = SafeRLPipeline(config)
 
     run_id_stage4 = f"ut_stage4_gate_critical_{uuid.uuid4().hex[:8]}"
     pipeline._prepare_run_context(stage="stage4", run_id=run_id_stage4)
+    pipeline.models_dir.mkdir(parents=True, exist_ok=True)
+    pipeline.light_model_path.touch()
+    pipeline.world_model_path.touch()
+    pipeline._save_policy_artifact(HeuristicPolicy())
+    pipeline._build_predictors_from_saved_models = lambda: (None, None)
+    pipeline.collect_interventions = lambda *args, **kwargs: InterventionBuffer()
     pipeline._write_json(
         pipeline.stage2_training_report_path,
         {
@@ -378,8 +384,9 @@ def test_stage4_and_stage5_block_when_stage2_model_quality_is_critical():
             }
         },
     )
-    with pytest.raises(RuntimeError, match="blocked by Stage2 model quality gate"):
-        pipeline.run(stage="stage4", run_id=run_id_stage4)
+    stage4_result = pipeline.run(stage="stage4", run_id=run_id_stage4)["stage4"]
+    assert stage4_result["stage2_model_quality_gate"]["allowed_with_warning"] is True
+    assert stage4_result["stage2_model_quality_gate"]["model_quality_status"] == "critical"
 
     run_id_stage5 = f"ut_stage5_gate_critical_{uuid.uuid4().hex[:8]}"
     pipeline._prepare_run_context(stage="stage5", run_id=run_id_stage5)

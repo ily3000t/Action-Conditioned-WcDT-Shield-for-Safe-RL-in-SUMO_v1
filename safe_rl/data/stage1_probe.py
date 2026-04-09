@@ -52,6 +52,9 @@ class Stage1ProbeRunner:
             'selected_by_risk_signal': 0,
             'episodes_with_event_window': 0,
             'episodes_with_actual_risk_signal': 0,
+            'pairs_dropped_small_gap': 0,
+            'pairs_capped_by_budget': 0,
+            'pairs_kept_strong_signal': 0,
         }
         self.bucket_summary = {}
 
@@ -371,6 +374,9 @@ class Stage1ProbeRunner:
         candidate_records: Sequence[Dict[str, Any]],
     ) -> List[RiskPairSample]:
         pairs: List[RiskPairSample] = []
+        min_pair_gap = max(0.0, float(getattr(self.config.stage1_collection, 'probe_pair_min_target_gap', 0.0) or 0.0))
+        max_pairs_per_step = int(getattr(self.config.stage1_collection, 'probe_pair_max_pairs_per_step', 0) or 0)
+        pair_candidates: List[Tuple[Tuple[float, float, float, int, int], Dict[str, Any]]] = []
         ordered = sorted(list(candidate_records), key=lambda item: int(item.get('candidate_action', -1)))
         for idx in range(len(ordered)):
             for jdx in range(idx + 1, len(ordered)):
@@ -380,28 +386,65 @@ class Stage1ProbeRunner:
                 if preferred is None:
                     continue
                 target_gap = abs(float(left.get('overall_proxy_risk', 0.0)) - float(right.get('overall_proxy_risk', 0.0)))
+                if target_gap < min_pair_gap:
+                    self.summary['pairs_dropped_small_gap'] += 1
+                    continue
                 trusted_for_spread = self._probe_pair_trusted_for_spread(left, right)
-                pairs.append(
-                    RiskPairSample(
-                        history_scene=list(history_scene),
-                        action_a=int(left['candidate_action']),
-                        action_b=int(right['candidate_action']),
-                        preferred_action=int(preferred),
-                        source='stage1_probe_same_state',
-                        weight=0.7,
-                        meta={
-                            'episode_id': episode.episode_id,
-                            'step_index': int(step_index),
-                            'target_risk_a': float(left.get('overall_proxy_risk', 0.0)),
-                            'target_risk_b': float(right.get('overall_proxy_risk', 0.0)),
-                            'hard_negative': bool(left.get('collision', False) != right.get('collision', False)),
-                            'trusted_for_spread': bool(trusted_for_spread),
+                hard_negative = bool(left.get('collision', False) != right.get('collision', False))
+                priority = (
+                    0.0 if hard_negative else 1.0,
+                    0.0 if trusted_for_spread else 1.0,
+                    -float(target_gap),
+                    int(left['candidate_action']),
+                    int(right['candidate_action']),
+                )
+                pair_candidates.append(
+                    (
+                        priority,
+                        {
+                            'left': left,
+                            'right': right,
+                            'preferred': int(preferred),
                             'target_gap': float(target_gap),
-                            'clear_dominance': bool(trusted_for_spread),
-                            **same_state_proof,
+                            'trusted_for_spread': bool(trusted_for_spread),
+                            'hard_negative': bool(hard_negative),
                         },
                     )
                 )
+
+        pair_candidates.sort(key=lambda item: item[0])
+        if max_pairs_per_step > 0 and len(pair_candidates) > max_pairs_per_step:
+            self.summary['pairs_capped_by_budget'] += len(pair_candidates) - max_pairs_per_step
+            pair_candidates = pair_candidates[:max_pairs_per_step]
+
+        for _, item in pair_candidates:
+            left = dict(item['left'])
+            right = dict(item['right'])
+            hard_negative = bool(item['hard_negative'])
+            trusted_for_spread = bool(item['trusted_for_spread'])
+            if hard_negative or trusted_for_spread:
+                self.summary['pairs_kept_strong_signal'] += 1
+            pairs.append(
+                RiskPairSample(
+                    history_scene=list(history_scene),
+                    action_a=int(left['candidate_action']),
+                    action_b=int(right['candidate_action']),
+                    preferred_action=int(item['preferred']),
+                    source='stage1_probe_same_state',
+                    weight=0.7,
+                    meta={
+                        'episode_id': episode.episode_id,
+                        'step_index': int(step_index),
+                        'target_risk_a': float(left.get('overall_proxy_risk', 0.0)),
+                        'target_risk_b': float(right.get('overall_proxy_risk', 0.0)),
+                        'hard_negative': bool(hard_negative),
+                        'trusted_for_spread': bool(trusted_for_spread),
+                        'target_gap': float(item['target_gap']),
+                        'clear_dominance': bool(trusted_for_spread),
+                        **same_state_proof,
+                    },
+                )
+            )
         return pairs
 
     def _preferred_probe_action(self, left: Dict[str, Any], right: Dict[str, Any]) -> Optional[int]:

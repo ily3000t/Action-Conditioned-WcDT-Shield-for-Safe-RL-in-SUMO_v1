@@ -827,14 +827,25 @@ class WorldModelTrainer:
         return batch_samples, batch_ids
 
     def _is_better_pair_ft_metrics(self, current_metrics: Dict[str, float], best_metrics: Dict[str, float]) -> bool:
+        min_spread_floor = float(getattr(self.config, 'pair_ft_min_score_spread_floor', 0.0) or 0.0)
+        min_gap_floor = float(getattr(self.config, 'pair_ft_min_same_state_gap_floor', 0.0) or 0.0)
+        current_spread = float((current_metrics or {}).get('score_spread', 0.0))
+        best_spread = float((best_metrics or {}).get('score_spread', 0.0))
+        current_gap = float((current_metrics or {}).get('same_state_score_gap', 0.0))
+        best_gap = float((best_metrics or {}).get('same_state_score_gap', 0.0))
+        current_collapsed = (current_spread < min_spread_floor) or (current_gap < min_gap_floor)
+        best_collapsed = (best_spread < min_spread_floor) or (best_gap < min_gap_floor)
+        if current_collapsed and not best_collapsed:
+            return False
+        if not current_collapsed and best_collapsed:
+            return True
+
         current_acc = float((current_metrics or {}).get('pair_ranking_accuracy', 0.0))
         best_acc = float((best_metrics or {}).get('pair_ranking_accuracy', 0.0))
         if current_acc > best_acc + 1e-9:
             return True
         if current_acc < best_acc - 1e-9:
             return False
-        current_gap = float((current_metrics or {}).get('same_state_score_gap', 0.0))
-        best_gap = float((best_metrics or {}).get('same_state_score_gap', 0.0))
         return current_gap > best_gap + 1e-9
 
     @torch.no_grad()
@@ -857,23 +868,29 @@ class WorldModelTrainer:
             drop_last=False,
             collate_fn=collate_risk_pairs,
         )
-        for batch in loader:
-            batch_a, batch_b, preferred_a, target_a, target_b, _, hard_negative, _ = self._tensorize_pair_batch(batch)
-            score_a = self.model(batch_a)['risk_score']
-            score_b = self.model(batch_b)['risk_score']
-            pred_pref_a = score_a <= score_b
-            correct += int(torch.sum(pred_pref_a == preferred_a).item())
-            if hard_negative.any():
-                hard_correct += int(torch.sum((pred_pref_a == preferred_a) & hard_negative).item())
-                hard_total += int(torch.sum(hard_negative).item())
-            gap = torch.abs(score_a - score_b).detach().cpu().numpy()
-            score_gaps.extend(float(item) for item in gap)
-            spread = torch.std(torch.stack([score_a, score_b], dim=-1), dim=-1).detach().cpu().numpy()
-            score_spreads.extend(float(item) for item in spread)
-            brier_terms.extend(float(item) for item in ((score_a - target_a) ** 2).detach().cpu().numpy())
-            brier_terms.extend(float(item) for item in ((score_b - target_b) ** 2).detach().cpu().numpy())
-            unique_scores.update(round(float(item), 6) for item in score_a.detach().cpu().numpy())
-            unique_scores.update(round(float(item), 6) for item in score_b.detach().cpu().numpy())
+        was_training = bool(self.model.training)
+        self.model.eval()
+        try:
+            for batch in loader:
+                batch_a, batch_b, preferred_a, target_a, target_b, _, hard_negative, _ = self._tensorize_pair_batch(batch)
+                score_a = self.model(batch_a)['risk_score']
+                score_b = self.model(batch_b)['risk_score']
+                pred_pref_a = score_a <= score_b
+                correct += int(torch.sum(pred_pref_a == preferred_a).item())
+                if hard_negative.any():
+                    hard_correct += int(torch.sum((pred_pref_a == preferred_a) & hard_negative).item())
+                    hard_total += int(torch.sum(hard_negative).item())
+                gap = torch.abs(score_a - score_b).detach().cpu().numpy()
+                score_gaps.extend(float(item) for item in gap)
+                spread = torch.std(torch.stack([score_a, score_b], dim=-1), dim=-1).detach().cpu().numpy()
+                score_spreads.extend(float(item) for item in spread)
+                brier_terms.extend(float(item) for item in ((score_a - target_a) ** 2).detach().cpu().numpy())
+                brier_terms.extend(float(item) for item in ((score_b - target_b) ** 2).detach().cpu().numpy())
+                unique_scores.update(round(float(item), 6) for item in score_a.detach().cpu().numpy())
+                unique_scores.update(round(float(item), 6) for item in score_b.detach().cpu().numpy())
+        finally:
+            if was_training:
+                self.model.train()
 
         total = max(1, len(pair_samples))
         return {
@@ -928,10 +945,15 @@ class WorldModelTrainer:
 
         safer = torch.where(preferred_a, score_a_logit, score_b_logit)
         riskier = torch.where(preferred_a, score_b_logit, score_a_logit)
-        ranking_loss = torch.relu(PAIR_RANK_MARGIN - (riskier - safer))
-        ranking_loss = torch.sum(ranking_loss * weight) / torch.clamp(torch.sum(weight), min=1.0)
-
         target_gap = torch.abs(target_a - target_b)
+        tie_gap_epsilon = max(0.0, float(getattr(self.config, 'pair_ft_tie_gap_epsilon', 0.0) or 0.0))
+        tie_mask = (target_gap >= tie_gap_epsilon).to(torch.float32)
+        gap_scale = torch.clamp((target_gap - tie_gap_epsilon) / max(1e-6, 1.0 - tie_gap_epsilon), min=0.0, max=1.0)
+        ranking_weight = weight * tie_mask * (0.25 + 0.75 * gap_scale)
+        ranking_loss = torch.relu(PAIR_RANK_MARGIN - (riskier - safer))
+        ranking_denom = torch.clamp(torch.sum(ranking_weight), min=1.0)
+        ranking_loss = torch.sum(ranking_loss * ranking_weight) / ranking_denom
+
         spread_mask = ((target_gap > SPREAD_TARGET_DELTA) & trusted_for_spread).to(torch.float32)
         spread_gap = torch.abs(score_a_logit - score_b_logit)
         spread_loss = torch.relu(SPREAD_MIN_GAP - spread_gap) * spread_mask

@@ -1,5 +1,6 @@
 import json
 from pathlib import Path
+from types import SimpleNamespace
 
 from safe_rl.config.config import SafeRLConfig
 from safe_rl.data.collector import SumoDataCollector
@@ -261,3 +262,34 @@ def test_stage1_probe_bucket_keeps_short_risky_episode_as_clean_risky():
 
     assert episode.meta["collection_bucket"] == "clean_risky"
     assert summary["episodes_by_bucket"]["clean_risky"] == 1
+
+
+def test_stage1_probe_pair_filter_and_budget_prioritize_strong_signals():
+    from safe_rl.data.stage1_probe import Stage1ProbeRunner
+
+    config = SafeRLConfig()
+    config.stage1_collection.probe_pair_min_target_gap = 0.01
+    config.stage1_collection.probe_pair_max_pairs_per_step = 2
+
+    runner = Stage1ProbeRunner(config=config, probe_backend=None)
+    episode = SimpleNamespace(episode_id="ep_probe_budget")
+    history = [_scene(), _scene()]
+    candidates = [
+        {"candidate_action": 0, "overall_proxy_risk": 0.50, "collision": False, "min_ttc": 3.0, "min_distance": 12.0},
+        {"candidate_action": 1, "overall_proxy_risk": 0.505, "collision": False, "min_ttc": 3.0, "min_distance": 12.0},
+        {"candidate_action": 2, "overall_proxy_risk": 0.80, "collision": True, "min_ttc": 1.0, "min_distance": 2.0},
+        {"candidate_action": 3, "overall_proxy_risk": 0.20, "collision": False, "min_ttc": 6.0, "min_distance": 20.0},
+    ]
+
+    pairs = runner._probe_pairs_from_candidates(
+        episode=episode,
+        step_index=5,
+        history_scene=history,
+        same_state_proof={"history_hash": "abc"},
+        candidate_records=candidates,
+    )
+
+    assert len(pairs) == 2
+    assert runner.summary["pairs_dropped_small_gap"] >= 1
+    assert runner.summary["pairs_capped_by_budget"] >= 1
+    assert runner.summary["pairs_kept_strong_signal"] == 2

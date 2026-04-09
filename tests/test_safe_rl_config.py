@@ -22,6 +22,8 @@ def test_default_config_loads():
     assert config.stage1_collection.probe_warmup_steps == 12
     assert config.stage1_collection.initial_risk_event_step == 12
     assert config.stage1_collection.min_gap_between_risk_events == 8
+    assert config.stage1_collection.probe_pair_min_target_gap == 0.01
+    assert config.stage1_collection.probe_pair_max_pairs_per_step == 12
     assert config.stage1_collection.exclude_structural_from_main is True
     assert config.world_model.min_stage5_pairs_for_world_ft == 50
     assert config.world_model.pair_finetune_gate_mode == "fallback_all_pairs"
@@ -307,6 +309,9 @@ def test_risk_model_v2_defaults_enabled():
     assert config.world_model.stage5_pair_max_seen_per_epoch == 32
     assert config.world_model.pair_finetune_epochs == 6
     assert config.world_model.pair_ft_patience == 2
+    assert config.world_model.pair_ft_tie_gap_epsilon == 0.01
+    assert config.world_model.pair_ft_min_score_spread_floor == 0.008
+    assert config.world_model.pair_ft_min_same_state_gap_floor == 0.008
     assert config.world_model.pair_ft_freeze_traj_decoder is True
     assert config.world_model.pair_ft_freeze_backbone == "partial"
 

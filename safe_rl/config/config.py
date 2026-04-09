@@ -54,6 +54,8 @@ class Stage1CollectionConfig:
     probe_warmup_steps: int = 12
     initial_risk_event_step: int = 12
     min_gap_between_risk_events: int = 8
+    probe_pair_min_target_gap: float = 0.01
+    probe_pair_max_pairs_per_step: int = 12
     exclude_structural_from_main: bool = True
 
 
@@ -90,6 +92,9 @@ class WorldModelConfig:
     pair_ft_eval_max_samples: int = 2048
     stage5_pair_max_seen_per_epoch: int = 32
     pair_ft_patience: int = 2
+    pair_ft_tie_gap_epsilon: float = 0.01
+    pair_ft_min_score_spread_floor: float = 0.008
+    pair_ft_min_same_state_gap_floor: float = 0.008
     min_stage5_pairs_for_world_ft: int = 50
     pair_finetune_gate_mode: str = "fallback_all_pairs"
     multimodal: int = 6
