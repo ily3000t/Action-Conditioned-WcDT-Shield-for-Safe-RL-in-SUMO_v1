@@ -185,6 +185,7 @@ def test_stage4_result_includes_buffer_policy_metadata(monkeypatch):
     assert "stage2_model_quality_gate" in result
     assert "shield_activation_diagnostics" in result
     assert "stage4_intervention_health" in result
+    assert "stage4_pair_generation" in result
     assert Path(pipeline.stage4_buffer_report_path).exists()
 
 
@@ -281,6 +282,28 @@ def test_warning_summary_stage_merge_keeps_stage1_payload():
     assert merged["stage4_intervention_health"]["status"] == "critical"
     assert merged["by_stage"]["stage2"]["status"] == "degraded"
     assert merged["by_stage"]["stage4"]["status"] == "critical"
+
+
+def test_warning_summary_stage_merge_preserves_existing_stage_fields_on_auto_recovery_update():
+    config = _tiny_config()
+    pipeline = SafeRLPipeline(config)
+    run_id = f"ut_warning_merge_auto_{uuid.uuid4().hex[:8]}"
+    pipeline._prepare_run_context(stage="stage4", run_id=run_id)
+
+    stage4_health = {"status": "critical", "message": "stage4 zero interventions"}
+    auto_recovery = {
+        "auto_stage2_recovery_triggered": True,
+        "auto_stage2_recovery_attempted": True,
+        "auto_stage2_recovery_result_status": "degraded",
+        "auto_stage2_recovery_stage2_report_path": "dummy.json",
+    }
+    pipeline._update_warning_summary_with_stage4_intervention_health(stage4_health)
+    pipeline._update_warning_summary_with_auto_stage2_recovery("stage4", auto_recovery)
+
+    merged = pipeline._read_json(pipeline.warning_summary_report_path)
+    assert merged["by_stage"]["stage4"]["status"] == "critical"
+    assert merged["by_stage"]["stage4"]["auto_stage2_recovery_triggered"] is True
+    assert merged["by_stage"]["stage4"]["auto_stage2_recovery_result_status"] == "degraded"
 
 
 def test_stage4_pair_builder_uses_candidate_rank_pairs_without_interventions():
@@ -403,6 +426,191 @@ def test_stage4_allows_critical_stage2_for_self_recovery_but_stage5_blocks():
     )
     with pytest.raises(RuntimeError, match="blocked by Stage2 model quality gate"):
         pipeline.run(stage="stage5", run_id=run_id_stage5)
+
+
+def test_stage_all_auto_stage2_recovery_triggers_once_when_stage4_candidate_pairs_exist(monkeypatch):
+    config = _tiny_config()
+    pipeline = SafeRLPipeline(config)
+    run_id = f"ut_stage_all_recovery_{uuid.uuid4().hex[:8]}"
+
+    call_order = []
+    stage2_calls = {"count": 0}
+
+    def _fake_stage1(_tb):
+        call_order.append("stage1")
+        return {"stage1_ok": True}
+
+    def _fake_stage2(_tb):
+        stage2_calls["count"] += 1
+        call_order.append("stage2" if stage2_calls["count"] == 1 else "stage2_recovery")
+        status = "critical" if stage2_calls["count"] == 1 else "healthy"
+        pipeline._write_json(
+            pipeline.stage2_training_report_path,
+            {
+                "stage2_pair_source_health": {
+                    "model_quality": {
+                        "status": status,
+                        "message": f"{status} for test",
+                    }
+                }
+            },
+        )
+        return {"stage2_status": status}
+
+    def _fake_stage3(_tb):
+        call_order.append("stage3")
+        return {"stage3_ok": True}
+
+    def _fake_stage4(_tb):
+        call_order.append("stage4")
+        return {
+            "stage2_model_quality_gate": {
+                "model_quality_status": "critical",
+                "allowed_with_warning": True,
+            },
+            "stage4_pair_generation": {
+                "pairs_created": 16,
+                "candidate_pairs_created": 12,
+            },
+        }
+
+    def _fake_stage5(_tb):
+        call_order.append("stage5")
+        gate = pipeline._enforce_stage2_model_quality_gate("stage5")
+        return {"stage2_model_quality_gate": gate, "stage5_ok": True}
+
+    monkeypatch.setattr(pipeline, "_run_stage1", _fake_stage1)
+    monkeypatch.setattr(pipeline, "_run_stage2", _fake_stage2)
+    monkeypatch.setattr(pipeline, "_run_stage3", _fake_stage3)
+    monkeypatch.setattr(pipeline, "_run_stage4", _fake_stage4)
+    monkeypatch.setattr(pipeline, "_run_stage5", _fake_stage5)
+
+    result = pipeline.run(stage="all", run_id=run_id)
+
+    assert stage2_calls["count"] == 2
+    assert call_order == ["stage1", "stage2", "stage3", "stage4", "stage2_recovery", "stage5"]
+    assert "stage2_recovery" in result["stage_durations"]
+    assert result["auto_stage2_recovery_triggered"] is True
+    assert result["auto_stage2_recovery_attempted"] is True
+    assert result["auto_stage2_recovery_result_status"] == "healthy"
+
+
+def test_stage_all_auto_stage2_recovery_not_triggered_without_candidate_pairs(monkeypatch):
+    config = _tiny_config()
+    pipeline = SafeRLPipeline(config)
+    run_id = f"ut_stage_all_no_recovery_{uuid.uuid4().hex[:8]}"
+
+    stage2_calls = {"count": 0}
+
+    def _fake_stage2(_tb):
+        stage2_calls["count"] += 1
+        pipeline._write_json(
+            pipeline.stage2_training_report_path,
+            {
+                "stage2_pair_source_health": {
+                    "model_quality": {
+                        "status": "critical",
+                        "message": "critical for test",
+                    }
+                }
+            },
+        )
+        return {"stage2_status": "critical"}
+
+    monkeypatch.setattr(pipeline, "_run_stage1", lambda _tb: {})
+    monkeypatch.setattr(pipeline, "_run_stage2", _fake_stage2)
+    monkeypatch.setattr(pipeline, "_run_stage3", lambda _tb: {})
+    monkeypatch.setattr(
+        pipeline,
+        "_run_stage4",
+        lambda _tb: {
+            "stage2_model_quality_gate": {"model_quality_status": "critical", "allowed_with_warning": True},
+            "stage4_pair_generation": {"pairs_created": 0, "candidate_pairs_created": 0},
+        },
+    )
+    monkeypatch.setattr(pipeline, "_run_stage5", lambda _tb: {"stage5_ok": True})
+
+    result = pipeline.run(stage="all", run_id=run_id)
+
+    assert stage2_calls["count"] == 1
+    assert "stage2_recovery" not in result["stage_durations"]
+    assert result["auto_stage2_recovery_triggered"] is False
+    assert result["auto_stage2_recovery_attempted"] is False
+    assert result["auto_stage2_recovery_result_status"] == "skipped_no_stage4_candidate_pairs"
+
+
+def test_stage_all_stage5_still_hard_fails_when_recovery_result_remains_critical(monkeypatch):
+    config = _tiny_config()
+    pipeline = SafeRLPipeline(config)
+    run_id = f"ut_stage_all_recovery_still_critical_{uuid.uuid4().hex[:8]}"
+
+    stage2_calls = {"count": 0}
+
+    def _fake_stage2(_tb):
+        stage2_calls["count"] += 1
+        pipeline._write_json(
+            pipeline.stage2_training_report_path,
+            {
+                "stage2_pair_source_health": {
+                    "model_quality": {
+                        "status": "critical",
+                        "message": "critical for test",
+                    }
+                }
+            },
+        )
+        return {"stage2_status": "critical"}
+
+    monkeypatch.setattr(pipeline, "_run_stage1", lambda _tb: {})
+    monkeypatch.setattr(pipeline, "_run_stage2", _fake_stage2)
+    monkeypatch.setattr(pipeline, "_run_stage3", lambda _tb: {})
+    monkeypatch.setattr(
+        pipeline,
+        "_run_stage4",
+        lambda _tb: {
+            "stage2_model_quality_gate": {"model_quality_status": "critical", "allowed_with_warning": True},
+            "stage4_pair_generation": {"pairs_created": 4, "candidate_pairs_created": 4},
+        },
+    )
+    monkeypatch.setattr(pipeline, "_run_stage5", lambda _tb: pipeline._enforce_stage2_model_quality_gate("stage5"))
+
+    with pytest.raises(RuntimeError, match="blocked by Stage2 model quality gate"):
+        pipeline.run(stage="all", run_id=run_id)
+    assert stage2_calls["count"] == 2
+
+
+def test_single_stage_run_does_not_trigger_auto_stage2_recovery(monkeypatch):
+    config = _tiny_config()
+    pipeline = SafeRLPipeline(config)
+
+    stage2_calls = {"count": 0}
+
+    def _fake_stage2(_tb):
+        stage2_calls["count"] += 1
+        return {"stage2_status": "healthy"}
+
+    monkeypatch.setattr(pipeline, "_run_stage2", _fake_stage2)
+
+    run_id_stage4 = f"ut_single_stage4_no_recovery_{uuid.uuid4().hex[:8]}"
+    monkeypatch.setattr(
+        pipeline,
+        "_run_stage4",
+        lambda _tb: {
+            "stage2_model_quality_gate": {"model_quality_status": "critical", "allowed_with_warning": True},
+            "stage4_pair_generation": {"pairs_created": 9, "candidate_pairs_created": 9},
+        },
+    )
+    stage4_result = pipeline.run(stage="stage4", run_id=run_id_stage4)["stage4"]
+    assert stage4_result["auto_stage2_recovery_triggered"] is False
+    assert stage4_result["auto_stage2_recovery_attempted"] is False
+
+    run_id_stage5 = f"ut_single_stage5_no_recovery_{uuid.uuid4().hex[:8]}"
+    monkeypatch.setattr(pipeline, "_run_stage5", lambda _tb: {"stage5_ok": True})
+    stage5_result = pipeline.run(stage="stage5", run_id=run_id_stage5)["stage5"]
+    assert stage5_result["auto_stage2_recovery_triggered"] is False
+    assert stage5_result["auto_stage2_recovery_attempted"] is False
+
+    assert stage2_calls["count"] == 0
 
 
 def test_evaluate_uses_same_policy_for_shield_off_on_and_shared_seeds(monkeypatch):

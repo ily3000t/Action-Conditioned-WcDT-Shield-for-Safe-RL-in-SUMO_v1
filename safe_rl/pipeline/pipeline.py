@@ -93,6 +93,7 @@ class SafeRLPipeline:
 
         self.manifest: Dict = {}
         self._last_stage4_collection_diagnostics: Dict[str, Any] = {}
+        self._last_auto_stage2_recovery: Dict[str, Any] = {}
 
     def run(self, stage: str = "all", run_id: Optional[str] = None) -> Dict:
         stage = (stage or "all").strip().lower()
@@ -104,6 +105,8 @@ class SafeRLPipeline:
         stages_to_run = list(STAGE_ORDER) if stage == "all" else [stage]
         stage_results: Dict[str, Dict] = {}
         stage_durations: Dict[str, float] = {}
+        auto_stage2_recovery = self._empty_auto_stage2_recovery_state()
+        self._last_auto_stage2_recovery = dict(auto_stage2_recovery)
 
         for current_stage in stages_to_run:
             stage_t0 = time.time()
@@ -114,6 +117,8 @@ class SafeRLPipeline:
                 print(f"[TensorBoard] unavailable during {current_stage}, fallback to no-op logging", flush=True)
 
             try:
+                if stage == "all" and current_stage == "stage5":
+                    self._update_warning_summary_with_auto_stage2_recovery(stage_key="stage5", payload=auto_stage2_recovery)
                 if current_stage == "stage1":
                     result = self._run_stage1(tb_manager)
                 elif current_stage == "stage2":
@@ -135,7 +140,50 @@ class SafeRLPipeline:
                 self._save_manifest()
 
                 stage_results[current_stage] = result
+                if stage == "all" and current_stage in ("stage4", "stage5"):
+                    stage_results[current_stage] = self._apply_auto_stage2_recovery_payload(
+                        stage_results[current_stage],
+                        auto_stage2_recovery,
+                    )
                 print(f"[Pipeline] {current_stage}: done in {elapsed:.1f}s", flush=True)
+
+                if stage == "all" and current_stage == "stage4":
+                    auto_stage2_recovery = self._build_auto_stage2_recovery_state(stage_results.get("stage4", {}))
+                    self._last_auto_stage2_recovery = dict(auto_stage2_recovery)
+                    self._update_warning_summary_with_auto_stage2_recovery(stage_key="stage4", payload=auto_stage2_recovery)
+                    stage_results["stage4"] = self._apply_auto_stage2_recovery_payload(
+                        stage_results["stage4"],
+                        auto_stage2_recovery,
+                    )
+                    if self.stage4_buffer_report_path is not None and self.stage4_buffer_report_path.exists():
+                        self._write_json(self.stage4_buffer_report_path, dict(stage_results["stage4"]))
+                    if bool(auto_stage2_recovery.get("auto_stage2_recovery_triggered", False)):
+                        recovery_t0 = time.time()
+                        print("[Pipeline] stage2_recovery: start", flush=True)
+                        recovery_tb = self._create_tb_manager("stage2_recovery")
+                        try:
+                            recovery_result = self._run_stage2(recovery_tb)
+                            recovery_elapsed = time.time() - recovery_t0
+                            stage_durations["stage2_recovery"] = recovery_elapsed
+                            recovery_tb.add_scalar("eval", "runtime/stage_seconds", recovery_elapsed, 0)
+                            self._mark_stage_done("stage2")
+                            self._save_manifest()
+                            stage_results["stage2_recovery"] = recovery_result
+                            recovery_status = self._latest_stage2_model_quality_status()
+                            auto_stage2_recovery["auto_stage2_recovery_attempted"] = True
+                            auto_stage2_recovery["auto_stage2_recovery_result_status"] = str(recovery_status)
+                            auto_stage2_recovery["auto_stage2_recovery_stage2_report_path"] = str(self.stage2_training_report_path)
+                            self._last_auto_stage2_recovery = dict(auto_stage2_recovery)
+                            stage_results["stage4"] = self._apply_auto_stage2_recovery_payload(
+                                stage_results["stage4"],
+                                auto_stage2_recovery,
+                            )
+                            if self.stage4_buffer_report_path is not None and self.stage4_buffer_report_path.exists():
+                                self._write_json(self.stage4_buffer_report_path, dict(stage_results["stage4"]))
+                            self._update_warning_summary_with_auto_stage2_recovery(stage_key="stage4", payload=auto_stage2_recovery)
+                            print(f"[Pipeline] stage2_recovery: done in {recovery_elapsed:.1f}s", flush=True)
+                        finally:
+                            recovery_tb.close()
             finally:
                 tb_manager.close()
 
@@ -149,10 +197,64 @@ class SafeRLPipeline:
 
         if stage == "all":
             final_result.update(stage_results.get("stage5", {}))
+            final_result.update(self._apply_auto_stage2_recovery_payload({}, auto_stage2_recovery))
         else:
-            final_result[stage] = stage_results.get(stage, {})
+            stage_payload = stage_results.get(stage, {})
+            if stage in ("stage4", "stage5"):
+                stage_payload = self._apply_auto_stage2_recovery_payload(stage_payload, auto_stage2_recovery)
+            final_result[stage] = stage_payload
 
         return final_result
+
+    def _empty_auto_stage2_recovery_state(self) -> Dict[str, Any]:
+        return {
+            "auto_stage2_recovery_triggered": False,
+            "auto_stage2_recovery_attempted": False,
+            "auto_stage2_recovery_result_status": "not_triggered",
+            "auto_stage2_recovery_stage2_report_path": str(self.stage2_training_report_path or ""),
+        }
+
+    def _build_auto_stage2_recovery_state(self, stage4_result: Dict[str, Any]) -> Dict[str, Any]:
+        state = self._empty_auto_stage2_recovery_state()
+        payload = dict(stage4_result or {})
+        gate = dict(payload.get("stage2_model_quality_gate", {}) or {})
+        pair_generation = dict(payload.get("stage4_pair_generation", {}) or {})
+        model_quality_status = str(gate.get("model_quality_status", "")).strip().lower()
+        allowed_with_warning = bool(gate.get("allowed_with_warning", False))
+        candidate_pairs_created = int(pair_generation.get("candidate_pairs_created", 0) or 0)
+        pairs_created = int(pair_generation.get("pairs_created", 0) or 0)
+        has_pairs = (candidate_pairs_created > 0) or (pairs_created > 0)
+        triggered = model_quality_status == "critical" and allowed_with_warning and has_pairs
+        state["auto_stage2_recovery_triggered"] = bool(triggered)
+        if not triggered:
+            if model_quality_status != "critical" or not allowed_with_warning:
+                state["auto_stage2_recovery_result_status"] = "skipped_stage4_gate_not_critical_allowed"
+            elif not has_pairs:
+                state["auto_stage2_recovery_result_status"] = "skipped_no_stage4_candidate_pairs"
+            else:
+                state["auto_stage2_recovery_result_status"] = "skipped"
+        return state
+
+    def _apply_auto_stage2_recovery_payload(self, payload: Dict[str, Any], state: Dict[str, Any]) -> Dict[str, Any]:
+        merged = dict(payload or {})
+        merged.update(
+            {
+                "auto_stage2_recovery_triggered": bool(state.get("auto_stage2_recovery_triggered", False)),
+                "auto_stage2_recovery_attempted": bool(state.get("auto_stage2_recovery_attempted", False)),
+                "auto_stage2_recovery_result_status": str(state.get("auto_stage2_recovery_result_status", "")),
+                "auto_stage2_recovery_stage2_report_path": str(state.get("auto_stage2_recovery_stage2_report_path", "")),
+            }
+        )
+        return merged
+
+    def _latest_stage2_model_quality_status(self) -> str:
+        if self.stage2_training_report_path is None or not self.stage2_training_report_path.exists():
+            return "unknown"
+        stage2_report = self._read_json(self.stage2_training_report_path)
+        stage2_health = dict(stage2_report.get("stage2_pair_source_health", {}) or {})
+        model_quality = dict(stage2_health.get("model_quality", {}) or {})
+        status = str(model_quality.get("status", "")).strip().lower()
+        return status or "unknown"
 
     def _prepare_run_context(self, stage: str, run_id: Optional[str]):
         if stage != "all" and not run_id:
@@ -1436,10 +1538,24 @@ class SafeRLPipeline:
         by_stage = warning_summary.get("by_stage", {})
         if not isinstance(by_stage, dict):
             by_stage = {}
-        by_stage[str(stage_key)] = dict(payload_dict)
+        existing_stage_payload = by_stage.get(str(stage_key), {})
+        if not isinstance(existing_stage_payload, dict):
+            existing_stage_payload = {}
+        merged_stage_payload = dict(existing_stage_payload)
+        merged_stage_payload.update(payload_dict)
+        by_stage[str(stage_key)] = merged_stage_payload
         warning_summary["by_stage"] = by_stage
 
         self._write_json(self.warning_summary_report_path, warning_summary)
+
+    def _update_warning_summary_with_auto_stage2_recovery(self, stage_key: str, payload: Dict[str, Any]):
+        stage_key_str = str(stage_key or "stage5").strip() or "stage5"
+        top_level_key = f"{stage_key_str}_auto_stage2_recovery"
+        self._merge_warning_summary_stage_payload(
+            stage_key=stage_key_str,
+            top_level_key=top_level_key,
+            payload=payload,
+        )
 
     def _safe_ratio(self, numerator: float, denominator: float) -> float:
         if float(denominator) <= 0.0:
@@ -1655,6 +1771,9 @@ class SafeRLPipeline:
             }
             if shield_activation_diagnostics:
                 shield_activation_diagnostics["distill_supervision"] = dict(distill_supervision_summary)
+        _, stage4_pair_generation = self._build_stage4_pair_samples(
+            stage4_weight=float(self.config.light_risk.stage4_pair_weight)
+        )
         stage4_intervention_health = self._build_stage4_intervention_health(
             diagnostics=shield_activation_diagnostics,
             buffer_stats=stats,
@@ -1666,6 +1785,7 @@ class SafeRLPipeline:
             "buffer_stats": stats,
             "distill_supervision_path": str(self.distill_supervision_path),
             "distill_supervision_summary": distill_supervision_summary,
+            "stage4_pair_generation": stage4_pair_generation,
             "stage2_model_quality_gate": stage2_model_quality_gate,
             "shield_activation_diagnostics": shield_activation_diagnostics,
             "stage4_intervention_health": stage4_intervention_health,
