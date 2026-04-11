@@ -35,6 +35,7 @@ dataset:
 stage1_collection:
   probe_pair_min_target_gap: 0.01
   probe_pair_max_pairs_per_step: 12
+  stage4_candidate_min_target_gap: 0.01
 
 light_risk:
   hidden_dim: 128
@@ -55,6 +56,7 @@ world_model:
   pair_ft_tie_gap_epsilon: 0.01
   pair_ft_min_score_spread_floor: 0.008
   pair_ft_min_same_state_gap_floor: 0.008
+  min_spread_eligible_pairs_for_gate_source: 128
   uncertainty_weight: 0.1
   pair_finetune_gate_mode: "fallback_all_pairs"
 

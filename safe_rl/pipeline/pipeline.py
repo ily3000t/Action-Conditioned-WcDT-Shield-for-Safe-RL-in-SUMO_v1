@@ -740,11 +740,13 @@ class SafeRLPipeline:
             "skipped_candidate_missing_raw_eval": 0,
             "skipped_candidate_no_alternative": 0,
             "skipped_candidate_invalid_actions": 0,
+            "skipped_candidate_small_gap": 0,
             "skipped_missing_buffer_file": 0,
             "skipped_missing_distill_supervision_file": 0,
         }
         pair_samples: List[RiskPairSample] = []
         stage4_weight = float(self.config.light_risk.stage4_pair_weight if stage4_weight is None else stage4_weight)
+        stage4_min_target_gap = float(getattr(self.config.stage1_collection, "stage4_candidate_min_target_gap", 0.01) or 0.0)
         if self.buffer_path is not None and self.buffer_path.exists():
             buffer = InterventionBuffer(capacity=max(10000, self.config.distill.trigger_buffer_size * 4))
             buffer.load(str(self.buffer_path))
@@ -860,8 +862,12 @@ class SafeRLPipeline:
             best = alternatives[0]
             raw_risk = float(raw_eval.get("fine_risk", 0.0))
             best_risk = float(best.get("fine_risk", 0.0))
-            if abs(raw_risk - best_risk) <= 1e-8:
+            risk_gap = abs(raw_risk - best_risk)
+            if risk_gap <= 1e-8:
                 summary["skipped_equal_risk"] += 1
+                continue
+            if risk_gap < stage4_min_target_gap:
+                summary["skipped_candidate_small_gap"] += 1
                 continue
             preferred_action = int(best["action_id"] if best_risk < raw_risk else raw_action)
             proof = self._build_same_state_proof(history_scene_payload, {})
@@ -1285,6 +1291,8 @@ class SafeRLPipeline:
         stage2_report["stage2_pair_source_health"]["world_pair_finetune_mode"] = str(stage2_report["world_pair_finetune_mode"])
         stage2_report["stage2_pair_source_health"]["world_pair_gate_degraded"] = bool(stage2_report["world_pair_gate_degraded"])
         stage2_report["stage2_pair_source_health"]["trace_artifact_available"] = bool(stage5_pairs_created > 0)
+        gate_quality_payload = self._build_stage2_model_quality_gate_metrics(stage2_report)
+        stage2_report.update(gate_quality_payload)
         if bool(stage2_report["stage5_requirement_met"]):
             stage2_report["stage2_pair_source_health"]["status"] = "healthy"
         stage2_report["stage2_pair_source_health"]["model_quality"] = self._build_stage2_model_quality_health(stage2_report)
@@ -1361,8 +1369,22 @@ class SafeRLPipeline:
         return health
 
     def _build_stage2_model_quality_health(self, stage2_report: Dict[str, Any]) -> Dict[str, Any]:
-        ranking_metrics = dict(stage2_report.get("ranking_metrics", {}) or {})
-        world_metrics = dict(ranking_metrics.get("world", {}) or {})
+        gate_metrics = dict(stage2_report.get("model_quality_gate_metrics", {}) or {})
+        if not gate_metrics:
+            ranking_metrics = dict(stage2_report.get("ranking_metrics", {}) or {})
+            gate_metrics = dict(ranking_metrics.get("world", {}) or {})
+            metric_source = "fallback_legacy_ranking_metrics"
+            source_eligible_counts = {
+                "min_spread_eligible_pairs_for_gate_source": int(
+                    getattr(self.config.world_model, "min_spread_eligible_pairs_for_gate_source", 128) or 128
+                ),
+                "stage5_spread_eligible_pair_count": int(stage2_report.get("stage5_spread_eligible_pair_count", 0) or 0),
+                "stage1_probe_spread_eligible_pair_count": int(stage2_report.get("stage1_probe_spread_eligible_pair_count", 0) or 0),
+                "stage4_spread_eligible_pair_count": int(stage2_report.get("stage4_spread_eligible_pair_count", 0) or 0),
+            }
+        else:
+            metric_source = str(stage2_report.get("model_quality_metric_source", "unknown"))
+            source_eligible_counts = dict(stage2_report.get("model_quality_source_eligible_counts", {}) or {})
 
         def _to_optional_float(value: Any) -> Optional[float]:
             if value is None:
@@ -1372,10 +1394,18 @@ class SafeRLPipeline:
             except Exception:
                 return None
 
-        world_unique_score_count = _to_optional_float(world_metrics.get("unique_score_count"))
-        world_score_spread = _to_optional_float(world_metrics.get("score_spread"))
-        world_same_state_score_gap = _to_optional_float(world_metrics.get("same_state_score_gap"))
-        world_pair_ranking_accuracy = _to_optional_float(world_metrics.get("pair_ranking_accuracy"))
+        world_unique_score_count = _to_optional_float(
+            gate_metrics.get("world_unique_score_count", gate_metrics.get("unique_score_count"))
+        )
+        world_score_spread = _to_optional_float(
+            gate_metrics.get("world_score_spread", gate_metrics.get("score_spread"))
+        )
+        world_same_state_score_gap = _to_optional_float(
+            gate_metrics.get("world_same_state_score_gap", gate_metrics.get("same_state_score_gap"))
+        )
+        world_pair_ranking_accuracy = _to_optional_float(
+            gate_metrics.get("world_pair_ranking_accuracy", gate_metrics.get("pair_ranking_accuracy"))
+        )
 
         critical_warnings: List[str] = []
         degraded_warnings: List[str] = []
@@ -1412,6 +1442,67 @@ class SafeRLPipeline:
                 "min_score_spread": 0.01,
                 "min_same_state_score_gap": 0.01,
             },
+            "metric_source": metric_source,
+            "source_eligible_counts": source_eligible_counts,
+        }
+
+    def _build_stage2_model_quality_gate_metrics(self, stage2_report: Dict[str, Any]) -> Dict[str, Any]:
+        def _to_optional_float(value: Any) -> Optional[float]:
+            if value is None:
+                return None
+            try:
+                return float(value)
+            except Exception:
+                return None
+
+        def _after_metric(payload: Dict[str, Any], key: str, fallback: float = 0.0) -> float:
+            view = dict(payload.get(key, {}) or {})
+            return float(view.get("after", fallback) or fallback)
+
+        world_metrics = dict(dict(stage2_report.get("ranking_metrics", {}) or {}).get("world", {}) or {})
+        world_pair_ft_best_metrics = dict(stage2_report.get("world_pair_ft_best_metrics", {}) or {})
+        min_spread_eligible = int(getattr(self.config.world_model, "min_spread_eligible_pairs_for_gate_source", 128) or 128)
+        stage5_spread_eligible = int(stage2_report.get("stage5_spread_eligible_pair_count", 0) or 0)
+        stage1_probe_spread_eligible = int(stage2_report.get("stage1_probe_spread_eligible_pair_count", 0) or 0)
+        stage4_spread_eligible = int(stage2_report.get("stage4_spread_eligible_pair_count", 0) or 0)
+
+        if stage5_spread_eligible >= min_spread_eligible:
+            source = "stage5"
+            world_pair_ranking_accuracy = _after_metric(stage2_report, "stage5_pair_ranking_accuracy_before_after")
+            world_score_spread = _after_metric(stage2_report, "stage5_score_spread_before_after")
+            world_same_state_score_gap = _after_metric(stage2_report, "stage5_same_state_score_gap_before_after")
+        elif stage1_probe_spread_eligible >= min_spread_eligible:
+            source = "stage1_probe"
+            world_pair_ranking_accuracy = _after_metric(stage2_report, "stage1_probe_pair_ranking_accuracy_before_after")
+            world_score_spread = _after_metric(stage2_report, "stage1_probe_score_spread_before_after")
+            world_same_state_score_gap = _after_metric(stage2_report, "stage1_probe_same_state_score_gap_before_after")
+        else:
+            source = "fallback_insufficient_spread_eligible"
+            world_pair_ranking_accuracy = float(world_metrics.get("pair_ranking_accuracy", 0.0) or 0.0)
+            world_score_spread = float(world_metrics.get("score_spread", 0.0) or 0.0)
+            world_same_state_score_gap = float(world_metrics.get("same_state_score_gap", 0.0) or 0.0)
+
+        unique_after = _to_optional_float(world_metrics.get("unique_score_count"))
+        unique_best = _to_optional_float(world_pair_ft_best_metrics.get("unique_score_count"))
+        unique_candidates = [item for item in (unique_after, unique_best) if item is not None]
+        world_unique_score_count = max(unique_candidates) if unique_candidates else None
+
+        model_quality_gate_metrics = {
+            "world_pair_ranking_accuracy": world_pair_ranking_accuracy,
+            "world_score_spread": world_score_spread,
+            "world_same_state_score_gap": world_same_state_score_gap,
+            "world_unique_score_count": world_unique_score_count,
+        }
+        model_quality_source_eligible_counts = {
+            "min_spread_eligible_pairs_for_gate_source": int(min_spread_eligible),
+            "stage5_spread_eligible_pair_count": int(stage5_spread_eligible),
+            "stage1_probe_spread_eligible_pair_count": int(stage1_probe_spread_eligible),
+            "stage4_spread_eligible_pair_count": int(stage4_spread_eligible),
+        }
+        return {
+            "model_quality_gate_metrics": model_quality_gate_metrics,
+            "model_quality_metric_source": str(source),
+            "model_quality_source_eligible_counts": model_quality_source_eligible_counts,
         }
 
     def _collect_stage2_model_quality_gate(self, stage_name: str) -> Dict[str, Any]:

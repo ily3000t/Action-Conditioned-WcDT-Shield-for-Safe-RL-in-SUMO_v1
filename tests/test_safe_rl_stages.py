@@ -350,6 +350,50 @@ def test_stage4_pair_builder_uses_candidate_rank_pairs_without_interventions():
     assert candidate_pairs[0].meta["trusted_for_spread"] is False
     assert summary["candidate_pairs_created"] == 1
     assert summary["buffer_pairs_created"] == 0
+    assert summary["skipped_candidate_small_gap"] == 0
+
+
+def test_stage4_pair_builder_filters_small_gap_candidates():
+    from safe_rl.data.types import SceneState, VehicleState, dataclass_to_dict
+
+    config = _tiny_config()
+    config.stage1_collection.stage4_candidate_min_target_gap = 0.01
+    pipeline = SafeRLPipeline(config)
+    run_id = f"ut_stage4_candidate_small_gap_{uuid.uuid4().hex[:8]}"
+    pipeline._prepare_run_context(stage="stage2", run_id=run_id)
+
+    history = [SceneState(timestamp=0.0, ego_id="ego", vehicles=[VehicleState("ego", 0.0, 4.0, 20.0, 0.0, 0.0, 0.0, 0.0, 1)])] * 2
+    history_payload = dataclass_to_dict(history)
+    pipeline._write_json(
+        pipeline.distill_supervision_path,
+        {
+            "sample_count": 1,
+            "intervened_sample_count": 0,
+            "non_intervened_sample_count": 1,
+            "samples": [
+                {
+                    "history_feature": [],
+                    "raw_action": 4,
+                    "final_action": 4,
+                    "intervened": False,
+                    "raw_risk": 0.620,
+                    "final_risk": 0.620,
+                    "reason": "raw_passthrough",
+                    "candidate_evaluations": [
+                        {"action_id": 4, "evaluated": True, "fine_risk": 0.620, "uncertainty": 0.10, "distance_to_raw": 0},
+                        {"action_id": 3, "evaluated": True, "fine_risk": 0.615, "uncertainty": 0.09, "distance_to_raw": 1},
+                    ],
+                    "meta": {"episode_id": "ep_0", "episode_step": 3, "history_scene": history_payload},
+                }
+            ],
+        },
+    )
+
+    stage4_pairs, summary = pipeline._build_stage4_pair_samples()
+    candidate_pairs = [sample for sample in stage4_pairs if str(sample.source) == "stage4_candidate_rank"]
+    assert len(candidate_pairs) == 0
+    assert summary["candidate_pairs_created"] == 0
+    assert summary["skipped_candidate_small_gap"] == 1
 
 
 def test_stage2_model_quality_health_marks_critical_for_low_resolution():
@@ -370,6 +414,76 @@ def test_stage2_model_quality_health_marks_critical_for_low_resolution():
     )
     assert degraded["status"] == "degraded"
     assert "world_same_state_score_gap_small" in degraded["degraded_warnings"]
+
+
+def test_stage2_model_quality_gate_prefers_stage1_probe_when_spread_eligible_reaches_threshold():
+    config = _tiny_config()
+    config.world_model.min_spread_eligible_pairs_for_gate_source = 128
+    pipeline = SafeRLPipeline(config)
+    run_id = f"ut_stage2_quality_source_stage1_{uuid.uuid4().hex[:8]}"
+    pipeline._prepare_run_context(stage="stage2", run_id=run_id)
+
+    stage2_report = {
+        "ranking_metrics": {
+            "world": {
+                "pair_ranking_accuracy": 0.95,
+                "score_spread": 0.001,
+                "same_state_score_gap": 0.002,
+                "unique_score_count": 20.0,
+            }
+        },
+        "stage5_spread_eligible_pair_count": 0,
+        "stage1_probe_spread_eligible_pair_count": 128,
+        "stage4_spread_eligible_pair_count": 0,
+        "stage1_probe_pair_ranking_accuracy_before_after": {"before": 0.50, "after": 0.80},
+        "stage1_probe_score_spread_before_after": {"before": 0.01, "after": 0.020},
+        "stage1_probe_same_state_score_gap_before_after": {"before": 0.01, "after": 0.021},
+        "world_pair_ft_best_metrics": {"unique_score_count": 24.0},
+    }
+
+    stage2_report.update(pipeline._build_stage2_model_quality_gate_metrics(stage2_report))
+    health = pipeline._build_stage2_model_quality_health(stage2_report)
+    assert stage2_report["model_quality_metric_source"] == "stage1_probe"
+    assert health["metric_source"] == "stage1_probe"
+    assert health["status"] == "healthy"
+    assert health["metrics"]["world_score_spread"] == pytest.approx(0.020)
+    assert health["metrics"]["world_unique_score_count"] == pytest.approx(24.0)
+
+
+def test_stage2_model_quality_gate_falls_back_when_spread_eligible_is_insufficient():
+    config = _tiny_config()
+    config.world_model.min_spread_eligible_pairs_for_gate_source = 128
+    pipeline = SafeRLPipeline(config)
+    run_id = f"ut_stage2_quality_source_fallback_{uuid.uuid4().hex[:8]}"
+    pipeline._prepare_run_context(stage="stage2", run_id=run_id)
+
+    stage2_report = {
+        "ranking_metrics": {
+            "world": {
+                "pair_ranking_accuracy": 0.83,
+                "score_spread": 0.009,
+                "same_state_score_gap": 0.020,
+                "unique_score_count": 19.0,
+            }
+        },
+        "stage5_spread_eligible_pair_count": 64,
+        "stage1_probe_spread_eligible_pair_count": 127,
+        "stage4_spread_eligible_pair_count": 0,
+        "stage5_score_spread_before_after": {"before": 0.00, "after": 0.050},
+        "stage5_same_state_score_gap_before_after": {"before": 0.00, "after": 0.050},
+        "stage5_pair_ranking_accuracy_before_after": {"before": 0.00, "after": 0.80},
+        "stage1_probe_score_spread_before_after": {"before": 0.00, "after": 0.030},
+        "stage1_probe_same_state_score_gap_before_after": {"before": 0.00, "after": 0.030},
+        "stage1_probe_pair_ranking_accuracy_before_after": {"before": 0.00, "after": 0.75},
+        "world_pair_ft_best_metrics": {"unique_score_count": 21.0},
+    }
+
+    stage2_report.update(pipeline._build_stage2_model_quality_gate_metrics(stage2_report))
+    health = pipeline._build_stage2_model_quality_health(stage2_report)
+    assert stage2_report["model_quality_metric_source"] == "fallback_insufficient_spread_eligible"
+    assert health["metric_source"] == "fallback_insufficient_spread_eligible"
+    assert health["status"] == "critical"
+    assert "world_score_spread_narrow" in health["critical_warnings"]
 
 
 def test_stage2_quality_gate_missing_report_warns_and_continues():
