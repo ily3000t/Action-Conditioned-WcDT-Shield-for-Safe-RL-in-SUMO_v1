@@ -1279,6 +1279,8 @@ class SafeRLPipeline:
             "stage5_score_spread_before_after": dict(world_pair_ft_report.get("stage5_score_spread_before_after", {})),
             "stage1_probe_score_spread_before_after": dict(world_pair_ft_report.get("stage1_probe_score_spread_before_after", {})),
             "stage4_score_spread_before_after": dict(world_pair_ft_report.get("stage4_score_spread_before_after", {})),
+            "stage5_unique_score_count_before_after": dict(world_pair_ft_report.get("stage5_unique_score_count_before_after", {})),
+            "stage1_probe_unique_score_count_before_after": dict(world_pair_ft_report.get("stage1_probe_unique_score_count_before_after", {})),
             "stage5_spread_eligible_pair_count": int(world_pair_ft_report.get("stage5_spread_eligible_pair_count", 0)),
             "stage1_probe_spread_eligible_pair_count": int(world_pair_ft_report.get("stage1_probe_spread_eligible_pair_count", 0)),
             "stage4_spread_eligible_pair_count": int(world_pair_ft_report.get("stage4_spread_eligible_pair_count", 0)),
@@ -1407,13 +1409,38 @@ class SafeRLPipeline:
             gate_metrics.get("world_pair_ranking_accuracy", gate_metrics.get("pair_ranking_accuracy"))
         )
 
+        min_unique_score_count = 16.0
+        min_score_spread = 0.01
+        critical_score_spread_floor = 0.009
+        min_same_state_score_gap = 0.01
+        min_spread_eligible_pairs_for_gate_source = int(
+            source_eligible_counts.get(
+                "min_spread_eligible_pairs_for_gate_source",
+                int(getattr(self.config.world_model, "min_spread_eligible_pairs_for_gate_source", 128) or 128),
+            )
+        )
+        source_to_eligible_count = {
+            "stage5": int(source_eligible_counts.get("stage5_spread_eligible_pair_count", 0) or 0),
+            "stage1_probe": int(source_eligible_counts.get("stage1_probe_spread_eligible_pair_count", 0) or 0),
+        }
+        source_is_reliable = (
+            metric_source in source_to_eligible_count
+            and source_to_eligible_count.get(metric_source, 0) >= min_spread_eligible_pairs_for_gate_source
+        )
+
         critical_warnings: List[str] = []
         degraded_warnings: List[str] = []
-        if world_unique_score_count is not None and world_unique_score_count < 16.0:
+        if world_unique_score_count is not None and world_unique_score_count < min_unique_score_count:
             critical_warnings.append("world_unique_score_count_low")
-        if world_score_spread is not None and world_score_spread < 0.01:
-            critical_warnings.append("world_score_spread_narrow")
-        if world_same_state_score_gap is not None and world_same_state_score_gap < 0.01:
+        if world_score_spread is not None:
+            if world_score_spread < critical_score_spread_floor:
+                critical_warnings.append("world_score_spread_narrow")
+            elif world_score_spread < min_score_spread:
+                if source_is_reliable:
+                    degraded_warnings.append("world_score_spread_near_threshold")
+                else:
+                    critical_warnings.append("world_score_spread_narrow")
+        if world_same_state_score_gap is not None and world_same_state_score_gap < min_same_state_score_gap:
             degraded_warnings.append("world_same_state_score_gap_small")
 
         if critical_warnings:
@@ -1438,12 +1465,14 @@ class SafeRLPipeline:
                 "world_unique_score_count": world_unique_score_count,
             },
             "thresholds": {
-                "min_unique_score_count": 16.0,
-                "min_score_spread": 0.01,
-                "min_same_state_score_gap": 0.01,
+                "min_unique_score_count": min_unique_score_count,
+                "min_score_spread": min_score_spread,
+                "critical_score_spread_floor": critical_score_spread_floor,
+                "min_same_state_score_gap": min_same_state_score_gap,
             },
             "metric_source": metric_source,
             "source_eligible_counts": source_eligible_counts,
+            "source_reliable_for_spread_buffer": bool(source_is_reliable),
         }
 
     def _build_stage2_model_quality_gate_metrics(self, stage2_report: Dict[str, Any]) -> Dict[str, Any]:
@@ -1455,10 +1484,6 @@ class SafeRLPipeline:
             except Exception:
                 return None
 
-        def _after_metric(payload: Dict[str, Any], key: str, fallback: float = 0.0) -> float:
-            view = dict(payload.get(key, {}) or {})
-            return float(view.get("after", fallback) or fallback)
-
         world_metrics = dict(dict(stage2_report.get("ranking_metrics", {}) or {}).get("world", {}) or {})
         world_pair_ft_best_metrics = dict(stage2_report.get("world_pair_ft_best_metrics", {}) or {})
         min_spread_eligible = int(getattr(self.config.world_model, "min_spread_eligible_pairs_for_gate_source", 128) or 128)
@@ -1466,26 +1491,55 @@ class SafeRLPipeline:
         stage1_probe_spread_eligible = int(stage2_report.get("stage1_probe_spread_eligible_pair_count", 0) or 0)
         stage4_spread_eligible = int(stage2_report.get("stage4_spread_eligible_pair_count", 0) or 0)
 
+        def _metric_from_best_or_world(metric_name: str, fallback: float = 0.0) -> float:
+            candidate = _to_optional_float(world_pair_ft_best_metrics.get(metric_name))
+            if candidate is None:
+                candidate = _to_optional_float(world_metrics.get(metric_name))
+            return float(candidate if candidate is not None else fallback)
+
+        def _source_after_metric(before_after_key: str, metric_name: str, fallback: float = 0.0) -> float:
+            payload = dict(stage2_report.get(before_after_key, {}) or {})
+            candidate = _to_optional_float(payload.get("after"))
+            if candidate is None:
+                candidate = _to_optional_float(world_pair_ft_best_metrics.get(metric_name))
+            if candidate is None:
+                candidate = _to_optional_float(world_metrics.get(metric_name))
+            return float(candidate if candidate is not None else fallback)
+
+        stage5_unique_payload = dict(stage2_report.get("stage5_unique_score_count_before_after", {}) or {})
+        stage1_probe_unique_payload = dict(stage2_report.get("stage1_probe_unique_score_count_before_after", {}) or {})
+        stage5_unique_after = _to_optional_float(stage5_unique_payload.get("after"))
+        stage1_probe_unique_after = _to_optional_float(stage1_probe_unique_payload.get("after"))
+
         if stage5_spread_eligible >= min_spread_eligible:
             source = "stage5"
-            world_pair_ranking_accuracy = _after_metric(stage2_report, "stage5_pair_ranking_accuracy_before_after")
-            world_score_spread = _after_metric(stage2_report, "stage5_score_spread_before_after")
-            world_same_state_score_gap = _after_metric(stage2_report, "stage5_same_state_score_gap_before_after")
+            world_pair_ranking_accuracy = _source_after_metric("stage5_pair_ranking_accuracy_before_after", "pair_ranking_accuracy")
+            world_score_spread = _source_after_metric("stage5_score_spread_before_after", "score_spread")
+            world_same_state_score_gap = _source_after_metric("stage5_same_state_score_gap_before_after", "same_state_score_gap")
+            world_unique_score_count = (
+                float(stage5_unique_after)
+                if stage5_unique_after is not None
+                else _metric_from_best_or_world("unique_score_count")
+            )
         elif stage1_probe_spread_eligible >= min_spread_eligible:
             source = "stage1_probe"
-            world_pair_ranking_accuracy = _after_metric(stage2_report, "stage1_probe_pair_ranking_accuracy_before_after")
-            world_score_spread = _after_metric(stage2_report, "stage1_probe_score_spread_before_after")
-            world_same_state_score_gap = _after_metric(stage2_report, "stage1_probe_same_state_score_gap_before_after")
+            world_pair_ranking_accuracy = _source_after_metric("stage1_probe_pair_ranking_accuracy_before_after", "pair_ranking_accuracy")
+            world_score_spread = _source_after_metric("stage1_probe_score_spread_before_after", "score_spread")
+            world_same_state_score_gap = _source_after_metric("stage1_probe_same_state_score_gap_before_after", "same_state_score_gap")
+            world_unique_score_count = (
+                float(stage1_probe_unique_after)
+                if stage1_probe_unique_after is not None
+                else _metric_from_best_or_world("unique_score_count")
+            )
         else:
             source = "fallback_insufficient_spread_eligible"
-            world_pair_ranking_accuracy = float(world_metrics.get("pair_ranking_accuracy", 0.0) or 0.0)
-            world_score_spread = float(world_metrics.get("score_spread", 0.0) or 0.0)
-            world_same_state_score_gap = float(world_metrics.get("same_state_score_gap", 0.0) or 0.0)
-
-        unique_after = _to_optional_float(world_metrics.get("unique_score_count"))
-        unique_best = _to_optional_float(world_pair_ft_best_metrics.get("unique_score_count"))
-        unique_candidates = [item for item in (unique_after, unique_best) if item is not None]
-        world_unique_score_count = max(unique_candidates) if unique_candidates else None
+            world_pair_ranking_accuracy = _metric_from_best_or_world("pair_ranking_accuracy")
+            world_score_spread = _metric_from_best_or_world("score_spread")
+            world_same_state_score_gap = _metric_from_best_or_world("same_state_score_gap")
+            unique_fallback = _to_optional_float(world_pair_ft_best_metrics.get("unique_score_count"))
+            if unique_fallback is None:
+                unique_fallback = _to_optional_float(world_metrics.get("unique_score_count"))
+            world_unique_score_count = float(unique_fallback) if unique_fallback is not None else None
 
         model_quality_gate_metrics = {
             "world_pair_ranking_accuracy": world_pair_ranking_accuracy,
@@ -2092,6 +2146,8 @@ class SafeRLPipeline:
                 "stage5_score_spread_before_after": {"before": float(before_stage5_metrics.get("score_spread", 0.0)), "after": float(before_stage5_metrics.get("score_spread", 0.0))},
                 "stage1_probe_score_spread_before_after": {"before": float(before_stage1_probe_metrics.get("score_spread", 0.0)), "after": float(before_stage1_probe_metrics.get("score_spread", 0.0))},
                 "stage4_score_spread_before_after": {"before": float(before_stage4_metrics.get("score_spread", 0.0)), "after": float(before_stage4_metrics.get("score_spread", 0.0))},
+                "stage5_unique_score_count_before_after": {"before": float(before_stage5_metrics.get("unique_score_count", 0.0)), "after": float(before_stage5_metrics.get("unique_score_count", 0.0))},
+                "stage1_probe_unique_score_count_before_after": {"before": float(before_stage1_probe_metrics.get("unique_score_count", 0.0)), "after": float(before_stage1_probe_metrics.get("unique_score_count", 0.0))},
                 "stage5_spread_eligible_pair_count": int(world_trainer._spread_eligible_pair_count(stage5_pair_samples)),
                 "stage1_probe_spread_eligible_pair_count": int(world_trainer._spread_eligible_pair_count(stage1_probe_pair_samples)),
                 "stage4_spread_eligible_pair_count": int(world_trainer._spread_eligible_pair_count(stage4_pair_samples)),
@@ -3152,6 +3208,8 @@ class SafeRLPipeline:
             "stage5_score_spread_before_after": dict(stage2_report.get("stage5_score_spread_before_after", {})),
             "stage1_probe_score_spread_before_after": dict(stage2_report.get("stage1_probe_score_spread_before_after", {})),
             "stage4_score_spread_before_after": dict(stage2_report.get("stage4_score_spread_before_after", {})),
+            "stage5_unique_score_count_before_after": dict(stage2_report.get("stage5_unique_score_count_before_after", {})),
+            "stage1_probe_unique_score_count_before_after": dict(stage2_report.get("stage1_probe_unique_score_count_before_after", {})),
             "stage5_spread_eligible_pair_count": int(stage2_report.get("stage5_spread_eligible_pair_count", 0)),
             "stage1_probe_spread_eligible_pair_count": int(stage2_report.get("stage1_probe_spread_eligible_pair_count", 0)),
             "stage4_spread_eligible_pair_count": int(stage2_report.get("stage4_spread_eligible_pair_count", 0)),
@@ -3188,6 +3246,8 @@ class SafeRLPipeline:
             "stage5_score_spread_before_after": dict(stage2_snapshot["stage5_score_spread_before_after"]),
             "stage1_probe_score_spread_before_after": dict(stage2_snapshot["stage1_probe_score_spread_before_after"]),
             "stage4_score_spread_before_after": dict(stage2_snapshot["stage4_score_spread_before_after"]),
+            "stage5_unique_score_count_before_after": dict(stage2_snapshot["stage5_unique_score_count_before_after"]),
+            "stage1_probe_unique_score_count_before_after": dict(stage2_snapshot["stage1_probe_unique_score_count_before_after"]),
             "stage5_spread_eligible_pair_count": int(stage2_snapshot["stage5_spread_eligible_pair_count"]),
             "stage1_probe_spread_eligible_pair_count": int(stage2_snapshot["stage1_probe_spread_eligible_pair_count"]),
             "stage4_spread_eligible_pair_count": int(stage2_snapshot["stage4_spread_eligible_pair_count"]),

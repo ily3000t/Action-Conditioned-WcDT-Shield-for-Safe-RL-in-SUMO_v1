@@ -438,6 +438,7 @@ def test_stage2_model_quality_gate_prefers_stage1_probe_when_spread_eligible_rea
         "stage1_probe_pair_ranking_accuracy_before_after": {"before": 0.50, "after": 0.80},
         "stage1_probe_score_spread_before_after": {"before": 0.01, "after": 0.020},
         "stage1_probe_same_state_score_gap_before_after": {"before": 0.01, "after": 0.021},
+        "stage1_probe_unique_score_count_before_after": {"before": 8.0, "after": 18.0},
         "world_pair_ft_best_metrics": {"unique_score_count": 24.0},
     }
 
@@ -447,7 +448,46 @@ def test_stage2_model_quality_gate_prefers_stage1_probe_when_spread_eligible_rea
     assert health["metric_source"] == "stage1_probe"
     assert health["status"] == "healthy"
     assert health["metrics"]["world_score_spread"] == pytest.approx(0.020)
-    assert health["metrics"]["world_unique_score_count"] == pytest.approx(24.0)
+    assert health["metrics"]["world_unique_score_count"] == pytest.approx(18.0)
+
+
+def test_stage2_model_quality_gate_prefers_stage5_over_stage1_probe_when_both_sources_are_eligible():
+    config = _tiny_config()
+    config.world_model.min_spread_eligible_pairs_for_gate_source = 128
+    pipeline = SafeRLPipeline(config)
+    run_id = f"ut_stage2_quality_source_stage5_{uuid.uuid4().hex[:8]}"
+    pipeline._prepare_run_context(stage="stage2", run_id=run_id)
+
+    stage2_report = {
+        "ranking_metrics": {
+            "world": {
+                "pair_ranking_accuracy": 0.70,
+                "score_spread": 0.020,
+                "same_state_score_gap": 0.020,
+                "unique_score_count": 20.0,
+            }
+        },
+        "stage5_spread_eligible_pair_count": 256,
+        "stage1_probe_spread_eligible_pair_count": 256,
+        "stage4_spread_eligible_pair_count": 0,
+        "stage5_pair_ranking_accuracy_before_after": {"before": 0.40, "after": 0.88},
+        "stage5_score_spread_before_after": {"before": 0.01, "after": 0.030},
+        "stage5_same_state_score_gap_before_after": {"before": 0.01, "after": 0.027},
+        "stage5_unique_score_count_before_after": {"before": 10.0, "after": 26.0},
+        "stage1_probe_pair_ranking_accuracy_before_after": {"before": 0.40, "after": 0.76},
+        "stage1_probe_score_spread_before_after": {"before": 0.01, "after": 0.015},
+        "stage1_probe_same_state_score_gap_before_after": {"before": 0.01, "after": 0.017},
+        "stage1_probe_unique_score_count_before_after": {"before": 10.0, "after": 18.0},
+        "world_pair_ft_best_metrics": {"pair_ranking_accuracy": 0.81, "score_spread": 0.022, "same_state_score_gap": 0.021, "unique_score_count": 25.0},
+    }
+
+    stage2_report.update(pipeline._build_stage2_model_quality_gate_metrics(stage2_report))
+    health = pipeline._build_stage2_model_quality_health(stage2_report)
+    assert stage2_report["model_quality_metric_source"] == "stage5"
+    assert health["metric_source"] == "stage5"
+    assert health["status"] == "healthy"
+    assert health["metrics"]["world_score_spread"] == pytest.approx(0.030)
+    assert health["metrics"]["world_unique_score_count"] == pytest.approx(26.0)
 
 
 def test_stage2_model_quality_gate_falls_back_when_spread_eligible_is_insufficient():
@@ -461,7 +501,7 @@ def test_stage2_model_quality_gate_falls_back_when_spread_eligible_is_insufficie
         "ranking_metrics": {
             "world": {
                 "pair_ranking_accuracy": 0.83,
-                "score_spread": 0.009,
+                "score_spread": 0.030,
                 "same_state_score_gap": 0.020,
                 "unique_score_count": 19.0,
             }
@@ -475,7 +515,12 @@ def test_stage2_model_quality_gate_falls_back_when_spread_eligible_is_insufficie
         "stage1_probe_score_spread_before_after": {"before": 0.00, "after": 0.030},
         "stage1_probe_same_state_score_gap_before_after": {"before": 0.00, "after": 0.030},
         "stage1_probe_pair_ranking_accuracy_before_after": {"before": 0.00, "after": 0.75},
-        "world_pair_ft_best_metrics": {"unique_score_count": 21.0},
+        "world_pair_ft_best_metrics": {
+            "pair_ranking_accuracy": 0.76,
+            "score_spread": 0.0095,
+            "same_state_score_gap": 0.020,
+            "unique_score_count": 21.0,
+        },
     }
 
     stage2_report.update(pipeline._build_stage2_model_quality_gate_metrics(stage2_report))
@@ -483,7 +528,59 @@ def test_stage2_model_quality_gate_falls_back_when_spread_eligible_is_insufficie
     assert stage2_report["model_quality_metric_source"] == "fallback_insufficient_spread_eligible"
     assert health["metric_source"] == "fallback_insufficient_spread_eligible"
     assert health["status"] == "critical"
+    assert health["metrics"]["world_score_spread"] == pytest.approx(0.0095)
     assert "world_score_spread_narrow" in health["critical_warnings"]
+
+
+def test_stage2_model_quality_health_marks_degraded_for_reliable_source_spread_buffer_band():
+    config = _tiny_config()
+    config.world_model.min_spread_eligible_pairs_for_gate_source = 128
+    pipeline = SafeRLPipeline(config)
+    run_id = f"ut_stage2_quality_spread_buffer_{uuid.uuid4().hex[:8]}"
+    pipeline._prepare_run_context(stage="stage2", run_id=run_id)
+
+    stage2_report = {
+        "stage5_spread_eligible_pair_count": 0,
+        "stage1_probe_spread_eligible_pair_count": 256,
+        "stage4_spread_eligible_pair_count": 0,
+        "stage1_probe_pair_ranking_accuracy_before_after": {"before": 0.0, "after": 0.80},
+        "stage1_probe_score_spread_before_after": {"before": 0.0, "after": 0.0095},
+        "stage1_probe_same_state_score_gap_before_after": {"before": 0.0, "after": 0.015},
+        "stage1_probe_unique_score_count_before_after": {"before": 8.0, "after": 20.0},
+        "world_pair_ft_best_metrics": {"pair_ranking_accuracy": 0.75, "score_spread": 0.008, "same_state_score_gap": 0.012, "unique_score_count": 19.0},
+    }
+
+    stage2_report.update(pipeline._build_stage2_model_quality_gate_metrics(stage2_report))
+    health = pipeline._build_stage2_model_quality_health(stage2_report)
+    assert stage2_report["model_quality_metric_source"] == "stage1_probe"
+    assert health["status"] == "degraded"
+    assert "world_score_spread_near_threshold" in health["degraded_warnings"]
+    assert "world_score_spread_narrow" not in health["critical_warnings"]
+
+
+def test_stage2_model_quality_health_keeps_unique_threshold_hard_in_spread_buffer_band():
+    config = _tiny_config()
+    config.world_model.min_spread_eligible_pairs_for_gate_source = 128
+    pipeline = SafeRLPipeline(config)
+    run_id = f"ut_stage2_quality_unique_floor_{uuid.uuid4().hex[:8]}"
+    pipeline._prepare_run_context(stage="stage2", run_id=run_id)
+
+    stage2_report = {
+        "stage5_spread_eligible_pair_count": 0,
+        "stage1_probe_spread_eligible_pair_count": 200,
+        "stage4_spread_eligible_pair_count": 0,
+        "stage1_probe_pair_ranking_accuracy_before_after": {"before": 0.0, "after": 0.80},
+        "stage1_probe_score_spread_before_after": {"before": 0.0, "after": 0.0095},
+        "stage1_probe_same_state_score_gap_before_after": {"before": 0.0, "after": 0.020},
+        "stage1_probe_unique_score_count_before_after": {"before": 8.0, "after": 12.0},
+        "world_pair_ft_best_metrics": {"pair_ranking_accuracy": 0.75, "score_spread": 0.012, "same_state_score_gap": 0.015, "unique_score_count": 12.0},
+    }
+
+    stage2_report.update(pipeline._build_stage2_model_quality_gate_metrics(stage2_report))
+    health = pipeline._build_stage2_model_quality_health(stage2_report)
+    assert stage2_report["model_quality_metric_source"] == "stage1_probe"
+    assert health["status"] == "critical"
+    assert "world_unique_score_count_low" in health["critical_warnings"]
 
 
 def test_stage2_quality_gate_missing_report_warns_and_continues():
@@ -1913,6 +2010,8 @@ def test_stage2_report_includes_pair_finetune_metadata(monkeypatch):
                 "stage4_same_state_score_gap_before_after": {"before": 0.01, "after": 0.03},
                 "stage5_score_spread_before_after": {"before": 0.02, "after": 0.06},
                 "stage4_score_spread_before_after": {"before": 0.01, "after": 0.04},
+                "stage5_unique_score_count_before_after": {"before": 8.0, "after": 22.0},
+                "stage1_probe_unique_score_count_before_after": {"before": 8.0, "after": 17.0},
                 "stage5_spread_eligible_pair_count": 2,
                 "stage4_spread_eligible_pair_count": 0,
                 "world_pair_ft_best_epoch": 1,
@@ -1964,6 +2063,8 @@ def test_stage2_report_includes_pair_finetune_metadata(monkeypatch):
     assert report["stage4_pair_ranking_accuracy_before_after"]["after"] == pytest.approx(0.65)
     assert report["stage5_spread_eligible_pair_count"] == 2
     assert report["stage4_spread_eligible_pair_count"] == 0
+    assert report["stage5_unique_score_count_before_after"]["after"] == pytest.approx(22.0)
+    assert report["stage1_probe_unique_score_count_before_after"]["after"] == pytest.approx(17.0)
     assert report["world_pair_ft_best_epoch"] == 1
     assert report["world_pair_ft_restored_best"] is True
     assert report["world_pair_finetune_mode"] == "fallback_all_pairs"
@@ -1971,6 +2072,8 @@ def test_stage2_report_includes_pair_finetune_metadata(monkeypatch):
     assert report["world_pair_gate_degraded"] is False
     assert risk_v2_summary["stage5_pair_ranking_accuracy_before_after"]["after"] == pytest.approx(0.75)
     assert risk_v2_summary["stage4_pair_ranking_accuracy_before_after"]["after"] == pytest.approx(0.65)
+    assert risk_v2_summary["stage5_unique_score_count_before_after"]["after"] == pytest.approx(22.0)
+    assert risk_v2_summary["stage1_probe_unique_score_count_before_after"]["after"] == pytest.approx(17.0)
 
 
 def test_train_models_world_pair_gate_fallback_all_pairs_applies_when_stage5_missing(monkeypatch):
