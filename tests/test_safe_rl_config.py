@@ -33,6 +33,7 @@ def test_default_config_loads():
     assert config.shield.legacy_raw_passthrough_risk_threshold == 0.20
     assert config.shield.balanced_raw_passthrough_risk_threshold == 0.193
     assert config.shield.raw_passthrough_risk_threshold == 0.193
+    assert config.shield.replacement_min_risk_margin_blocked == 0.02
 
 
 def test_tensorboard_config_override():

@@ -70,6 +70,7 @@ shield:
   uncertainty_weight: 0.2
   fallback_action: "DECEL_KEEP"
   replacement_min_risk_margin: 0.104
+  replacement_min_risk_margin_blocked: 0.02
   raw_passthrough_risk_threshold: 0.193
   legacy_replacement_min_risk_margin: 0.05
   legacy_raw_passthrough_risk_threshold: 0.20

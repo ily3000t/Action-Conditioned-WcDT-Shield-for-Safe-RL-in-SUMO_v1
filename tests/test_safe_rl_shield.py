@@ -86,7 +86,29 @@ def test_shield_blocks_replacement_without_margin():
     assert decision.intervened is False
     assert decision.reason == "replacement_blocked_by_constraint"
     assert decision.meta["constraint_reason"] == "blocked_by_margin"
+    assert decision.meta["replacement_min_risk_margin_used"] == pytest.approx(0.05)
     assert any(item["constraint_reason"] == "blocked_by_margin" for item in decision.meta["candidate_evaluations"])
+
+
+def test_shield_uses_blocked_margin_override_for_blocked_raw_action():
+    config = ShieldConfig(
+        risk_threshold=0.40,
+        uncertainty_threshold=0.30,
+        candidate_count=7,
+        coarse_top_k=4,
+        replacement_min_risk_margin=0.05,
+        replacement_min_risk_margin_blocked=0.02,
+    )
+    predictor = DummyWorldPredictor({4: 0.43, 1: 0.39})
+    shield = SafetyShield(config=config, light_predictor=DummyLightPredictor(), world_predictor=predictor)
+
+    decision = shield.select_action(_history_scene(), 4)
+    assert decision.intervened is True
+    assert decision.final_action != 4
+    assert decision.reason == "risk_threshold_exceeded"
+    assert decision.meta["replacement_min_risk_margin_used"] == pytest.approx(0.02)
+    assert decision.meta["replacement_min_risk_margin_base"] == pytest.approx(0.05)
+    assert decision.meta["replacement_min_risk_margin_blocked"] == pytest.approx(0.02)
 
 
 def test_shield_marks_raw_passthrough_for_low_risk_action():

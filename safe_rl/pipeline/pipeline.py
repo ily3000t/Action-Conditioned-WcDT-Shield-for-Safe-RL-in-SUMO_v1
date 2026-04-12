@@ -3966,6 +3966,11 @@ class SafeRLPipeline:
             "risk_threshold": float(stage_config.shield.risk_threshold),
             "uncertainty_threshold": float(stage_config.shield.uncertainty_threshold),
             "replacement_min_risk_margin": float(stage_config.shield.replacement_min_risk_margin),
+            "replacement_min_risk_margin_blocked": (
+                None
+                if stage_config.shield.replacement_min_risk_margin_blocked is None
+                else float(stage_config.shield.replacement_min_risk_margin_blocked)
+            ),
             "raw_passthrough_risk_threshold": float(stage_config.shield.raw_passthrough_risk_threshold),
             "effective_raw_passthrough_threshold": float(min(float(stage_config.shield.risk_threshold), float(stage_config.shield.raw_passthrough_risk_threshold))),
             "merge_override_margin": float(stage_config.shield.merge_override_margin),

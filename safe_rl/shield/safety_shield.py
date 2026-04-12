@@ -75,6 +75,7 @@ class SafetyShield:
         raw_eval = evaluations[policy_action]
         raw_threshold = min(float(self.config.risk_threshold), float(self.config.raw_passthrough_risk_threshold))
         block_trigger = self._resolve_block_trigger(raw_eval, raw_threshold)
+        replacement_margin_threshold_used = self._resolve_replacement_margin_threshold(block_trigger)
         shield_blocked = bool(block_trigger != "none")
         merge_phase_active = self._is_merge_coordination_phase(history_scene)
 
@@ -95,6 +96,7 @@ class SafetyShield:
                 merge_phase_active=merge_phase_active,
                 raw_threshold_used=raw_threshold,
                 block_trigger=block_trigger,
+                replacement_margin_threshold_used=replacement_margin_threshold_used,
             )
 
         safe_candidates = [
@@ -109,7 +111,7 @@ class SafetyShield:
             if candidate.action_id == policy_action:
                 continue
             margin = float(raw_eval.fine_risk or 0.0) - float(candidate.fine_risk or 0.0)
-            if margin < float(self.config.replacement_min_risk_margin):
+            if margin < float(replacement_margin_threshold_used):
                 candidate.constraint_reason = "blocked_by_margin"
                 blocked_reasons.append(candidate.constraint_reason)
                 continue
@@ -133,6 +135,7 @@ class SafetyShield:
                 merge_phase_active=merge_phase_active,
                 raw_threshold_used=raw_threshold,
                 block_trigger=block_trigger,
+                replacement_margin_threshold_used=replacement_margin_threshold_used,
             )
 
         if safe_candidates:
@@ -152,6 +155,7 @@ class SafetyShield:
                 merge_phase_active=merge_phase_active,
                 raw_threshold_used=raw_threshold,
                 block_trigger=block_trigger,
+                replacement_margin_threshold_used=replacement_margin_threshold_used,
             )
 
         fallback = fallback_action_id()
@@ -179,6 +183,7 @@ class SafetyShield:
             merge_phase_active=merge_phase_active,
             raw_threshold_used=raw_threshold,
             block_trigger=block_trigger,
+            replacement_margin_threshold_used=replacement_margin_threshold_used,
         )
 
     def _evaluate_candidate(
@@ -216,6 +221,7 @@ class SafetyShield:
         merge_phase_active: bool,
         raw_threshold_used: float,
         block_trigger: str,
+        replacement_margin_threshold_used: float,
     ) -> ShieldDecision:
         selected_eval.selected = True
         final_action = selected_eval.action_id
@@ -259,6 +265,13 @@ class SafetyShield:
             "block_trigger": str(block_trigger),
             "raw_threshold_used": float(raw_threshold_used),
             "raw_vs_threshold_margin": float(raw_vs_threshold_margin),
+            "replacement_min_risk_margin_used": float(replacement_margin_threshold_used),
+            "replacement_min_risk_margin_base": float(self.config.replacement_min_risk_margin),
+            "replacement_min_risk_margin_blocked": (
+                None
+                if getattr(self.config, "replacement_min_risk_margin_blocked", None) is None
+                else float(getattr(self.config, "replacement_min_risk_margin_blocked"))
+            ),
             "raw_world_prediction": raw_eval.world_prediction,
             "fallback_used": bool(fallback_used),
             "replacement_happened": bool(replacement_happened),
@@ -305,6 +318,21 @@ class SafetyShield:
         if uncertainty_blocked:
             return "uncertainty"
         return "none"
+
+    def _resolve_replacement_margin_threshold(self, block_trigger: str) -> float:
+        base_margin = float(self.config.replacement_min_risk_margin)
+        if str(block_trigger) == "none":
+            return base_margin
+        blocked_margin = getattr(self.config, "replacement_min_risk_margin_blocked", None)
+        if blocked_margin is None:
+            return base_margin
+        try:
+            blocked_margin_value = float(blocked_margin)
+        except Exception:
+            return base_margin
+        if blocked_margin_value < 0.0:
+            return base_margin
+        return blocked_margin_value
 
     def _serialize_candidate_evaluations(
         self,
