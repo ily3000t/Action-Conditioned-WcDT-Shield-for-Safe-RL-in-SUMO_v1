@@ -2579,6 +2579,16 @@ class SafeRLPipeline:
             "shield_contribution_validated": self._compute_attribution_passed(shielded_metrics),
             "stage5_paired_episode_results_path": str(target_paired_results_path),
         }
+        result["evaluation_seed_holdout"] = self._build_evaluation_seed_holdout_metadata(eval_seeds=eval_seeds)
+        result["evaluation_layers"] = self._build_evaluation_layers(
+            baseline_metrics=baseline_metrics,
+            shielded_metrics=shielded_metrics,
+            delta_metrics=delta,
+            distilled_metrics=None,
+        )
+        result["collision_baseline_zero"] = bool(
+            result["evaluation_layers"].get("event_layer", {}).get("collision_baseline_zero", False)
+        )
         if trace_payload is not None:
             result["shield_trace_summary_path"] = str(trace_payload["trace_summary_path"])
             result["shield_trace"] = trace_payload["summary"]
@@ -2623,6 +2633,15 @@ class SafeRLPipeline:
             )
             distill_env.close()
             result["system_distilled"] = distilled_metrics
+            result["evaluation_layers"] = self._build_evaluation_layers(
+                baseline_metrics=baseline_metrics,
+                shielded_metrics=shielded_metrics,
+                delta_metrics=delta,
+                distilled_metrics=distilled_metrics,
+            )
+            result["collision_baseline_zero"] = bool(
+                result["evaluation_layers"].get("event_layer", {}).get("collision_baseline_zero", False)
+            )
 
         if write_risk_v2_summary:
             self._write_risk_v2_eval_summary_from_stage5(result)
@@ -3006,6 +3025,126 @@ class SafeRLPipeline:
                 }
             )
         return results
+
+    def _metric_float(self, metrics: Optional[Dict[str, Any]], key: str, default: float = 0.0) -> float:
+        payload = dict(metrics or {})
+        value = payload.get(key, default)
+        try:
+            return float(value)
+        except Exception:
+            return float(default)
+
+    def _build_evaluation_seed_holdout_metadata(self, eval_seeds: Sequence[int]) -> Dict[str, Any]:
+        seed_sequence = [int(seed) for seed in list(eval_seeds or [])]
+        unique_ordered: List[int] = []
+        seen = set()
+        for seed in seed_sequence:
+            if seed in seen:
+                continue
+            seen.add(seed)
+            unique_ordered.append(int(seed))
+        midpoint = int(math.ceil(len(unique_ordered) / 2.0))
+        return {
+            "mode": "seed_group_only",
+            "scenario_holdout": False,
+            "seed_sequence": seed_sequence,
+            "unique_seed_count": int(len(unique_ordered)),
+            "holdout_group_a": [int(seed) for seed in unique_ordered[:midpoint]],
+            "holdout_group_b": [int(seed) for seed in unique_ordered[midpoint:]],
+            "note": "Seed-group holdout only; not a scenario distribution holdout.",
+        }
+
+    def _build_evaluation_layers(
+        self,
+        baseline_metrics: Dict[str, Any],
+        shielded_metrics: Dict[str, Any],
+        delta_metrics: Dict[str, Any],
+        distilled_metrics: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        baseline = dict(baseline_metrics or {})
+        shielded = dict(shielded_metrics or {})
+        delta = dict(delta_metrics or {})
+        distilled = dict(distilled_metrics or {}) if distilled_metrics is not None else {}
+
+        baseline_collision_rate = self._metric_float(baseline, "collision_rate")
+        shielded_collision_rate = self._metric_float(shielded, "collision_rate")
+        collision_baseline_zero = bool(baseline_collision_rate <= 1e-8)
+
+        baseline_task_reward = self._metric_float(baseline, "mean_task_reward", self._metric_float(baseline, "mean_reward"))
+        shielded_task_reward = self._metric_float(shielded, "mean_task_reward", self._metric_float(shielded, "mean_reward"))
+        baseline_penalized_reward = self._metric_float(baseline, "mean_reward")
+        shielded_penalized_reward = self._metric_float(shielded, "mean_reward")
+
+        mechanism_layer = {
+            "shield_called_steps": self._metric_float(shielded, "shield_called_steps"),
+            "shield_blocked_steps": self._metric_float(shielded, "shield_blocked_steps"),
+            "shield_replaced_steps": self._metric_float(shielded, "shield_replaced_steps"),
+            "replacement_count": self._metric_float(shielded, "replacement_count"),
+            "intervention_rate": self._metric_float(shielded, "intervention_rate"),
+            "mean_raw_risk": self._metric_float(shielded, "mean_raw_risk"),
+            "mean_final_risk": self._metric_float(shielded, "mean_final_risk"),
+            "mean_risk_reduction": self._metric_float(shielded, "mean_risk_reduction"),
+            "raw_to_final_risk_drop": self._metric_float(shielded, "mean_raw_risk") - self._metric_float(shielded, "mean_final_risk"),
+            "risk_reduction_positive": bool(self._metric_float(shielded, "mean_risk_reduction") > 0.0),
+            "replacement_happened": bool(self._metric_float(shielded, "replacement_count") > 0.0),
+            "attribution_signal": bool(
+                self._metric_float(shielded, "intervention_rate") > 0.0
+                and self._metric_float(shielded, "replacement_count") > 0.0
+                and self._metric_float(shielded, "mean_risk_reduction") > 0.0
+            ),
+        }
+
+        event_layer = {
+            "collision_baseline_zero": collision_baseline_zero,
+            "collision_rate_baseline": baseline_collision_rate,
+            "collision_rate_shielded": shielded_collision_rate,
+            "collision_reduction": self._metric_float(delta, "collision_reduction"),
+            "min_ttc_baseline": self._metric_float(baseline, "min_ttc"),
+            "min_ttc_shielded": self._metric_float(shielded, "min_ttc"),
+            "min_ttc_delta": self._metric_float(shielded, "min_ttc") - self._metric_float(baseline, "min_ttc"),
+            "min_distance_baseline": self._metric_float(baseline, "min_distance"),
+            "min_distance_shielded": self._metric_float(shielded, "min_distance"),
+            "min_distance_delta": self._metric_float(shielded, "min_distance") - self._metric_float(baseline, "min_distance"),
+            "near_risk_step_rate_baseline": self._metric_float(baseline, "near_risk_step_rate"),
+            "near_risk_step_rate_shielded": self._metric_float(shielded, "near_risk_step_rate"),
+            "near_risk_step_rate_delta": self._metric_float(baseline, "near_risk_step_rate") - self._metric_float(shielded, "near_risk_step_rate"),
+            "near_risk_episode_rate_baseline": self._metric_float(baseline, "near_risk_episode_rate"),
+            "near_risk_episode_rate_shielded": self._metric_float(shielded, "near_risk_episode_rate"),
+            "seed_group_holdout_only": True,
+        }
+
+        performance_layer = {
+            "avg_speed_baseline": self._metric_float(baseline, "avg_speed"),
+            "avg_speed_shielded": self._metric_float(shielded, "avg_speed"),
+            "efficiency_drop": self._metric_float(delta, "efficiency_drop"),
+            "mean_task_reward_baseline": baseline_task_reward,
+            "mean_task_reward_shielded": shielded_task_reward,
+            "mean_task_reward_delta": shielded_task_reward - baseline_task_reward,
+            "mean_penalized_reward_baseline": baseline_penalized_reward,
+            "mean_penalized_reward_shielded": shielded_penalized_reward,
+            "mean_penalized_reward_delta": shielded_penalized_reward - baseline_penalized_reward,
+        }
+        if distilled:
+            distilled_task_reward = self._metric_float(
+                distilled, "mean_task_reward", self._metric_float(distilled, "mean_reward")
+            )
+            distilled_penalized_reward = self._metric_float(distilled, "mean_reward")
+            performance_layer.update(
+                {
+                    "mean_task_reward_distilled": distilled_task_reward,
+                    "mean_task_reward_delta_distilled_vs_baseline": distilled_task_reward - baseline_task_reward,
+                    "mean_task_reward_delta_distilled_vs_shielded": distilled_task_reward - shielded_task_reward,
+                    "mean_penalized_reward_distilled": distilled_penalized_reward,
+                    "mean_penalized_reward_delta_distilled_vs_baseline": distilled_penalized_reward - baseline_penalized_reward,
+                    "mean_penalized_reward_delta_distilled_vs_shielded": distilled_penalized_reward - shielded_penalized_reward,
+                }
+            )
+
+        return {
+            "mechanism_layer": mechanism_layer,
+            "event_layer": event_layer,
+            "performance_layer": performance_layer,
+        }
 
     def _build_evaluation_conclusion(self, evaluation: Dict[str, Any]) -> str:
         performance_passed = bool(evaluation.get("performance_passed", False))

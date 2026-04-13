@@ -111,7 +111,12 @@ class SafetyShield:
             if candidate.action_id == policy_action:
                 continue
             margin = float(raw_eval.fine_risk or 0.0) - float(candidate.fine_risk or 0.0)
-            if margin < float(replacement_margin_threshold_used):
+            candidate_margin_threshold = self._resolve_candidate_margin_threshold(
+                base_margin_threshold=float(replacement_margin_threshold_used),
+                distance_to_raw=int(candidate.distance_to_raw),
+                block_trigger=block_trigger,
+            )
+            if margin < float(candidate_margin_threshold):
                 candidate.constraint_reason = "blocked_by_margin"
                 blocked_reasons.append(candidate.constraint_reason)
                 continue
@@ -272,6 +277,7 @@ class SafetyShield:
                 if getattr(self.config, "replacement_min_risk_margin_blocked", None) is None
                 else float(getattr(self.config, "replacement_min_risk_margin_blocked"))
             ),
+            "blocked_distance_margin_slope": float(getattr(self.config, "blocked_distance_margin_slope", 0.0) or 0.0),
             "raw_world_prediction": raw_eval.world_prediction,
             "fallback_used": bool(fallback_used),
             "replacement_happened": bool(replacement_happened),
@@ -333,6 +339,20 @@ class SafetyShield:
         if blocked_margin_value < 0.0:
             return base_margin
         return blocked_margin_value
+
+    def _resolve_candidate_margin_threshold(
+        self,
+        base_margin_threshold: float,
+        distance_to_raw: int,
+        block_trigger: str,
+    ) -> float:
+        threshold = float(base_margin_threshold)
+        if str(block_trigger) == "none":
+            return threshold
+        slope = float(getattr(self.config, "blocked_distance_margin_slope", 0.0) or 0.0)
+        if slope <= 0.0:
+            return threshold
+        return threshold + max(0, int(distance_to_raw)) * slope
 
     def _serialize_candidate_evaluations(
         self,

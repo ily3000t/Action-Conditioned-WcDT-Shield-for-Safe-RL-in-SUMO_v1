@@ -7,12 +7,31 @@ from safe_rl.config.config import EvalConfig
 from safe_rl.data.types import EpisodeSummary
 
 
+NEAR_RISK_TTC_THRESHOLD = 2.0
+NEAR_RISK_MIN_DISTANCE_THRESHOLD = 6.0
+
+
 def summarize_episode(episode_id: str, step_infos: List[dict], rewards: List[float]) -> EpisodeSummary:
     steps = len(step_infos)
     collisions = sum(1 for info in step_infos if bool(info.get("collision", False)))
     interventions = sum(1 for info in step_infos if bool(info.get("intervened", False)))
     avg_speed = float(np.mean([float(info.get("ego_speed", 0.0)) for info in step_infos])) if step_infos else 0.0
     mean_reward = float(np.mean(rewards)) if rewards else 0.0
+    mean_task_reward = float(
+        np.mean([float(info.get("task_reward", info.get("reward", 0.0))) for info in step_infos])
+    ) if step_infos else 0.0
+    ttc_values = [float(info.get("ttc", 1e6)) for info in step_infos]
+    min_distance_values = [float(info.get("min_distance", 1e6)) for info in step_infos]
+    min_ttc = float(min(ttc_values)) if ttc_values else 0.0
+    min_distance = float(min(min_distance_values)) if min_distance_values else 0.0
+    near_risk_step_count = sum(
+        int(
+            float(info.get("ttc", 1e6)) <= NEAR_RISK_TTC_THRESHOLD
+            or float(info.get("min_distance", 1e6)) <= NEAR_RISK_MIN_DISTANCE_THRESHOLD
+        )
+        for info in step_infos
+    )
+    near_risk_step_rate = float(near_risk_step_count / max(1, steps))
     mean_raw_risk = float(np.mean([float(info.get("risk_raw", 0.0)) for info in step_infos])) if step_infos else 0.0
     mean_final_risk = float(np.mean([float(info.get("risk_final", 0.0)) for info in step_infos])) if step_infos else 0.0
     mean_risk_reduction = float(
@@ -34,6 +53,11 @@ def summarize_episode(episode_id: str, step_infos: List[dict], rewards: List[flo
         avg_speed=avg_speed,
         mean_reward=mean_reward,
         success=success,
+        mean_task_reward=mean_task_reward,
+        min_ttc=min_ttc,
+        min_distance=min_distance,
+        near_risk_step_count=near_risk_step_count,
+        near_risk_step_rate=near_risk_step_rate,
         mean_raw_risk=mean_raw_risk,
         mean_final_risk=mean_final_risk,
         mean_risk_reduction=mean_risk_reduction,
@@ -56,6 +80,12 @@ def aggregate_episode_summaries(summaries: List[EpisodeSummary]) -> Dict[str, fl
             "success_rate": 0.0,
             "avg_speed": 0.0,
             "mean_reward": 0.0,
+            "mean_task_reward": 0.0,
+            "min_ttc": 0.0,
+            "min_distance": 0.0,
+            "near_risk_step_count": 0.0,
+            "near_risk_step_rate": 0.0,
+            "near_risk_episode_rate": 0.0,
             "mean_raw_risk": 0.0,
             "mean_final_risk": 0.0,
             "mean_risk_reduction": 0.0,
@@ -74,6 +104,12 @@ def aggregate_episode_summaries(summaries: List[EpisodeSummary]) -> Dict[str, fl
     success_rate = float(sum(1 for s in summaries if s.success) / episodes)
     avg_speed = float(np.mean([s.avg_speed for s in summaries]))
     mean_reward = float(np.mean([s.mean_reward for s in summaries]))
+    mean_task_reward = float(np.mean([s.mean_task_reward for s in summaries]))
+    min_ttc = float(np.min([s.min_ttc for s in summaries]))
+    min_distance = float(np.min([s.min_distance for s in summaries]))
+    near_risk_step_count = float(sum(s.near_risk_step_count for s in summaries))
+    near_risk_step_rate = float(near_risk_step_count / max(1, sum(s.steps for s in summaries)))
+    near_risk_episode_rate = float(sum(1 for s in summaries if s.near_risk_step_count > 0) / episodes)
     mean_raw_risk = float(np.mean([s.mean_raw_risk for s in summaries]))
     mean_final_risk = float(np.mean([s.mean_final_risk for s in summaries]))
     mean_risk_reduction = float(np.mean([s.mean_risk_reduction for s in summaries]))
@@ -91,6 +127,12 @@ def aggregate_episode_summaries(summaries: List[EpisodeSummary]) -> Dict[str, fl
         "success_rate": success_rate,
         "avg_speed": avg_speed,
         "mean_reward": mean_reward,
+        "mean_task_reward": mean_task_reward,
+        "min_ttc": min_ttc,
+        "min_distance": min_distance,
+        "near_risk_step_count": near_risk_step_count,
+        "near_risk_step_rate": near_risk_step_rate,
+        "near_risk_episode_rate": near_risk_episode_rate,
         "mean_raw_risk": mean_raw_risk,
         "mean_final_risk": mean_final_risk,
         "mean_risk_reduction": mean_risk_reduction,

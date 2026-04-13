@@ -147,3 +147,25 @@ safe_rl_output/runs/<run_id>/tensorboard/
   - risk-model score resolution/calibration is too weak
   - Stage4 policy visits a more conservative state distribution than Stage1/2 training data
   - this is not necessarily a shield replacement-logic bug
+
+## 8. New Evaluation/Desensitization Profiles
+
+- `default_safe_rl.yaml` remains the main entry and keeps `shield.profile=balanced`.
+- Use independent profiles to avoid mixed-variable attribution:
+  - `stage5_eval_hardening.yaml`: evaluation only (`eval.eval_episodes=90`, expanded seeds).
+  - `stage45_cost_desensitize.yaml`: Stage4/5 behavior desensitization only (`blocked_distance_margin_slope`, distill lr/epochs).
+
+Run commands:
+
+```bash
+# Evaluation hardening only
+python safe_rl_main.py --config safe_rl/config/stage5_eval_hardening.yaml --stage stage5 --run-id <run_id>
+
+# Cost desensitization only
+python safe_rl_main.py --config safe_rl/config/stage45_cost_desensitize.yaml --stage stage4 --run-id <run_id>
+python safe_rl_main.py --config safe_rl/config/stage45_cost_desensitize.yaml --stage stage5 --run-id <run_id>
+```
+
+Notes:
+- `stage5_eval_hardening.yaml` uses seed-group holdout (same scenario, different seed groups).
+- Seed-group holdout is **not** scenario distribution holdout.

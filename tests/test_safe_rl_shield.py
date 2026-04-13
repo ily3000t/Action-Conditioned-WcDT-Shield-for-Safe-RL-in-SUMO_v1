@@ -111,6 +111,63 @@ def test_shield_uses_blocked_margin_override_for_blocked_raw_action():
     assert decision.meta["replacement_min_risk_margin_blocked"] == pytest.approx(0.02)
 
 
+def test_shield_blocked_distance_margin_slope_zero_keeps_existing_behavior():
+    config = ShieldConfig(
+        risk_threshold=0.40,
+        uncertainty_threshold=0.30,
+        candidate_count=7,
+        coarse_top_k=7,
+        replacement_min_risk_margin=0.05,
+        replacement_min_risk_margin_blocked=0.02,
+        blocked_distance_margin_slope=0.0,
+    )
+    predictor = DummyWorldPredictor({
+        4: 0.43,
+        1: 0.60,
+        7: 0.60,
+        3: 0.60,
+        5: 0.60,
+        0: 0.38,  # distance_to_raw=2, margin=0.05
+        2: 0.60,
+    })
+    shield = SafetyShield(config=config, light_predictor=DummyLightPredictor(), world_predictor=predictor)
+
+    decision = shield.select_action(_history_scene(), 4)
+    assert decision.intervened is True
+    assert decision.final_action == 0
+    assert decision.meta["replacement_min_risk_margin_used"] == pytest.approx(0.02)
+    assert decision.meta["blocked_distance_margin_slope"] == pytest.approx(0.0)
+
+
+def test_shield_blocked_distance_margin_slope_penalizes_far_candidates():
+    config = ShieldConfig(
+        risk_threshold=0.40,
+        uncertainty_threshold=0.30,
+        candidate_count=7,
+        coarse_top_k=7,
+        replacement_min_risk_margin=0.05,
+        replacement_min_risk_margin_blocked=0.02,
+        blocked_distance_margin_slope=0.02,
+    )
+    predictor = DummyWorldPredictor({
+        4: 0.43,
+        1: 0.60,
+        7: 0.60,
+        3: 0.60,
+        5: 0.60,
+        0: 0.38,  # distance_to_raw=2, margin=0.05, required_margin=0.06
+        2: 0.60,
+    })
+    shield = SafetyShield(config=config, light_predictor=DummyLightPredictor(), world_predictor=predictor)
+
+    decision = shield.select_action(_history_scene(), 4)
+    assert decision.intervened is False
+    assert decision.final_action == 4
+    assert decision.reason == "replacement_blocked_by_constraint"
+    assert decision.meta["constraint_reason"] == "blocked_by_margin"
+    assert decision.meta["blocked_distance_margin_slope"] == pytest.approx(0.02)
+
+
 def test_shield_marks_raw_passthrough_for_low_risk_action():
     config = ShieldConfig(risk_threshold=0.60, uncertainty_threshold=0.30, candidate_count=7, coarse_top_k=4)
     predictor = DummyWorldPredictor({4: 0.18, 1: 0.10})

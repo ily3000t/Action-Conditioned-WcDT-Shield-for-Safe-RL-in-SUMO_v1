@@ -946,8 +946,19 @@ def test_evaluate_uses_same_policy_for_shield_off_on_and_shared_seeds(monkeypatc
     assert result["paired_risky_mode"] is True
     assert result["paired_scenario_source"] == config.sim.sumo_cfg
     assert result["policy_source"].endswith("policy_meta.json")
+    assert result["acceptance_passed"] is True
+    assert result["performance_passed"] is True
     assert result["shield_contribution_validated"] is True
     assert result["attribution_passed"] is True
+    assert result["collision_baseline_zero"] is False
+    assert "evaluation_layers" in result
+    assert "mechanism_layer" in result["evaluation_layers"]
+    assert "event_layer" in result["evaluation_layers"]
+    assert "performance_layer" in result["evaluation_layers"]
+    assert result["evaluation_layers"]["performance_layer"]["mean_task_reward_delta"] == pytest.approx(0.5)
+    assert result["evaluation_layers"]["performance_layer"]["mean_penalized_reward_delta"] == pytest.approx(0.5)
+    assert result["evaluation_layers"]["event_layer"]["seed_group_holdout_only"] is True
+    assert result["evaluation_seed_holdout"]["mode"] == "seed_group_only"
     assert Path(result["stage5_paired_episode_results_path"]).exists()
     paired_payload = json.loads(Path(result["stage5_paired_episode_results_path"]).read_text(encoding="utf-8"))
     assert len(paired_payload["pairs"]) == 3
@@ -1037,6 +1048,50 @@ def test_attribution_passed_requires_real_action_replacement(monkeypatch):
     assert result["performance_passed"] is True
     assert result["attribution_passed"] is False
     assert result["shield_contribution_validated"] is False
+
+
+def test_build_evaluation_layers_marks_collision_baseline_zero():
+    config = _tiny_config()
+    pipeline = SafeRLPipeline(config)
+    run_id = f"ut_eval_layers_collision_zero_{uuid.uuid4().hex[:8]}"
+    pipeline._prepare_run_context(stage="stage5", run_id=run_id)
+
+    layers = pipeline._build_evaluation_layers(
+        baseline_metrics={
+            "collision_rate": 0.0,
+            "mean_reward": 1.0,
+            "mean_task_reward": 1.2,
+            "avg_speed": 10.0,
+            "min_ttc": 5.0,
+            "min_distance": 10.0,
+            "near_risk_step_rate": 0.25,
+            "near_risk_episode_rate": 0.5,
+        },
+        shielded_metrics={
+            "collision_rate": 0.0,
+            "mean_reward": 0.9,
+            "mean_task_reward": 1.1,
+            "avg_speed": 9.5,
+            "mean_raw_risk": 0.6,
+            "mean_final_risk": 0.4,
+            "mean_risk_reduction": 0.2,
+            "intervention_rate": 0.3,
+            "replacement_count": 10,
+            "shield_called_steps": 100,
+            "shield_blocked_steps": 20,
+            "shield_replaced_steps": 10,
+            "min_ttc": 6.0,
+            "min_distance": 11.0,
+            "near_risk_step_rate": 0.15,
+            "near_risk_episode_rate": 0.4,
+        },
+        delta_metrics={"collision_reduction": 0.0, "efficiency_drop": 0.05},
+    )
+
+    assert layers["event_layer"]["collision_baseline_zero"] is True
+    assert layers["event_layer"]["collision_reduction"] == pytest.approx(0.0)
+    assert layers["performance_layer"]["mean_task_reward_delta"] == pytest.approx(-0.1)
+    assert layers["performance_layer"]["mean_penalized_reward_delta"] == pytest.approx(-0.1)
 
 
 

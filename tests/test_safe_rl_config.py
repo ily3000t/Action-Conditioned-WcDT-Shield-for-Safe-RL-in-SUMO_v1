@@ -34,6 +34,7 @@ def test_default_config_loads():
     assert config.shield.balanced_raw_passthrough_risk_threshold == 0.193
     assert config.shield.raw_passthrough_risk_threshold == 0.193
     assert config.shield.replacement_min_risk_margin_blocked == 0.02
+    assert config.shield.blocked_distance_margin_slope == 0.0
 
 
 def test_tensorboard_config_override():
@@ -294,6 +295,22 @@ def test_stage5_pair_bootstrap_config_loads():
     assert len(config.shield_trace.seed_list) == 50
     assert config.eval.eval_episodes == 50
     assert config.tensorboard.run_name == "shield_trace_pair_bootstrap"
+
+
+def test_stage5_eval_hardening_config_loads():
+    config = load_safe_rl_config("safe_rl/config/stage5_eval_hardening.yaml")
+    assert config.eval.eval_episodes == 90
+    assert len(config.eval.seed_list) >= 12
+    assert config.tensorboard.run_name == "stage5_eval_hardening"
+
+
+def test_stage45_cost_desensitize_config_loads():
+    config = load_safe_rl_config("safe_rl/config/stage45_cost_desensitize.yaml")
+    assert config.shield.blocked_distance_margin_slope == 0.015
+    assert config.distill.learning_rate == 0.0003
+    assert config.distill.epochs == 8
+    assert config.tensorboard.run_name == "stage45_cost_desensitize"
+
 
 def test_risk_model_v2_defaults_enabled():
     config = load_safe_rl_config()

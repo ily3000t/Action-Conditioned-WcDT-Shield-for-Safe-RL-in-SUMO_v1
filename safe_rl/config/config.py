@@ -120,6 +120,7 @@ class ShieldConfig:
     fallback_action: str = "DECEL_KEEP"
     replacement_min_risk_margin: float = 0.05
     replacement_min_risk_margin_blocked: Optional[float] = None
+    blocked_distance_margin_slope: float = 0.0
     raw_passthrough_risk_threshold: float = 0.20
     legacy_replacement_min_risk_margin: float = 0.05
     legacy_raw_passthrough_risk_threshold: float = 0.20

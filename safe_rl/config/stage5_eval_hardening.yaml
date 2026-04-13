@@ -1,0 +1,8 @@
+# Stage5 evaluation hardening profile.
+# Purpose: strengthen evaluation coverage only (no training behavior changes).
+eval:
+  eval_episodes: 90
+  seed_list: [42, 123, 2024, 7, 11, 29, 47, 64, 77, 88, 101, 303]
+
+tensorboard:
+  run_name: "stage5_eval_hardening"

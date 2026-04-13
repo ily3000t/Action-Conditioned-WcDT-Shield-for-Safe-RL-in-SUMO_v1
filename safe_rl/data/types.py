@@ -142,6 +142,11 @@ class EpisodeSummary:
     avg_speed: float
     mean_reward: float
     success: bool
+    mean_task_reward: float = 0.0
+    min_ttc: float = 0.0
+    min_distance: float = 0.0
+    near_risk_step_count: int = 0
+    near_risk_step_rate: float = 0.0
     mean_raw_risk: float = 0.0
     mean_final_risk: float = 0.0
     mean_risk_reduction: float = 0.0

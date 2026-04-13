@@ -1,0 +1,11 @@
+# Stage4/5 cost desensitization profile.
+# Purpose: keep safety mechanism active while reducing efficiency/reward drop sensitivity.
+shield:
+  blocked_distance_margin_slope: 0.015
+
+distill:
+  learning_rate: 0.0003
+  epochs: 8
+
+tensorboard:
+  run_name: "stage45_cost_desensitize"
