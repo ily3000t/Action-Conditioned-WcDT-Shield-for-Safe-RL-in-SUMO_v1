@@ -4,6 +4,7 @@ import uuid
 from pathlib import Path
 
 from safe_rl.visualization.export_paired_gif import export_paired_gifs
+from safe_rl.visualization.replay_in_sumo_gui import write_gui_replay_override_file
 from safe_rl.visualization.replay_episode import load_pair_payload, normalize_heading_to_degrees, render_pair_gif
 from safe_rl.visualization.select_anomaly_cases import select_anomaly_cases
 
@@ -177,3 +178,82 @@ def test_export_paired_gifs_tolerates_old_payload_without_distilled_steps():
     exported = summary["exported"][0]
     assert Path(exported["gif_path"]).exists()
     assert exported["distilled_unavailable"] is True
+
+
+def test_select_anomaly_cases_fallback_mode_when_no_rule_match():
+    run_id = f"ut_viz_fallback_{uuid.uuid4().hex[:8]}"
+    run_root = _tmp_dir("viz_fallback_run")
+    trace_dir = run_root / run_id / "reports" / "stage5_trace_capture_default"
+    trace_dir.mkdir(parents=True, exist_ok=True)
+
+    payload = _pair_payload(seed=42, include_distilled=True)
+    payload["shielded_steps"][0]["constraint_reason"] = ""
+    payload["shielded_steps"][0]["block_trigger"] = "none"
+    payload["shielded_steps"][0]["replacement_happened"] = False
+    payload["shielded_steps"][0]["min_ttc"] = 8.0
+    payload["shielded_steps"][0]["min_distance"] = 15.0
+    payload["shielded_steps"][0]["task_reward"] = 0.20
+    payload["baseline_steps"][0]["task_reward"] = 0.20
+    payload["baseline_reward"] = 0.20
+    payload["shielded_reward"] = 0.19  # only mild penalized drop
+
+    pair_path = trace_dir / "pair_00_seed_42.json"
+    pair_path.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+    (trace_dir / "trace_summary.json").write_text(
+        json.dumps({"pair_files": [str(pair_path)]}, ensure_ascii=False),
+        encoding="utf-8",
+    )
+
+    result = select_anomaly_cases(
+        run_id=run_id,
+        trace_dir=str(trace_dir),
+        run_root=run_root,
+        top_k=5,
+        output_root=Path("qualitative_results/anomaly_cases"),
+    )
+    assert result["selected_count"] == 1
+    assert result["selection_mode"] == "fallback_top_signal"
+    assert "fallback_top_signal" in result["cases"][0]["matched_rules"]
+
+
+def test_replay_in_sumo_gui_writes_merged_override_with_trace_scenario():
+    run_id = f"ut_viz_gui_{uuid.uuid4().hex[:8]}"
+    run_root = _tmp_dir("viz_gui_run")
+    trace_dir = run_root / "safe_rl_output" / "runs" / run_id / "reports" / "stage5_trace_capture_default"
+    trace_dir.mkdir(parents=True, exist_ok=True)
+    pair_path = trace_dir / "pair_00_seed_123.json"
+    payload = _pair_payload(seed=123, include_distilled=True)
+    payload["scenario_source"] = "scenarios/highway_merge/highway_merge.sumocfg"
+    pair_path.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+
+    # create minimal base config under current workspace
+    base_config = run_root / "base_gui.yaml"
+    base_config.write_text("sim:\n  use_gui: false\n  sumo_cfg: scenarios/highway_merge/highway_merge.sumocfg\n", encoding="utf-8")
+
+    cwd = Path.cwd()
+    try:
+        # script resolves trace under safe_rl_output/runs/<run_id>/reports
+        # symlink-like structure by switching cwd to temp run root folder
+        # keep test portable by creating expected relative tree and changing cwd.
+        (run_root / "safe_rl_output").mkdir(exist_ok=True)
+        # Already created full path above, now execute from run_root.
+        import os
+
+        os.chdir(run_root)
+        override = write_gui_replay_override_file(
+            run_id=run_id,
+            seed=123,
+            mode="shielded",
+            base_config_path=Path("base_gui.yaml"),
+            trace_dir="stage5_trace_capture_default",
+            output_dir=Path("gui_overrides"),
+        )
+        data = json.loads(json.dumps(__import__("yaml").safe_load(override.read_text(encoding="utf-8"))))
+        assert data["sim"]["use_gui"] is True
+        assert data["sim"]["sumo_cfg"] == "scenarios/highway_merge/highway_merge.sumocfg"
+        assert data["eval"]["eval_episodes"] == 1
+        assert data["eval"]["seed_list"] == [123]
+    finally:
+        import os
+
+        os.chdir(cwd)

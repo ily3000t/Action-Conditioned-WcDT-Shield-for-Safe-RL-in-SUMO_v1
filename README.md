@@ -203,7 +203,7 @@ Single-case replay:
 python -m safe_rl.visualization.replay_episode --pair-file <pair_json_path> --output <gif_path>
 
 # GUI deep-dive for one selected seed/mode
-python -m safe_rl.visualization.replay_in_sumo_gui --run-id <run_id> --seed <seed> --mode shielded
+python -m safe_rl.visualization.replay_in_sumo_gui --run-id <run_id> --seed <seed> --mode shielded --trace-dir stage5_trace_capture_default --base-config safe_rl/config/stage5_trace_capture_default.yaml
 ```
 
 Notes:
@@ -211,6 +211,7 @@ Notes:
 - GUI replay is for case-level deep-dive; offline replay remains the primary batch comparison tool.
 - Pair trace payload now supports `baseline_steps / shielded_steps / distilled_steps`.
 - Older trace files without `distilled_steps` are downgraded to dual-track replay with explicit `distilled_unavailable=true`.
+- If strict rules select zero cases, anomaly selector falls back to `fallback_top_signal` ranking to keep diagnosis usable.
 - Heading anomaly checks use this fixed unit rule:
   - if `abs(heading) > 2*pi`, treat as degrees
   - otherwise convert radians to degrees before threshold checks

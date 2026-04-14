@@ -1,12 +1,13 @@
 import argparse
 import json
 import math
+import xml.etree.ElementTree as ET
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 try:
     from PIL import Image, ImageDraw, ImageFont
-except Exception:  # pragma: no cover - fallback when Pillow is unavailable
+except Exception:  # pragma: no cover
     Image = None
     ImageDraw = None
     ImageFont = None
@@ -16,6 +17,7 @@ TRACK_ORDER = ("baseline", "shielded", "distilled")
 DEFAULT_FRAME_SIZE = (1280, 720)
 DEFAULT_FPS = 6
 _TWO_PI = 2.0 * math.pi
+_LANE_CACHE: Dict[str, List[List[List[float]]]] = {}
 
 
 def normalize_heading_to_degrees(value: Any) -> float:
@@ -131,7 +133,16 @@ def render_pair_gif(
     }
     frame_count = max((len(steps_by_track[name]) for name in visible_tracks), default=1)
     frame_count = max(frame_count, 1)
-    bounds = _scene_bounds(normalized, visible_tracks)
+    fallback_lane_polylines = _resolve_lane_polylines_from_scenario(str(normalized.get("scenario_source", "")))
+    fallback_bounds = _scene_bounds(normalized, visible_tracks)
+    track_view_bounds = {
+        track_name: _track_fixed_view_bounds(
+            steps=list(steps_by_track.get(track_name, []) or []),
+            fallback_bounds=fallback_bounds,
+            fallback_lane_polylines=fallback_lane_polylines,
+        )
+        for track_name in visible_tracks
+    }
 
     frames: List[Image.Image] = []
     for idx in range(frame_count):
@@ -144,7 +155,8 @@ def render_pair_gif(
             visible_tracks=visible_tracks,
             steps_by_track=steps_by_track,
             frame_index=idx,
-            bounds=bounds,
+            track_view_bounds=track_view_bounds,
+            fallback_lane_polylines=fallback_lane_polylines,
         )
         timeline_track = "shielded" if "shielded" in visible_tracks else visible_tracks[0]
         _draw_timeline_panel(
@@ -163,6 +175,7 @@ def render_pair_gif(
         duration=duration_ms,
         loop=0,
         optimize=False,
+        disposal=2,
     )
     return output_path
 
@@ -199,7 +212,8 @@ def _draw_track_panels(
     visible_tracks: Sequence[str],
     steps_by_track: Dict[str, Sequence[Dict[str, Any]]],
     frame_index: int,
-    bounds: Tuple[float, float, float, float],
+    track_view_bounds: Dict[str, Tuple[float, float, float, float]],
+    fallback_lane_polylines: Sequence[Sequence[Sequence[float]]],
 ):
     panel_top = 44
     panel_bottom = 484
@@ -216,40 +230,148 @@ def _draw_track_panels(
         step = track_steps[min(frame_index, len(track_steps) - 1)] if track_steps else normalize_step({})
         map_box = (left + 8, panel_top + 24, right - 16, panel_top + 276)
         stats_box = (left + 8, panel_top + 282, right - 16, panel_bottom - 8)
-        _draw_scene_map(draw, step, bounds, map_box)
+        _draw_scene_map(
+            draw=draw,
+            step=step,
+            fixed_view_bounds=track_view_bounds.get(track_name, (0.0, 120.0, -15.0, 15.0)),
+            panel_box=map_box,
+            fallback_lane_polylines=fallback_lane_polylines,
+        )
         _draw_step_stats(draw, step, stats_box)
 
 
 def _draw_scene_map(
     draw: "ImageDraw.ImageDraw",
     step: Dict[str, Any],
-    bounds: Tuple[float, float, float, float],
+    fixed_view_bounds: Tuple[float, float, float, float],
     panel_box: Tuple[int, int, int, int],
+    fallback_lane_polylines: Sequence[Sequence[Sequence[float]]],
 ):
-    x_min, x_max, y_min, y_max = bounds
     scene = _extract_latest_scene(step)
+    focus_vehicles = _select_focus_vehicles(scene)
+    view_bounds = fixed_view_bounds
+    x_min, x_max, y_min, y_max = view_bounds
+
     lane_polylines = list(scene.get("lane_polylines", []) or [])
-    if lane_polylines:
-        for polyline in lane_polylines:
-            points = []
-            for point in list(polyline or []):
-                if len(point) < 2:
-                    continue
-                px, py = _project(point[0], point[1], x_min, x_max, y_min, y_max, panel_box)
-                points.append((px, py))
-            if len(points) >= 2:
-                draw.line(points, fill=(210, 212, 220), width=2)
-    else:
-        # fallback lane reference when lane geometry is unavailable
+    if not lane_polylines:
+        lane_polylines = [list(polyline) for polyline in list(fallback_lane_polylines or [])]
+
+    lane_drawn = False
+    for polyline in lane_polylines:
+        if not _polyline_intersects_bounds(polyline, view_bounds):
+            continue
+        points = []
+        for point in list(polyline or []):
+            if len(point) < 2:
+                continue
+            px, py = _project(point[0], point[1], x_min, x_max, y_min, y_max, panel_box)
+            points.append((px, py))
+        if len(points) >= 2:
+            draw.line(points, fill=(210, 212, 220), width=2)
+            lane_drawn = True
+
+    if not lane_drawn:
         left, top, right, bottom = panel_box
         lane_mid = int((top + bottom) / 2)
         draw.line((left, lane_mid, right, lane_mid), fill=(220, 224, 232), width=2)
         draw.line((left, lane_mid - 38, right, lane_mid - 38), fill=(233, 236, 241), width=1)
         draw.line((left, lane_mid + 38, right, lane_mid + 38), fill=(233, 236, 241), width=1)
 
-    vehicles = list(scene.get("vehicles", []) or [])
+    for vehicle in focus_vehicles:
+        _draw_vehicle(draw, vehicle, panel_box, view_bounds)
+
+
+def _select_focus_vehicles(scene: Dict[str, Any]) -> List[Dict[str, Any]]:
+    vehicles = [dict(item) for item in list(scene.get("vehicles", []) or [])]
+    if not vehicles:
+        return []
+
+    ego_id = str(scene.get("ego_id", "ego"))
+    ego_vehicle = None
     for vehicle in vehicles:
-        _draw_vehicle(draw, vehicle, panel_box, bounds)
+        if str(vehicle.get("vehicle_id", "")) == ego_id:
+            ego_vehicle = vehicle
+            break
+    if ego_vehicle is None:
+        ego_vehicle = vehicles[0]
+        ego_id = str(ego_vehicle.get("vehicle_id", "ego"))
+
+    selected: List[Dict[str, Any]] = []
+    selected_ids = set()
+
+    def _try_add(vehicle: Dict[str, Any]):
+        vid = str(vehicle.get("vehicle_id", ""))
+        if vid in selected_ids:
+            return
+        selected.append(vehicle)
+        selected_ids.add(vid)
+
+    _try_add(ego_vehicle)
+    for vehicle in vehicles:
+        vid = str(vehicle.get("vehicle_id", "")).lower()
+        if "lead" in vid or "merge" in vid:
+            _try_add(vehicle)
+
+    ego_x = _safe_float(ego_vehicle.get("x", 0.0), 0.0)
+    ego_y = _safe_float(ego_vehicle.get("y", 0.0), 0.0)
+    remaining = [v for v in vehicles if str(v.get("vehicle_id", "")) not in selected_ids]
+    remaining.sort(
+        key=lambda vehicle: (
+            (_safe_float(vehicle.get("x", 0.0), 0.0) - ego_x) ** 2 + (_safe_float(vehicle.get("y", 0.0), 0.0) - ego_y) ** 2,
+            str(vehicle.get("vehicle_id", "")),
+        )
+    )
+    for vehicle in remaining[:3]:
+        _try_add(vehicle)
+    return selected
+
+
+def _track_fixed_view_bounds(
+    steps: Sequence[Dict[str, Any]],
+    fallback_bounds: Tuple[float, float, float, float],
+    fallback_lane_polylines: Sequence[Sequence[Sequence[float]]],
+) -> Tuple[float, float, float, float]:
+    xs: List[float] = []
+    ys: List[float] = []
+    for step in list(steps or []):
+        scene = _extract_latest_scene(step)
+        ego_id = str(scene.get("ego_id", "ego"))
+        for vehicle in list(scene.get("vehicles", []) or []):
+            vid = str(vehicle.get("vehicle_id", ""))
+            if vid == ego_id or ("lead" in vid.lower()) or ("merge" in vid.lower()):
+                xs.append(_safe_float(vehicle.get("x", 0.0), 0.0))
+                ys.append(_safe_float(vehicle.get("y", 0.0), 0.0))
+    if not xs or not ys:
+        xs.extend([fallback_bounds[0], fallback_bounds[1]])
+        ys.extend([fallback_bounds[2], fallback_bounds[3]])
+
+    x_min = min(xs)
+    x_max = max(xs)
+    y_min = min(ys)
+    y_max = max(ys)
+
+    if abs(x_max - x_min) < 40.0:
+        center = (x_min + x_max) / 2.0
+        x_min = center - 20.0
+        x_max = center + 20.0
+    if abs(y_max - y_min) < 8.0:
+        center = (y_min + y_max) / 2.0
+        y_min = center - 4.0
+        y_max = center + 4.0
+
+    margin_x = max(35.0, (x_max - x_min) * 0.2)
+    margin_y = max(8.0, (y_max - y_min) * 0.5)
+    bounds = (
+        float(x_min - margin_x),
+        float(x_max + margin_x),
+        float(y_min - margin_y),
+        float(y_max + margin_y),
+    )
+
+    # Ensure selected fixed bounds still intersect at least part of lane geometry.
+    if fallback_lane_polylines and not any(_polyline_intersects_bounds(polyline, bounds) for polyline in fallback_lane_polylines):
+        return fallback_bounds
+    return bounds
 
 
 def _draw_vehicle(
@@ -277,8 +399,8 @@ def _draw_vehicle(
         panel_box,
     )
     heading_deg = normalize_heading_to_degrees(vehicle.get("heading", 0.0))
-    length = max(10, int(_safe_float(vehicle.get("length", 4.8), 4.8) * 2.4))
-    width = max(6, int(_safe_float(vehicle.get("width", 2.0), 2.0) * 2.0))
+    length = max(10, int(_safe_float(vehicle.get("length", 4.8), 4.8) * 2.1))
+    width = max(6, int(_safe_float(vehicle.get("width", 2.0), 2.0) * 1.9))
 
     half_l = int(length / 2)
     half_w = int(width / 2)
@@ -288,7 +410,7 @@ def _draw_vehicle(
     tip_x = int(x + math.cos(rad) * max(6, half_l))
     tip_y = int(y - math.sin(rad) * max(6, half_l))
     draw.line((x, y, tip_x, tip_y), fill=(15, 15, 15), width=2)
-    draw.text((x + half_l + 2, y - half_w - 2), vid[:8], fill=(20, 20, 22), font=ImageFont.load_default())
+    draw.text((x + half_l + 2, y - half_w - 2), vid[:10], fill=(20, 20, 22), font=ImageFont.load_default())
 
 
 def _draw_step_stats(draw: "ImageDraw.ImageDraw", step: Dict[str, Any], panel_box: Tuple[int, int, int, int]):
@@ -388,14 +510,11 @@ def _scene_bounds(payload: Dict[str, Any], visible_tracks: Sequence[str]) -> Tup
     for track in visible_tracks:
         for step in list(payload.get(f"{track}_steps", []) or []):
             scene = _extract_latest_scene(step)
+            ego_id = str(scene.get("ego_id", "ego"))
             for vehicle in list(scene.get("vehicles", []) or []):
-                xs.append(_safe_float(vehicle.get("x", 0.0)))
-                ys.append(_safe_float(vehicle.get("y", 0.0)))
-            for polyline in list(scene.get("lane_polylines", []) or []):
-                for point in list(polyline or []):
-                    if len(point) >= 2:
-                        xs.append(_safe_float(point[0], 0.0))
-                        ys.append(_safe_float(point[1], 0.0))
+                if str(vehicle.get("vehicle_id", "")) == ego_id:
+                    xs.append(_safe_float(vehicle.get("x", 0.0), 0.0))
+                    ys.append(_safe_float(vehicle.get("y", 0.0), 0.0))
     if not xs or not ys:
         return (0.0, 120.0, -15.0, 15.0)
     x_min, x_max = min(xs), max(xs)
@@ -404,9 +523,106 @@ def _scene_bounds(payload: Dict[str, Any], visible_tracks: Sequence[str]) -> Tup
         x_max = x_min + 1.0
     if abs(y_max - y_min) < 1.0:
         y_max = y_min + 1.0
-    margin_x = (x_max - x_min) * 0.08
-    margin_y = (y_max - y_min) * 0.18
+    margin_x = max(10.0, (x_max - x_min) * 0.05)
+    margin_y = max(4.0, (y_max - y_min) * 0.2)
     return (x_min - margin_x, x_max + margin_x, y_min - margin_y, y_max + margin_y)
+
+
+def _resolve_lane_polylines_from_scenario(scenario_source: str) -> List[List[List[float]]]:
+    key = str(scenario_source or "").strip()
+    if not key:
+        return []
+    if key in _LANE_CACHE:
+        return _LANE_CACHE[key]
+
+    sumocfg_path = Path(key)
+    if not sumocfg_path.is_absolute():
+        sumocfg_path = Path.cwd() / sumocfg_path
+    if not sumocfg_path.exists():
+        _LANE_CACHE[key] = []
+        return []
+
+    try:
+        root = ET.parse(sumocfg_path).getroot()
+        net_file_value = root.findtext("./input/net-file[@value]")  # rarely populated this way
+        if not net_file_value:
+            node = root.find("./input/net-file")
+            net_file_value = "" if node is None else str(node.attrib.get("value", ""))
+        net_path = Path(net_file_value)
+        if not net_path.is_absolute():
+            net_path = sumocfg_path.parent / net_path
+        if not net_path.exists():
+            _LANE_CACHE[key] = []
+            return []
+
+        net_root = ET.parse(net_path).getroot()
+        polylines: List[List[List[float]]] = []
+        for lane in net_root.findall(".//lane"):
+            lane_id = str(lane.attrib.get("id", ""))
+            if lane_id.startswith(":"):
+                continue
+            shape = str(lane.attrib.get("shape", ""))
+            if not shape:
+                continue
+            lane_width = _safe_float(lane.attrib.get("width", 3.2), 3.2)
+            points: List[List[float]] = []
+            for token in shape.split(" "):
+                token = token.strip()
+                if not token or "," not in token:
+                    continue
+                x_str, y_str = token.split(",", 1)
+                points.append([_safe_float(x_str, 0.0), _safe_float(y_str, 0.0)])
+            if len(points) >= 2:
+                # Render lane boundaries (approx) instead of centerline only.
+                left_boundary = _offset_polyline(points, lane_width / 2.0)
+                right_boundary = _offset_polyline(points, -lane_width / 2.0)
+                if len(left_boundary) >= 2:
+                    polylines.append(left_boundary)
+                if len(right_boundary) >= 2:
+                    polylines.append(right_boundary)
+        _LANE_CACHE[key] = polylines
+        return polylines
+    except Exception:
+        _LANE_CACHE[key] = []
+        return []
+
+
+def _polyline_intersects_bounds(polyline: Sequence[Sequence[float]], bounds: Tuple[float, float, float, float]) -> bool:
+    if not polyline:
+        return False
+    x_min, x_max, y_min, y_max = bounds
+    px = [_safe_float(point[0], 0.0) for point in polyline if len(point) >= 2]
+    py = [_safe_float(point[1], 0.0) for point in polyline if len(point) >= 2]
+    if not px or not py:
+        return False
+    return not (max(px) < x_min or min(px) > x_max or max(py) < y_min or min(py) > y_max)
+
+
+def _offset_polyline(polyline: Sequence[Sequence[float]], offset: float) -> List[List[float]]:
+    if len(polyline) < 2:
+        return [list(point[:2]) for point in polyline if len(point) >= 2]
+    points = [[_safe_float(point[0], 0.0), _safe_float(point[1], 0.0)] for point in polyline if len(point) >= 2]
+    if len(points) < 2:
+        return points
+
+    offset_points: List[List[float]] = []
+    for idx, point in enumerate(points):
+        if idx == 0:
+            dx = points[idx + 1][0] - point[0]
+            dy = points[idx + 1][1] - point[1]
+        elif idx == len(points) - 1:
+            dx = point[0] - points[idx - 1][0]
+            dy = point[1] - points[idx - 1][1]
+        else:
+            dx = points[idx + 1][0] - points[idx - 1][0]
+            dy = points[idx + 1][1] - points[idx - 1][1]
+        norm = math.hypot(dx, dy)
+        if norm <= 1e-6:
+            nx, ny = 0.0, 0.0
+        else:
+            nx, ny = -dy / norm, dx / norm
+        offset_points.append([point[0] + offset * nx, point[1] + offset * ny])
+    return offset_points
 
 
 def _project(

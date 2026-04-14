@@ -12,6 +12,7 @@ high_near_risk:
 low_task_reward:
   enabled: true
   mean_task_reward_delta_max: -0.02
+  mean_penalized_reward_delta_max: -0.02
 
 heading_anomaly:
   enabled: true

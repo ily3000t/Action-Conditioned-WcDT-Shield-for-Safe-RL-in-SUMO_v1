@@ -3,7 +3,7 @@ import datetime as dt
 import json
 import math
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Sequence, Tuple
+from typing import Any, Dict, List, Optional, Sequence
 
 import yaml
 
@@ -35,25 +35,29 @@ def select_anomaly_cases(
     pair_files = _resolve_pair_files(resolved_trace_dir)
     rules = load_anomaly_rules(rules_path)
 
+    all_cases: List[Dict[str, Any]] = []
     scored_cases: List[Dict[str, Any]] = []
+    rule_hit_counts: Dict[str, int] = {}
+
     for pair_path in pair_files:
         payload = load_pair_payload(pair_path)
         metrics = _compute_case_metrics(payload)
         matched_rules = _match_rules(metrics=metrics, rules=rules)
-        if not matched_rules:
-            continue
         score = _score_case(metrics=metrics, matched_rules=matched_rules)
-        scored_cases.append(
-            {
-                "pair_file": str(pair_path),
-                "pair_index": int(payload.get("pair_index", -1)),
-                "seed": int(payload.get("seed", -1)),
-                "distilled_unavailable": bool(payload.get("distilled_unavailable", True)),
-                "matched_rules": matched_rules,
-                "metrics": metrics,
-                "score": float(score),
-            }
-        )
+        case_payload = {
+            "pair_file": str(pair_path),
+            "pair_index": int(payload.get("pair_index", -1)),
+            "seed": int(payload.get("seed", -1)),
+            "distilled_unavailable": bool(payload.get("distilled_unavailable", True)),
+            "matched_rules": list(matched_rules),
+            "metrics": metrics,
+            "score": float(score),
+        }
+        all_cases.append(case_payload)
+        if matched_rules:
+            scored_cases.append(case_payload)
+            for rule_name in matched_rules:
+                rule_hit_counts[rule_name] = int(rule_hit_counts.get(rule_name, 0) + 1)
 
     scored_cases.sort(
         key=lambda item: (
@@ -63,6 +67,24 @@ def select_anomaly_cases(
         )
     )
     selected = scored_cases[: max(0, int(top_k))]
+    selection_mode = "rule_match"
+
+    # Fallback mode keeps diagnostics usable when strict defaults produce zero matches.
+    if not selected and all_cases:
+        fallback_cases = sorted(
+            all_cases,
+            key=lambda item: (
+                -float(item.get("score", 0.0)),
+                int(item.get("pair_index", 1_000_000)),
+            ),
+        )
+        selected = fallback_cases[: max(0, int(top_k))]
+        for item in selected:
+            if not item.get("matched_rules"):
+                item["matched_rules"] = ["fallback_top_signal"]
+        rule_hit_counts["fallback_top_signal"] = int(len(selected))
+        selection_mode = "fallback_top_signal"
+
     for rank, item in enumerate(selected, start=1):
         item["rank"] = rank
 
@@ -73,6 +95,8 @@ def select_anomaly_cases(
         "generated_at": dt.datetime.now(dt.timezone.utc).isoformat(),
         "total_pairs_seen": int(len(pair_files)),
         "selected_count": int(len(selected)),
+        "selection_mode": selection_mode,
+        "rule_hit_counts": dict(sorted(rule_hit_counts.items())),
         "cases": selected,
     }
     output_dir = Path(output_root) / str(run_id)
@@ -157,6 +181,8 @@ def _compute_case_metrics(pair_payload: Dict[str, Any]) -> Dict[str, Any]:
 
     baseline_task_reward = _mean_task_reward(baseline_steps, default=_safe_float(pair_payload.get("baseline_reward", 0.0), 0.0))
     shielded_task_reward = _mean_task_reward(shielded_steps, default=_safe_float(pair_payload.get("shielded_reward", 0.0), 0.0))
+    baseline_penalized_reward = _safe_float(pair_payload.get("baseline_reward", baseline_task_reward), baseline_task_reward)
+    shielded_penalized_reward = _safe_float(pair_payload.get("shielded_reward", shielded_task_reward), shielded_task_reward)
     heading_stats = _heading_stats(shielded_steps)
     vx_stats = _negative_vx_stats(shielded_steps)
 
@@ -171,6 +197,9 @@ def _compute_case_metrics(pair_payload: Dict[str, Any]) -> Dict[str, Any]:
         "mean_task_reward_baseline": float(baseline_task_reward),
         "mean_task_reward_shielded": float(shielded_task_reward),
         "mean_task_reward_delta": float(shielded_task_reward - baseline_task_reward),
+        "mean_penalized_reward_baseline": float(baseline_penalized_reward),
+        "mean_penalized_reward_shielded": float(shielded_penalized_reward),
+        "mean_penalized_reward_delta": float(shielded_penalized_reward - baseline_penalized_reward),
         "heading_abs_deg_max": float(heading_stats["abs_max_deg"]),
         "heading_abnormal_consecutive_steps": int(heading_stats["abnormal_consecutive_max"]),
         "heading_jump_count": int(heading_stats["jump_count"]),
@@ -258,7 +287,12 @@ def _match_rules(metrics: Dict[str, Any], rules: Dict[str, Any]) -> List[str]:
 
     reward_cfg = dict(rules.get("low_task_reward", {}) or {})
     if bool(reward_cfg.get("enabled", True)):
-        if float(metrics.get("mean_task_reward_delta", 0.0)) <= float(reward_cfg.get("mean_task_reward_delta_max", -0.02)):
+        task_floor = float(reward_cfg.get("mean_task_reward_delta_max", -0.02))
+        penalized_floor = float(reward_cfg.get("mean_penalized_reward_delta_max", task_floor))
+        if (
+            float(metrics.get("mean_task_reward_delta", 0.0)) <= task_floor
+            or float(metrics.get("mean_penalized_reward_delta", 0.0)) <= penalized_floor
+        ):
             matched.append("low_task_reward")
 
     heading_cfg = dict(rules.get("heading_anomaly", {}) or {})
@@ -287,12 +321,14 @@ def _match_rules(metrics: Dict[str, Any], rules: Dict[str, Any]) -> List[str]:
 
 
 def _score_case(metrics: Dict[str, Any], matched_rules: Sequence[str]) -> float:
-    reward_penalty = abs(min(0.0, float(metrics.get("mean_task_reward_delta", 0.0))))
+    task_reward_penalty = abs(min(0.0, float(metrics.get("mean_task_reward_delta", 0.0))))
+    penalized_reward_penalty = abs(min(0.0, float(metrics.get("mean_penalized_reward_delta", 0.0))))
     score = (
         len(list(matched_rules)) * 100.0
         + float(metrics.get("shield_blocked_steps", 0)) * 0.2
         + float(metrics.get("near_risk_step_rate", 0.0)) * 50.0
-        + reward_penalty * 100.0
+        + task_reward_penalty * 100.0
+        + penalized_reward_penalty * 120.0
     )
     return float(score)
 
@@ -330,6 +366,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         output_root=Path(args.output_root),
     )
     print(f"[select_anomaly_cases] total_pairs={result['total_pairs_seen']} selected={result['selected_count']}")
+    print(f"[select_anomaly_cases] selection_mode={result.get('selection_mode', 'rule_match')}")
     print(f"[select_anomaly_cases] output={result['output_path']}")
     return 0
 
