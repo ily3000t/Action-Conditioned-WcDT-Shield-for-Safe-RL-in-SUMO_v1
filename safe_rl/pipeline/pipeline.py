@@ -23,6 +23,7 @@ from safe_rl.pipeline.telemetry import BufferTelemetryTracker, Stage3TelemetryTr
 from safe_rl.pipeline.tensorboard_logger import TensorboardManager
 from safe_rl.shield import SafetyShield
 from safe_rl.sim import create_backend
+from safe_rl.sim.scenario_validation import build_scenario_fingerprint, validate_scenario_geometry
 
 
 STAGE_ORDER = ("stage1", "stage2", "stage3", "stage4", "stage5")
@@ -90,10 +91,12 @@ class SafeRLPipeline:
         self.shield_trace_summary_path: Optional[Path] = None
         self.shield_trace_tuning_summary_path: Optional[Path] = None
         self.shield_margin_analysis_summary_path: Optional[Path] = None
+        self.scenario_geometry_check_path: Optional[Path] = None
 
         self.manifest: Dict = {}
         self._last_stage4_collection_diagnostics: Dict[str, Any] = {}
         self._last_auto_stage2_recovery: Dict[str, Any] = {}
+        self._scenario_fingerprint: Dict[str, Any] = {}
 
     def run(self, stage: str = "all", run_id: Optional[str] = None) -> Dict:
         stage = (stage or "all").strip().lower()
@@ -101,6 +104,7 @@ class SafeRLPipeline:
             raise ValueError(f"Unsupported stage: {stage}. Expected one of all, {', '.join(STAGE_ORDER)}")
 
         self._prepare_run_context(stage=stage, run_id=run_id)
+        self._run_scenario_geometry_preflight_check()
 
         stages_to_run = list(STAGE_ORDER) if stage == "all" else [stage]
         stage_results: Dict[str, Dict] = {}
@@ -193,6 +197,8 @@ class SafeRLPipeline:
             "manifest_path": str(self.manifest_path),
             "stage": stage,
             "stage_durations": stage_durations,
+            "scenario_fingerprint": dict(self._scenario_fingerprint),
+            "scenario_geometry_check_report": str(self.scenario_geometry_check_path or ""),
         }
 
         if stage == "all":
@@ -304,6 +310,7 @@ class SafeRLPipeline:
         self.shield_trace_summary_path = self.shield_trace_dir / "trace_summary.json"
         self.shield_trace_tuning_summary_path = self.reports_dir / "shield_trace_tuning_summary.json"
         self.shield_margin_analysis_summary_path = self.reports_dir / "shield_margin_analysis_summary.json"
+        self.scenario_geometry_check_path = self.reports_dir / "scenario_geometry_check.json"
 
         if self.manifest_path.exists():
             with self.manifest_path.open("r", encoding="utf-8") as f:
@@ -350,10 +357,27 @@ class SafeRLPipeline:
                 "shield_trace_summary_report": str(self.shield_trace_summary_path),
                 "shield_trace_tuning_summary_report": str(self.shield_trace_tuning_summary_path),
                 "shield_margin_analysis_summary_report": str(self.shield_margin_analysis_summary_path),
+                "scenario_geometry_check_report": str(self.scenario_geometry_check_path),
                 "sumo_logs_dir": str(self.sumo_logs_dir),
                 "tensorboard_root": str(self.tensorboard_root),
             }
         )
+        cfg_path = Path(self.config.sim.sumo_cfg)
+        scenario_variant = str(getattr(self.config.sim, "scenario_variant", "") or "")
+        try:
+            self._scenario_fingerprint = build_scenario_fingerprint(
+                cfg_path,
+                scenario_variant=scenario_variant,
+            )
+        except Exception as exc:
+            self._scenario_fingerprint = {
+                "scenario_name": cfg_path.stem.replace(".sumocfg", ""),
+                "scenario_variant": scenario_variant,
+                "scenario_asset_hash": "",
+                "scenario_assets": [],
+                "fingerprint_error": str(exc),
+            }
+        self.manifest["scenario_fingerprint"] = dict(self._scenario_fingerprint)
         self.manifest.setdefault("stage_done", {s: False for s in STAGE_ORDER})
         self.manifest.setdefault("timestamps", {})
         self._save_manifest()
@@ -362,6 +386,27 @@ class SafeRLPipeline:
         self.manifest_path.parent.mkdir(parents=True, exist_ok=True)
         with self.manifest_path.open("w", encoding="utf-8") as f:
             json.dump(self.manifest, f, ensure_ascii=False, indent=2)
+
+    def _run_scenario_geometry_preflight_check(self):
+        try:
+            check_report = validate_scenario_geometry(Path(self.config.sim.sumo_cfg))
+        except Exception as exc:
+            check_report = {
+                "scenario_cfg": str(self.config.sim.sumo_cfg),
+                "passed": False,
+                "errors": [f"geometry validation crashed: {exc}"],
+                "warnings": [],
+                "seed_positions": [],
+            }
+        if self.scenario_geometry_check_path is not None:
+            self._write_json(self.scenario_geometry_check_path, check_report)
+        if not bool(check_report.get("passed", False)):
+            errors = list(check_report.get("errors", []) or [])
+            preview = "; ".join(str(item) for item in errors[:3])
+            raise RuntimeError(
+                f"[Pipeline] scenario geometry preflight failed: {preview or 'unknown errors'} "
+                f"(report={self.scenario_geometry_check_path})"
+            )
 
     def _mark_stage_done(self, stage: str):
         self.manifest.setdefault("stage_done", {})[stage] = True
@@ -2626,6 +2671,15 @@ class SafeRLPipeline:
                 result["evaluation_layers"].get("event_layer", {}).get("collision_baseline_zero", False)
             )
 
+        result["congestion_guard"] = self._build_congestion_guard(
+            baseline_metrics=result.get("system_baseline", {}),
+            shielded_metrics=result.get("system_shielded", {}),
+        )
+        result["scenario_hardening_passed"] = bool(not result["congestion_guard"].get("congested", False))
+        if tb_writer is not None:
+            tb_writer.add_scalar("summary/scenario_hardening_passed", float(result["scenario_hardening_passed"]), 0)
+            tb_writer.add_scalar("summary/congested", float(result["congestion_guard"].get("congested", False)), 0)
+
         trace_payload = self._write_shield_trace_outputs(
             stage_config=stage_config,
             baseline_details=baseline_metrics.get("episode_details", []),
@@ -3118,6 +3172,8 @@ class SafeRLPipeline:
             "avg_speed_baseline": self._metric_float(baseline, "avg_speed"),
             "avg_speed_shielded": self._metric_float(shielded, "avg_speed"),
             "efficiency_drop": self._metric_float(delta, "efficiency_drop"),
+            "low_speed_step_rate_baseline": self._metric_float(baseline, "low_speed_step_rate"),
+            "low_speed_step_rate_shielded": self._metric_float(shielded, "low_speed_step_rate"),
             "mean_task_reward_baseline": baseline_task_reward,
             "mean_task_reward_shielded": shielded_task_reward,
             "mean_task_reward_delta": shielded_task_reward - baseline_task_reward,
@@ -3147,6 +3203,41 @@ class SafeRLPipeline:
             "performance_layer": performance_layer,
         }
 
+    def _build_congestion_guard(self, baseline_metrics: Dict[str, Any], shielded_metrics: Dict[str, Any]) -> Dict[str, Any]:
+        avg_speed_baseline = self._metric_float(baseline_metrics, "avg_speed")
+        avg_speed_shielded = self._metric_float(shielded_metrics, "avg_speed")
+        low_speed_step_rate_shielded = self._metric_float(shielded_metrics, "low_speed_step_rate")
+
+        min_avg_speed_guard = float(self.config.eval.min_avg_speed_guard)
+        min_avg_speed_ratio_guard = float(self.config.eval.min_avg_speed_ratio_guard)
+        max_low_speed_step_rate_guard = float(self.config.eval.max_low_speed_step_rate_guard)
+
+        avg_speed_ratio = (
+            float(avg_speed_shielded / max(1e-8, avg_speed_baseline))
+            if avg_speed_baseline > 1e-8
+            else 1.0
+        )
+
+        avg_speed_below_floor = bool(avg_speed_shielded < min_avg_speed_guard)
+        avg_speed_ratio_too_low = bool(avg_speed_ratio < min_avg_speed_ratio_guard)
+        low_speed_rate_too_high = bool(low_speed_step_rate_shielded > max_low_speed_step_rate_guard)
+        congested = bool(avg_speed_below_floor or avg_speed_ratio_too_low or low_speed_rate_too_high)
+        return {
+            "congested": congested,
+            "avg_speed_below_floor": avg_speed_below_floor,
+            "avg_speed_ratio_too_low": avg_speed_ratio_too_low,
+            "low_speed_rate_too_high": low_speed_rate_too_high,
+            "avg_speed_shielded": float(avg_speed_shielded),
+            "avg_speed_baseline": float(avg_speed_baseline),
+            "avg_speed_ratio": float(avg_speed_ratio),
+            "low_speed_step_rate_shielded": float(low_speed_step_rate_shielded),
+            "thresholds": {
+                "min_avg_speed_guard": min_avg_speed_guard,
+                "min_avg_speed_ratio_guard": min_avg_speed_ratio_guard,
+                "max_low_speed_step_rate_guard": max_low_speed_step_rate_guard,
+            },
+        }
+
     def _build_evaluation_conclusion(self, evaluation: Dict[str, Any]) -> str:
         performance_passed = bool(evaluation.get("performance_passed", False))
         attribution_passed = bool(evaluation.get("attribution_passed", False))
@@ -3168,8 +3259,10 @@ class SafeRLPipeline:
     def _save_report(self, report: Dict, path: Optional[Path] = None):
         target_path = path or self.report_path
         target_path.parent.mkdir(parents=True, exist_ok=True)
+        payload = dict(report or {})
+        payload["scenario_fingerprint"] = dict(self._scenario_fingerprint)
         with target_path.open("w", encoding="utf-8") as f:
-            json.dump(report, f, indent=2, ensure_ascii=False, default=str)
+            json.dump(payload, f, indent=2, ensure_ascii=False, default=str)
 
     def _build_pair_before_after(self, before_metrics: Dict[str, Any], after_metrics: Dict[str, Any]) -> Dict[str, Any]:
         return {

@@ -1,6 +1,7 @@
-﻿sim:
+sim:
   backend: "traci"
   sumo_cfg: "scenarios/highway_merge/highway_merge.sumocfg"
+  scenario_variant: "compact_midhigh_202604"
   net_file: ""
   route_file: ""
   runtime_log_dir: "safe_rl_output/sumo_logs"
@@ -109,10 +110,13 @@ eval:
   seed_list: [42, 123, 2024]
   target_collision_reduction: 0.4
   max_efficiency_drop: 0.1
+  low_speed_threshold_mps: 2.0
+  min_avg_speed_guard: 10.0
+  min_avg_speed_ratio_guard: 0.6
+  max_low_speed_step_rate_guard: 0.15
 
 tensorboard:
   enabled: true
   root_dir: "safe_rl_output/tensorboard"
   run_name: ""
   flush_secs: 10
-

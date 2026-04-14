@@ -12,6 +12,7 @@ def test_default_config_loads():
     assert config.tensorboard.root_dir
     assert config.sim.ego_vehicle_id == "ego"
     assert config.sim.runtime_log_dir
+    assert config.sim.scenario_variant == "compact_midhigh_202604"
     assert config.sim.collision_action == "teleport"
     assert config.sim.collision_check_junctions is True
     assert config.shield.replacement_min_risk_margin == 0.104
@@ -35,6 +36,10 @@ def test_default_config_loads():
     assert config.shield.raw_passthrough_risk_threshold == 0.193
     assert config.shield.replacement_min_risk_margin_blocked == 0.02
     assert config.shield.blocked_distance_margin_slope == 0.0
+    assert config.eval.low_speed_threshold_mps == 2.0
+    assert config.eval.min_avg_speed_guard == 10.0
+    assert config.eval.min_avg_speed_ratio_guard == 0.6
+    assert config.eval.max_low_speed_step_rate_guard == 0.15
 
 
 def test_tensorboard_config_override():

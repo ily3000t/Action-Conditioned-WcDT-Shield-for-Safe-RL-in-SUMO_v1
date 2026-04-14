@@ -147,6 +147,8 @@ class EpisodeSummary:
     min_distance: float = 0.0
     near_risk_step_count: int = 0
     near_risk_step_rate: float = 0.0
+    low_speed_step_count: int = 0
+    low_speed_step_rate: float = 0.0
     mean_raw_risk: float = 0.0
     mean_final_risk: float = 0.0
     mean_risk_reduction: float = 0.0

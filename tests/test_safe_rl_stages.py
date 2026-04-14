@@ -2952,3 +2952,79 @@ def test_stage5_report_and_risk_v2_distill_collapse_flag_consistent(monkeypatch)
     assert risk_v2["distill_action_collapse_flag"] is True
     assert risk_v2["stage5_snapshot"]["distill_action_collapse_flag"] is True
     assert risk_v2["stage5_snapshot"]["distill_training_report_path"] == report["distill_training_report_path"]
+
+
+def test_prepare_run_context_writes_scenario_fingerprint_to_manifest():
+    config = _tiny_config()
+    pipeline = SafeRLPipeline(config)
+    run_id = f"ut_scenario_fingerprint_{uuid.uuid4().hex[:8]}"
+    pipeline._prepare_run_context(stage="stage1", run_id=run_id)
+
+    assert pipeline.manifest_path is not None
+    manifest = json.loads(Path(pipeline.manifest_path).read_text(encoding="utf-8"))
+    fingerprint = dict(manifest.get("scenario_fingerprint", {}))
+    assert fingerprint.get("scenario_name") == "highway_merge"
+    assert "scenario_asset_hash" in fingerprint
+    assert len(list(fingerprint.get("scenario_assets", []))) >= 3
+
+
+def test_save_report_includes_same_scenario_fingerprint_as_manifest():
+    config = _tiny_config()
+    pipeline = SafeRLPipeline(config)
+    run_id = f"ut_report_scenario_fingerprint_{uuid.uuid4().hex[:8]}"
+    pipeline._prepare_run_context(stage="stage5", run_id=run_id)
+
+    payload = {"acceptance_passed": True}
+    pipeline._save_report(payload)
+    report = json.loads(Path(pipeline.report_path).read_text(encoding="utf-8"))
+    manifest = json.loads(Path(pipeline.manifest_path).read_text(encoding="utf-8"))
+    assert report["scenario_fingerprint"] == manifest["scenario_fingerprint"]
+
+
+def test_congestion_guard_marks_congested_if_avg_speed_below_floor():
+    config = _tiny_config()
+    pipeline = SafeRLPipeline(config)
+    guard = pipeline._build_congestion_guard(
+        baseline_metrics={"avg_speed": 20.0, "low_speed_step_rate": 0.05},
+        shielded_metrics={"avg_speed": 9.5, "low_speed_step_rate": 0.05},
+    )
+    assert guard["avg_speed_below_floor"] is True
+    assert guard["congested"] is True
+
+
+def test_congestion_guard_marks_congested_if_avg_speed_ratio_too_low():
+    config = _tiny_config()
+    pipeline = SafeRLPipeline(config)
+    guard = pipeline._build_congestion_guard(
+        baseline_metrics={"avg_speed": 20.0, "low_speed_step_rate": 0.05},
+        shielded_metrics={"avg_speed": 11.0, "low_speed_step_rate": 0.05},
+    )
+    assert guard["avg_speed_below_floor"] is False
+    assert guard["avg_speed_ratio_too_low"] is True
+    assert guard["congested"] is True
+
+
+def test_congestion_guard_marks_congested_if_low_speed_rate_too_high():
+    config = _tiny_config()
+    pipeline = SafeRLPipeline(config)
+    guard = pipeline._build_congestion_guard(
+        baseline_metrics={"avg_speed": 20.0, "low_speed_step_rate": 0.05},
+        shielded_metrics={"avg_speed": 15.0, "low_speed_step_rate": 0.20},
+    )
+    assert guard["avg_speed_below_floor"] is False
+    assert guard["avg_speed_ratio_too_low"] is False
+    assert guard["low_speed_rate_too_high"] is True
+    assert guard["congested"] is True
+
+
+def test_congestion_guard_not_congested_when_all_rules_pass():
+    config = _tiny_config()
+    pipeline = SafeRLPipeline(config)
+    guard = pipeline._build_congestion_guard(
+        baseline_metrics={"avg_speed": 20.0, "low_speed_step_rate": 0.05},
+        shielded_metrics={"avg_speed": 15.0, "low_speed_step_rate": 0.10},
+    )
+    assert guard["avg_speed_below_floor"] is False
+    assert guard["avg_speed_ratio_too_low"] is False
+    assert guard["low_speed_rate_too_high"] is False
+    assert guard["congested"] is False

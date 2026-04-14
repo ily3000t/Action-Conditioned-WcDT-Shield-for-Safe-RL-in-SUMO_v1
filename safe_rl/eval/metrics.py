@@ -11,7 +11,12 @@ NEAR_RISK_TTC_THRESHOLD = 2.0
 NEAR_RISK_MIN_DISTANCE_THRESHOLD = 6.0
 
 
-def summarize_episode(episode_id: str, step_infos: List[dict], rewards: List[float]) -> EpisodeSummary:
+def summarize_episode(
+    episode_id: str,
+    step_infos: List[dict],
+    rewards: List[float],
+    low_speed_threshold_mps: float = 2.0,
+) -> EpisodeSummary:
     steps = len(step_infos)
     collisions = sum(1 for info in step_infos if bool(info.get("collision", False)))
     interventions = sum(1 for info in step_infos if bool(info.get("intervened", False)))
@@ -32,6 +37,11 @@ def summarize_episode(episode_id: str, step_infos: List[dict], rewards: List[flo
         for info in step_infos
     )
     near_risk_step_rate = float(near_risk_step_count / max(1, steps))
+    low_speed_step_count = sum(
+        int(float(info.get("ego_speed", 0.0)) < float(low_speed_threshold_mps))
+        for info in step_infos
+    )
+    low_speed_step_rate = float(low_speed_step_count / max(1, steps))
     mean_raw_risk = float(np.mean([float(info.get("risk_raw", 0.0)) for info in step_infos])) if step_infos else 0.0
     mean_final_risk = float(np.mean([float(info.get("risk_final", 0.0)) for info in step_infos])) if step_infos else 0.0
     mean_risk_reduction = float(
@@ -58,6 +68,8 @@ def summarize_episode(episode_id: str, step_infos: List[dict], rewards: List[flo
         min_distance=min_distance,
         near_risk_step_count=near_risk_step_count,
         near_risk_step_rate=near_risk_step_rate,
+        low_speed_step_count=low_speed_step_count,
+        low_speed_step_rate=low_speed_step_rate,
         mean_raw_risk=mean_raw_risk,
         mean_final_risk=mean_final_risk,
         mean_risk_reduction=mean_risk_reduction,
@@ -86,6 +98,8 @@ def aggregate_episode_summaries(summaries: List[EpisodeSummary]) -> Dict[str, fl
             "near_risk_step_count": 0.0,
             "near_risk_step_rate": 0.0,
             "near_risk_episode_rate": 0.0,
+            "low_speed_step_count": 0.0,
+            "low_speed_step_rate": 0.0,
             "mean_raw_risk": 0.0,
             "mean_final_risk": 0.0,
             "mean_risk_reduction": 0.0,
@@ -110,6 +124,8 @@ def aggregate_episode_summaries(summaries: List[EpisodeSummary]) -> Dict[str, fl
     near_risk_step_count = float(sum(s.near_risk_step_count for s in summaries))
     near_risk_step_rate = float(near_risk_step_count / max(1, sum(s.steps for s in summaries)))
     near_risk_episode_rate = float(sum(1 for s in summaries if s.near_risk_step_count > 0) / episodes)
+    low_speed_step_count = float(sum(s.low_speed_step_count for s in summaries))
+    low_speed_step_rate = float(low_speed_step_count / max(1, sum(s.steps for s in summaries)))
     mean_raw_risk = float(np.mean([s.mean_raw_risk for s in summaries]))
     mean_final_risk = float(np.mean([s.mean_final_risk for s in summaries]))
     mean_risk_reduction = float(np.mean([s.mean_risk_reduction for s in summaries]))
@@ -133,6 +149,8 @@ def aggregate_episode_summaries(summaries: List[EpisodeSummary]) -> Dict[str, fl
         "near_risk_step_count": near_risk_step_count,
         "near_risk_step_rate": near_risk_step_rate,
         "near_risk_episode_rate": near_risk_episode_rate,
+        "low_speed_step_count": low_speed_step_count,
+        "low_speed_step_rate": low_speed_step_rate,
         "mean_raw_risk": mean_raw_risk,
         "mean_final_risk": mean_final_risk,
         "mean_risk_reduction": mean_risk_reduction,

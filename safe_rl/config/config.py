@@ -9,6 +9,7 @@ import yaml
 class SimConfig:
     backend: str = "traci"
     sumo_cfg: str = "scenarios/highway_merge/highway_merge.sumocfg"
+    scenario_variant: str = ""
     net_file: str = ""
     route_file: str = ""
     runtime_log_dir: str = "safe_rl_output/sumo_logs"
@@ -183,6 +184,10 @@ class EvalConfig:
     seed_list: List[int] = field(default_factory=lambda: [42, 123, 2024])
     target_collision_reduction: float = 0.4
     max_efficiency_drop: float = 0.1
+    low_speed_threshold_mps: float = 2.0
+    min_avg_speed_guard: float = 10.0
+    min_avg_speed_ratio_guard: float = 0.6
+    max_low_speed_step_rate_guard: float = 0.15
 
 
 @dataclass

@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<routes>
+    <vType id="car_main" accel="2.6" decel="4.5" sigma="0.3" length="4.8" minGap="2.5" maxSpeed="33.33"/>
+    <vType id="car_ramp" accel="2.2" decel="4.5" sigma="0.35" length="4.8" minGap="2.5" maxSpeed="25.0"/>
+
+    <route id="route_main" edges="main_in main_out"/>
+    <route id="route_ramp" edges="ramp_in main_out"/>
+
+    <vehicle id="ego" type="car_main" route="route_main" depart="0.00" departLane="1" departPos="900" departSpeed="22"/>
+    <vehicle id="lead_seed" type="car_main" route="route_main" depart="0.00" departLane="1" departPos="980" departSpeed="20"/>
+    <vehicle id="left_seed" type="car_main" route="route_main" depart="0.00" departLane="2" departPos="950" departSpeed="22"/>
+    <vehicle id="right_seed" type="car_main" route="route_main" depart="0.00" departLane="0" departPos="820" departSpeed="21"/>
+    <vehicle id="merge_seed" type="car_ramp" route="route_ramp" depart="0.00" departLane="0" departPos="240" departSpeed="18"/>
+
+    <flow id="main_flow_left" type="car_main" route="route_main" begin="1.00" end="3600" vehsPerHour="700" departLane="2" departSpeed="max"/>
+    <flow id="main_flow_mid" type="car_main" route="route_main" begin="1.00" end="3600" vehsPerHour="900" departLane="1" departSpeed="max"/>
+    <flow id="main_flow_right" type="car_main" route="route_main" begin="1.00" end="3600" vehsPerHour="850" departLane="0" departSpeed="max"/>
+
+    <flow id="ramp_flow" type="car_ramp" route="route_ramp" begin="1.00" end="3600" vehsPerHour="450" departLane="0" departSpeed="max"/>
+</routes>
+
+
+

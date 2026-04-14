@@ -95,7 +95,12 @@ class SafeRLEvaluator:
                 done = terminated or truncated
 
             episode_id = str(reset_info.get("episode_id", f"eval_{i:04d}"))
-            summary = summarize_episode(episode_id, step_infos, rewards)
+            summary = summarize_episode(
+                episode_id,
+                step_infos,
+                rewards,
+                low_speed_threshold_mps=float(self.eval_config.low_speed_threshold_mps),
+            )
             summaries.append(summary)
             detail = {
                 **summary_to_dict(summary),
