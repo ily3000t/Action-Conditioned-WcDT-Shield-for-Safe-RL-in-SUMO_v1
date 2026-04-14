@@ -169,3 +169,48 @@ python safe_rl_main.py --config safe_rl/config/stage45_cost_desensitize.yaml --s
 Notes:
 - `stage5_eval_hardening.yaml` uses seed-group holdout (same scenario, different seed groups).
 - Seed-group holdout is **not** scenario distribution holdout.
+
+## 9. Visualization V1 (Trace Capture Isolated)
+
+Run order:
+
+```bash
+# 1) Trace capture (default behavior)
+python safe_rl_main.py --config safe_rl/config/stage5_trace_capture_default.yaml --stage stage5 --run-id <run_id>
+
+# 2) Trace capture (cost-desensitized behavior)
+python safe_rl_main.py --config safe_rl/config/stage5_trace_capture_cost.yaml --stage stage5 --run-id <run_id>
+```
+
+Use dedicated trace directories (do not mix):
+- `stage5_trace_capture_default`
+- `stage5_trace_capture_cost`
+
+Anomaly selection and GIF export:
+
+```bash
+# 3) Select anomaly cases
+python -m safe_rl.visualization.select_anomaly_cases --run-id <run_id> --trace-dir stage5_trace_capture_default --top-k 20
+
+# 4) Export top-K GIF replays
+python -m safe_rl.visualization.export_paired_gif --run-id <run_id> --trace-dir stage5_trace_capture_default --top-k 10
+```
+
+Single-case replay:
+
+```bash
+# Render one pair file
+python -m safe_rl.visualization.replay_episode --pair-file <pair_json_path> --output <gif_path>
+
+# GUI deep-dive for one selected seed/mode
+python -m safe_rl.visualization.replay_in_sumo_gui --run-id <run_id> --seed <seed> --mode shielded
+```
+
+Notes:
+- Standard flow is `capture -> anomaly -> gif -> gui`.
+- GUI replay is for case-level deep-dive; offline replay remains the primary batch comparison tool.
+- Pair trace payload now supports `baseline_steps / shielded_steps / distilled_steps`.
+- Older trace files without `distilled_steps` are downgraded to dual-track replay with explicit `distilled_unavailable=true`.
+- Heading anomaly checks use this fixed unit rule:
+  - if `abs(heading) > 2*pi`, treat as degrees
+  - otherwise convert radians to degrees before threshold checks

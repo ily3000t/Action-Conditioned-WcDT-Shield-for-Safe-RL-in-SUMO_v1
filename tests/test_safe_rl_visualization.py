@@ -1,0 +1,179 @@
+import json
+import math
+import uuid
+from pathlib import Path
+
+from safe_rl.visualization.export_paired_gif import export_paired_gifs
+from safe_rl.visualization.replay_episode import load_pair_payload, normalize_heading_to_degrees, render_pair_gif
+from safe_rl.visualization.select_anomaly_cases import select_anomaly_cases
+
+
+def _tmp_dir(tag: str) -> Path:
+    path = Path("safe_rl_output/test_artifacts") / f"{tag}_{uuid.uuid4().hex[:8]}"
+    path.mkdir(parents=True, exist_ok=True)
+    return path
+
+
+def _pair_payload(seed: int = 42, include_distilled: bool = False):
+    payload = {
+        "pair_index": 0,
+        "seed": seed,
+        "baseline_steps": [
+            {
+                "step_index": 0,
+                "raw_action": 4,
+                "final_action": 4,
+                "raw_risk": 0.2,
+                "final_risk": 0.2,
+                "min_ttc": 4.0,
+                "min_distance": 12.0,
+                "task_reward": 0.20,
+                "history_scene": [
+                    {
+                        "timestamp": 0.0,
+                        "ego_id": "ego",
+                        "vehicles": [{"vehicle_id": "ego", "x": 0.0, "y": 0.0, "vx": 10.0, "heading": 0.0}],
+                        "lane_polylines": [[[0.0, 0.0], [100.0, 0.0]]],
+                    }
+                ],
+            }
+        ],
+        "shielded_steps": [
+            {
+                "step_index": 0,
+                "raw_action": 4,
+                "final_action": 4,
+                "raw_risk": 0.25,
+                "final_risk": 0.24,
+                "min_ttc": 1.2,
+                "min_distance": 2.6,
+                "replacement_happened": False,
+                "constraint_reason": "blocked_by_margin",
+                "task_reward": 0.12,
+                "history_scene": [
+                    {
+                        "timestamp": 0.0,
+                        "ego_id": "ego",
+                        "vehicles": [{"vehicle_id": "ego", "x": 2.0, "y": 0.0, "vx": -0.8, "heading": math.pi / 2}],
+                        "lane_polylines": [[[0.0, 0.0], [100.0, 0.0]]],
+                    }
+                ],
+            }
+        ],
+    }
+    if include_distilled:
+        payload["distilled_episode_id"] = "distilled_ep"
+        payload["distilled_steps"] = [
+            {
+                "step_index": 0,
+                "raw_action": 4,
+                "final_action": 4,
+                "raw_risk": 0.22,
+                "final_risk": 0.20,
+                "min_ttc": 2.0,
+                "min_distance": 5.0,
+                "task_reward": 0.18,
+                "history_scene": [
+                    {
+                        "timestamp": 0.0,
+                        "ego_id": "ego",
+                        "vehicles": [{"vehicle_id": "ego", "x": 1.0, "y": 0.0, "vx": 8.0, "heading": 0.0}],
+                        "lane_polylines": [[[0.0, 0.0], [100.0, 0.0]]],
+                    }
+                ],
+            }
+        ]
+    return payload
+
+
+def test_heading_unit_normalization_supports_deg_and_rad():
+    assert normalize_heading_to_degrees(90.0) == 90.0
+    assert normalize_heading_to_degrees(math.pi / 2.0) == 90.0
+
+
+def test_render_pair_gif_smoke_and_distilled_fallback():
+    tmp_dir = _tmp_dir("viz_render")
+    pair_path = tmp_dir / "pair_00_seed_42.json"
+    pair_path.write_text(json.dumps(_pair_payload(include_distilled=False), ensure_ascii=False), encoding="utf-8")
+
+    payload = load_pair_payload(pair_path)
+    assert payload["distilled_unavailable"] is True
+    assert payload["distilled_steps"] == []
+    assert set(payload["aligned_steps"][0].keys()) == {"step_index", "baseline", "shielded", "distilled"}
+
+    output_path = tmp_dir / "pair_00_seed_42.gif"
+    render_pair_gif(payload, output_path=output_path, mode="auto", fps=4)
+    assert output_path.exists()
+    assert output_path.stat().st_size > 0
+
+
+def test_select_anomaly_cases_rules_and_sorting():
+    run_id = f"ut_viz_anomaly_{uuid.uuid4().hex[:8]}"
+    run_dir = _tmp_dir("viz_anomaly_run") / run_id
+    trace_dir = run_dir / "reports" / "stage5_trace_capture_default"
+    trace_dir.mkdir(parents=True, exist_ok=True)
+
+    pair_bad = _pair_payload(seed=42, include_distilled=False)
+    pair_bad["shielded_steps"] = pair_bad["shielded_steps"] * 90
+    pair_bad["baseline_steps"] = pair_bad["baseline_steps"] * 90
+    pair_bad_path = trace_dir / "pair_00_seed_42.json"
+    pair_bad_path.write_text(json.dumps(pair_bad, ensure_ascii=False), encoding="utf-8")
+
+    pair_ok = _pair_payload(seed=123, include_distilled=True)
+    pair_ok["shielded_steps"][0]["constraint_reason"] = ""
+    pair_ok["shielded_steps"][0]["replacement_happened"] = True
+    pair_ok["shielded_steps"][0]["min_ttc"] = 4.0
+    pair_ok["shielded_steps"][0]["min_distance"] = 10.0
+    pair_ok["shielded_steps"][0]["task_reward"] = 0.19
+    pair_ok_path = trace_dir / "pair_01_seed_123.json"
+    pair_ok_path.write_text(json.dumps(pair_ok, ensure_ascii=False), encoding="utf-8")
+
+    (trace_dir / "trace_summary.json").write_text(
+        json.dumps({"pair_files": [str(pair_bad_path), str(pair_ok_path)]}, ensure_ascii=False),
+        encoding="utf-8",
+    )
+
+    result = select_anomaly_cases(
+        run_id=run_id,
+        trace_dir=str(trace_dir),
+        run_root=run_dir.parent,
+        top_k=5,
+        output_root=Path("qualitative_results/anomaly_cases"),
+    )
+    assert result["selected_count"] >= 1
+    assert Path(result["output_path"]).exists()
+    first = result["cases"][0]
+    assert Path(first["pair_file"]).name == "pair_00_seed_42.json"
+    assert "high_blocked_low_replacement" in first["matched_rules"]
+    assert "high_near_risk" in first["matched_rules"]
+
+
+def test_export_paired_gifs_tolerates_old_payload_without_distilled_steps():
+    run_id = f"ut_viz_export_{uuid.uuid4().hex[:8]}"
+    run_root = _tmp_dir("viz_export_run")
+    trace_dir = run_root / run_id / "reports" / "stage5_trace_capture_default"
+    trace_dir.mkdir(parents=True, exist_ok=True)
+
+    legacy_payload = _pair_payload(seed=42, include_distilled=False)
+    pair_path = trace_dir / "pair_00_seed_42.json"
+    pair_path.write_text(json.dumps(legacy_payload, ensure_ascii=False), encoding="utf-8")
+    (trace_dir / "trace_summary.json").write_text(
+        json.dumps({"pair_files": [str(pair_path)]}, ensure_ascii=False),
+        encoding="utf-8",
+    )
+
+    summary = export_paired_gifs(
+        run_id=run_id,
+        trace_dir=str(trace_dir),
+        run_root=run_root,
+        top_k=1,
+        output_root=Path("qualitative_results/stage5_replays"),
+        fps=4,
+        mode="auto",
+    )
+    assert summary["exported_count"] == 1
+    assert summary["failed_count"] == 0
+    assert Path(summary["index_path"]).exists()
+    exported = summary["exported"][0]
+    assert Path(exported["gif_path"]).exists()
+    assert exported["distilled_unavailable"] is True

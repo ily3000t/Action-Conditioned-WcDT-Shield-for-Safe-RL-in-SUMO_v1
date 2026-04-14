@@ -1,0 +1,21 @@
+# Stage5 trace-capture profile (cost-desensitized behavior).
+# Purpose: produce isolated trace artifacts under cost-desensitized shield/distill settings.
+
+shield:
+  blocked_distance_margin_slope: 0.015
+
+shield_trace:
+  enabled: true
+  save_pair_traces: true
+  trace_dir_name: "stage5_trace_capture_cost"
+  seed_list: [42, 123, 2024, 7, 11, 29, 47, 64]
+
+distill:
+  learning_rate: 0.0003
+  epochs: 8
+
+eval:
+  eval_episodes: 8
+
+tensorboard:
+  run_name: "stage5_trace_capture_cost"

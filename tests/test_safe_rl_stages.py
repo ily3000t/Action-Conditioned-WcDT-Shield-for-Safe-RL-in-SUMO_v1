@@ -1428,6 +1428,8 @@ def test_stage5_trace_writes_pair_files_and_summary(monkeypatch):
     assert trace_summary["raw_passthrough_count"] == 0
     assert trace_summary["merge_lateral_guard_block_count"] == 1
     assert trace_summary["candidate_selected_count"] == 1
+    assert trace_summary["distilled_pairs_available"] == 0
+    assert trace_summary["distilled_unavailable_pair_count"] == 1
 
     pair_path = Path(trace_summary["pair_files"][0])
     assert pair_path.exists()
@@ -1443,6 +1445,11 @@ def test_stage5_trace_writes_pair_files_and_summary(monkeypatch):
     assert "history_hash" in pair_payload
     assert "ego_lane_id" in pair_payload
     assert isinstance(pair_payload["neighbor_summary"], list)
+    assert pair_payload["distilled_unavailable"] is True
+    assert pair_payload["distilled_episode_id"] == ""
+    assert pair_payload["distilled_steps"] == []
+    assert set(pair_payload["aligned_steps"][0].keys()) == {"step_index", "baseline", "shielded", "distilled"}
+    assert pair_payload["aligned_steps"][0]["distilled"] is None
     assert pair_payload["aligned_steps"][0]["shielded"]["chosen_candidate_index"] == 1
     assert Path(result["shield_trace_tuning_summary_path"]).exists()
     tuning_summary = json.loads(Path(result["shield_trace_tuning_summary_path"]).read_text(encoding="utf-8"))
@@ -1474,6 +1481,105 @@ def test_stage5_trace_writes_pair_files_and_summary(monkeypatch):
     assert trace_summary["best_margin_unique_count"] == 2
     assert trace_summary["no_safe_candidate_count"] == 0
     assert trace_summary["raw_already_best_count"] == 0
+
+
+def test_trace_pair_payload_supports_three_track_alignment():
+    config = _tiny_config()
+    pipeline = SafeRLPipeline(config)
+    run_id = f"ut_trace_three_track_{uuid.uuid4().hex[:8]}"
+    pipeline._prepare_run_context(stage="stage5", run_id=run_id)
+
+    baseline = {
+        "episode_id": "baseline_ep",
+        "seed": 42,
+        "risky_mode": True,
+        "scenario_source": config.sim.sumo_cfg,
+        "collisions": 0,
+        "mean_reward": 0.5,
+        "mean_raw_risk": 0.3,
+        "mean_final_risk": 0.3,
+        "interventions": 0,
+        "replacement_count": 0,
+        "replacement_same_as_raw_count": 0,
+        "fallback_action_count": 0,
+        "mean_risk_reduction": 0.0,
+        "step_trace": [
+            {
+                "step_index": 0,
+                "raw_action": 4,
+                "final_action": 4,
+                "raw_risk": 0.3,
+                "final_risk": 0.3,
+                "history_scene": [],
+            }
+        ],
+    }
+    shielded = {
+        "episode_id": "shielded_ep",
+        "seed": 42,
+        "risky_mode": True,
+        "scenario_source": config.sim.sumo_cfg,
+        "collisions": 0,
+        "mean_reward": 0.45,
+        "mean_raw_risk": 0.4,
+        "mean_final_risk": 0.2,
+        "interventions": 1,
+        "replacement_count": 1,
+        "replacement_same_as_raw_count": 0,
+        "fallback_action_count": 0,
+        "mean_risk_reduction": 0.2,
+        "step_trace": [
+            {
+                "step_index": 0,
+                "raw_action": 3,
+                "final_action": 4,
+                "raw_risk": 0.4,
+                "final_risk": 0.2,
+                "replacement_happened": True,
+                "history_scene": [],
+            }
+        ],
+    }
+    distilled = {
+        "episode_id": "distilled_ep",
+        "seed": 42,
+        "risky_mode": True,
+        "scenario_source": config.sim.sumo_cfg,
+        "collisions": 0,
+        "mean_reward": 0.48,
+        "mean_raw_risk": 0.35,
+        "mean_final_risk": 0.22,
+        "interventions": 1,
+        "replacement_count": 1,
+        "replacement_same_as_raw_count": 0,
+        "fallback_action_count": 0,
+        "mean_risk_reduction": 0.13,
+        "step_trace": [
+            {
+                "step_index": 0,
+                "raw_action": 3,
+                "final_action": 4,
+                "raw_risk": 0.35,
+                "final_risk": 0.22,
+                "replacement_happened": True,
+                "history_scene": [],
+            }
+        ],
+    }
+
+    payload = pipeline._build_trace_pair_payload(
+        pair_index=0,
+        baseline=baseline,
+        shielded=shielded,
+        distilled=distilled,
+        scenario_source=config.sim.sumo_cfg,
+        risky_mode=True,
+    )
+
+    assert payload["distilled_unavailable"] is False
+    assert payload["distilled_episode_id"] == "distilled_ep"
+    assert len(payload["distilled_steps"]) == 1
+    assert payload["aligned_steps"][0]["distilled"]["step_index"] == 0
 
 
 def test_shield_trace_tuning_summary_aggregates_baseline_and_c1():

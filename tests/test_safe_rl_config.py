@@ -312,6 +312,31 @@ def test_stage45_cost_desensitize_config_loads():
     assert config.tensorboard.run_name == "stage45_cost_desensitize"
 
 
+def test_stage5_trace_capture_default_config_loads():
+    config = load_safe_rl_config("safe_rl/config/stage5_trace_capture_default.yaml")
+    assert config.shield_trace.enabled is True
+    assert config.shield_trace.save_pair_traces is True
+    assert config.shield_trace.trace_dir_name == "stage5_trace_capture_default"
+    assert config.shield_trace.seed_list == [42, 123, 2024, 7, 11, 29, 47, 64]
+    assert config.eval.eval_episodes == 8
+    assert config.eval.eval_episodes == len(config.shield_trace.seed_list)
+    assert config.tensorboard.run_name == "stage5_trace_capture_default"
+
+
+def test_stage5_trace_capture_cost_config_loads():
+    config = load_safe_rl_config("safe_rl/config/stage5_trace_capture_cost.yaml")
+    assert config.shield_trace.enabled is True
+    assert config.shield_trace.save_pair_traces is True
+    assert config.shield_trace.trace_dir_name == "stage5_trace_capture_cost"
+    assert config.shield_trace.seed_list == [42, 123, 2024, 7, 11, 29, 47, 64]
+    assert config.eval.eval_episodes == 8
+    assert config.eval.eval_episodes == len(config.shield_trace.seed_list)
+    assert config.shield.blocked_distance_margin_slope == 0.015
+    assert config.distill.learning_rate == 0.0003
+    assert config.distill.epochs == 8
+    assert config.tensorboard.run_name == "stage5_trace_capture_cost"
+
+
 def test_risk_model_v2_defaults_enabled():
     config = load_safe_rl_config()
     assert config.light_risk.enable_v2 is True

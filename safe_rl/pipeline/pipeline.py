@@ -2554,12 +2554,7 @@ class SafeRLPipeline:
         )
         target_paired_results_path = paired_results_path or self.stage5_paired_episode_results_path
         self._write_json(target_paired_results_path, {"pairs": paired_episode_results})
-
-        trace_payload = self._write_shield_trace_outputs(
-            stage_config=stage_config,
-            baseline_details=baseline_metrics.get("episode_details", []),
-            shielded_details=shielded_metrics.get("episode_details", []),
-        ) if trace_enabled else None
+        distilled_metrics: Optional[Dict[str, Any]] = None
 
         result = {
             "comparison_mode": "same_policy_shield_off_vs_on",
@@ -2589,18 +2584,6 @@ class SafeRLPipeline:
         result["collision_baseline_zero"] = bool(
             result["evaluation_layers"].get("event_layer", {}).get("collision_baseline_zero", False)
         )
-        if trace_payload is not None:
-            result["shield_trace_summary_path"] = str(trace_payload["trace_summary_path"])
-            result["shield_trace"] = trace_payload["summary"]
-            tuning_payload = self._write_shield_trace_tuning_summary()
-            if tuning_payload is not None:
-                result["shield_trace_tuning_summary_path"] = str(tuning_payload["summary_path"])
-                result["shield_trace_tuning_summary"] = tuning_payload["summary"]
-            margin_payload = self._write_shield_margin_analysis_summary()
-            if margin_payload is not None:
-                result["shield_margin_analysis_summary_path"] = str(margin_payload["summary_path"])
-                result["shield_margin_analysis_summary"] = margin_payload["summary"]
-
         if tb_writer is not None:
             tb_writer.add_scalar("summary/collision_reduction", float(delta.get("collision_reduction", 0.0)), 0)
             tb_writer.add_scalar("summary/efficiency_drop", float(delta.get("efficiency_drop", 0.0)), 0)
@@ -2629,10 +2612,10 @@ class SafeRLPipeline:
                 tb_writer=tb_writer,
                 tb_prefix="distilled",
                 seeds=eval_seeds,
-                collect_step_traces=False,
+                collect_step_traces=trace_enabled,
             )
             distill_env.close()
-            result["system_distilled"] = distilled_metrics
+            result["system_distilled"] = dict(distilled_metrics)
             result["evaluation_layers"] = self._build_evaluation_layers(
                 baseline_metrics=baseline_metrics,
                 shielded_metrics=shielded_metrics,
@@ -2642,6 +2625,24 @@ class SafeRLPipeline:
             result["collision_baseline_zero"] = bool(
                 result["evaluation_layers"].get("event_layer", {}).get("collision_baseline_zero", False)
             )
+
+        trace_payload = self._write_shield_trace_outputs(
+            stage_config=stage_config,
+            baseline_details=baseline_metrics.get("episode_details", []),
+            shielded_details=shielded_metrics.get("episode_details", []),
+            distilled_details=(distilled_metrics or {}).get("episode_details", []),
+        ) if trace_enabled else None
+        if trace_payload is not None:
+            result["shield_trace_summary_path"] = str(trace_payload["trace_summary_path"])
+            result["shield_trace"] = trace_payload["summary"]
+            tuning_payload = self._write_shield_trace_tuning_summary()
+            if tuning_payload is not None:
+                result["shield_trace_tuning_summary_path"] = str(tuning_payload["summary_path"])
+                result["shield_trace_tuning_summary"] = tuning_payload["summary"]
+            margin_payload = self._write_shield_margin_analysis_summary()
+            if margin_payload is not None:
+                result["shield_margin_analysis_summary_path"] = str(margin_payload["summary_path"])
+                result["shield_margin_analysis_summary"] = margin_payload["summary"]
 
         if write_risk_v2_summary:
             self._write_risk_v2_eval_summary_from_stage5(result)
@@ -3514,10 +3515,12 @@ class SafeRLPipeline:
         stage_config: SafeRLConfig,
         baseline_details: Sequence[Dict[str, Any]],
         shielded_details: Sequence[Dict[str, Any]],
+        distilled_details: Optional[Sequence[Dict[str, Any]]] = None,
     ) -> Dict[str, Any]:
         trace_dir = self.shield_trace_dir or (self.reports_dir / str(stage_config.shield_trace.trace_dir_name))
         trace_dir.mkdir(parents=True, exist_ok=True)
         pair_count = min(len(baseline_details), len(shielded_details))
+        distilled_details_list = list(distilled_details or [])
         summary = {
             "variant_name": self._shield_trace_variant_name(str(stage_config.shield_trace.trace_dir_name)),
             "run_id": str(self.run_id or ""),
@@ -3535,6 +3538,8 @@ class SafeRLPipeline:
             "no_safe_candidate_count": 0,
             "raw_already_best_count": 0,
             "primary_nonreplacement_reason_counts": {},
+            "distilled_pairs_available": 0,
+            "distilled_unavailable_pair_count": 0,
             "pair_files": [],
         }
 
@@ -3544,10 +3549,16 @@ class SafeRLPipeline:
         for pair_index in range(pair_count):
             baseline = dict(baseline_details[pair_index])
             shielded = dict(shielded_details[pair_index])
+            distilled = (
+                dict(distilled_details_list[pair_index])
+                if pair_index < len(distilled_details_list)
+                else {}
+            )
             pair_payload = self._build_trace_pair_payload(
                 pair_index=pair_index,
                 baseline=baseline,
                 shielded=shielded,
+                distilled=distilled,
                 scenario_source=str(stage_config.sim.sumo_cfg),
                 risky_mode=True,
             )
@@ -3559,6 +3570,10 @@ class SafeRLPipeline:
                 self._write_json(pair_path, pair_payload)
                 summary["pair_files"].append(str(pair_path))
             summary["seeds"].append(seed_value)
+            if bool(pair_payload.get("distilled_unavailable", True)):
+                summary["distilled_unavailable_pair_count"] += 1
+            else:
+                summary["distilled_pairs_available"] += 1
             if pair_payload["regression_pair"]:
                 summary["regression_pair_count"] += 1
             if pair_payload["has_lane_change_replacement"]:
@@ -3793,12 +3808,15 @@ class SafeRLPipeline:
             "seed": int(pair_payload.get("seed", -1)),
             "baseline_collision": bool(pair_payload.get("baseline_collision", False)),
             "shielded_collision": bool(pair_payload.get("shielded_collision", False)),
+            "distilled_collision": bool(pair_payload.get("distilled_collision", False)),
             "baseline_reward": float(pair_payload.get("baseline_reward", 0.0)),
             "shielded_reward": float(pair_payload.get("shielded_reward", 0.0)),
+            "distilled_reward": float(pair_payload.get("distilled_reward", 0.0)),
             "intervention_count": int(pair_payload.get("intervention_count", 0)),
             "replacement_count": int(pair_payload.get("replacement_count", 0)),
             "fallback_action_count": int(pair_payload.get("fallback_action_count", 0)),
             "mean_risk_reduction": float(pair_payload.get("mean_risk_reduction", 0.0)),
+            "distilled_unavailable": bool(pair_payload.get("distilled_unavailable", True)),
         }
 
     def _load_trace_pair_scalar_summaries(self, trace_dir: Path, trace_summary: Dict[str, Any]) -> List[Dict[str, Any]]:
@@ -4124,12 +4142,17 @@ class SafeRLPipeline:
         pair_index: int,
         baseline: Dict[str, Any],
         shielded: Dict[str, Any],
+        distilled: Optional[Dict[str, Any]],
         scenario_source: str,
         risky_mode: bool,
     ) -> Dict[str, Any]:
         baseline_steps = [self._normalize_trace_step(item) for item in list(baseline.get("step_trace", []) or [])]
         shielded_steps = [self._normalize_trace_step(item) for item in list(shielded.get("step_trace", []) or [])]
-        aligned_steps = self._align_trace_steps(baseline_steps, shielded_steps)
+        distilled_payload = dict(distilled or {})
+        distilled_steps_raw = list(distilled_payload.get("step_trace", []) or [])
+        distilled_steps = [self._normalize_trace_step(item) for item in distilled_steps_raw]
+        distilled_unavailable = len(distilled_steps) == 0
+        aligned_steps = self._align_trace_steps(baseline_steps, shielded_steps, distilled_steps)
         first_replacement_step = self._first_matching_step(shielded_steps, lambda item: bool(item.get("replacement_happened", False)))
         collision_step_baseline = self._first_matching_step(baseline_steps, lambda item: bool(item.get("collision", False)))
         collision_step_shielded = self._first_matching_step(shielded_steps, lambda item: bool(item.get("collision", False)))
@@ -4180,18 +4203,24 @@ class SafeRLPipeline:
             "scenario_source": str(shielded.get("scenario_source", baseline.get("scenario_source", scenario_source))),
             "baseline_episode_id": str(baseline.get("episode_id", "")),
             "shielded_episode_id": str(shielded.get("episode_id", "")),
+            "distilled_episode_id": str(distilled_payload.get("episode_id", "")),
             "baseline_collision": bool(int(baseline.get("collisions", 0)) > 0),
             "shielded_collision": bool(int(shielded.get("collisions", 0)) > 0),
+            "distilled_collision": bool(int(distilled_payload.get("collisions", 0)) > 0),
             "baseline_reward": float(baseline.get("mean_reward", 0.0)),
             "shielded_reward": float(shielded.get("mean_reward", 0.0)),
+            "distilled_reward": float(distilled_payload.get("mean_reward", 0.0)),
             "baseline_raw_risk": float(baseline.get("mean_raw_risk", 0.0)),
             "shielded_raw_risk": float(shielded.get("mean_raw_risk", 0.0)),
             "shielded_final_risk": float(shielded.get("mean_final_risk", 0.0)),
+            "distilled_raw_risk": float(distilled_payload.get("mean_raw_risk", 0.0)),
+            "distilled_final_risk": float(distilled_payload.get("mean_final_risk", 0.0)),
             "intervention_count": int(shielded.get("interventions", 0)),
             "replacement_count": int(shielded.get("replacement_count", 0)),
             "replacement_same_as_raw_count": int(shielded.get("replacement_same_as_raw_count", 0)),
             "fallback_action_count": int(shielded.get("fallback_action_count", 0)),
             "mean_risk_reduction": float(shielded.get("mean_risk_reduction", 0.0)),
+            "distilled_unavailable": bool(distilled_unavailable),
             "blocked_by_margin_count": int(blocked_by_margin_count),
             "raw_passthrough_count": int(raw_passthrough_count),
             "merge_lateral_guard_block_count": int(merge_lateral_guard_block_count),
@@ -4210,6 +4239,7 @@ class SafeRLPipeline:
             **same_state_proof,
             "baseline_steps": baseline_steps,
             "shielded_steps": shielded_steps,
+            "distilled_steps": distilled_steps,
             "aligned_steps": aligned_steps,
         }
 
@@ -4240,6 +4270,9 @@ class SafeRLPipeline:
         normalized.setdefault("replacement_margin", 0.0)
         normalized.setdefault("reward", 0.0)
         normalized.setdefault("task_reward", 0.0)
+        normalized.setdefault("block_trigger", "")
+        normalized.setdefault("min_ttc", normalized.get("ttc", 0.0))
+        normalized.setdefault("ttc", normalized.get("min_ttc", 0.0))
         normalized.setdefault("best_candidate_action", -1)
         normalized.setdefault("best_candidate_fine_risk", None)
         normalized.setdefault("raw_action_fine_risk", float(normalized.get("raw_risk", 0.0)))
@@ -4279,15 +4312,22 @@ class SafeRLPipeline:
                 normalized["primary_nonreplacement_reason"] = str(normalized.get("constraint_reason", ""))
         return normalized
 
-    def _align_trace_steps(self, baseline_steps: Sequence[Dict[str, Any]], shielded_steps: Sequence[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    def _align_trace_steps(
+        self,
+        baseline_steps: Sequence[Dict[str, Any]],
+        shielded_steps: Sequence[Dict[str, Any]],
+        distilled_steps: Optional[Sequence[Dict[str, Any]]] = None,
+    ) -> List[Dict[str, Any]]:
+        distilled_steps = list(distilled_steps or [])
         aligned: List[Dict[str, Any]] = []
-        max_steps = max(len(baseline_steps), len(shielded_steps))
+        max_steps = max(len(baseline_steps), len(shielded_steps), len(distilled_steps))
         for idx in range(max_steps):
             aligned.append(
                 {
                     "step_index": idx,
                     "baseline": baseline_steps[idx] if idx < len(baseline_steps) else None,
                     "shielded": shielded_steps[idx] if idx < len(shielded_steps) else None,
+                    "distilled": distilled_steps[idx] if idx < len(distilled_steps) else None,
                 }
             )
         return aligned
