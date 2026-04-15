@@ -293,3 +293,39 @@ def test_stage1_probe_pair_filter_and_budget_prioritize_strong_signals():
     assert runner.summary["pairs_dropped_small_gap"] >= 1
     assert runner.summary["pairs_capped_by_budget"] >= 1
     assert runner.summary["pairs_kept_strong_signal"] == 2
+
+
+def test_stage1_probe_boundary_pair_appends_after_main_budget():
+    from safe_rl.data.stage1_probe import Stage1ProbeRunner
+
+    config = SafeRLConfig()
+    config.stage1_collection.probe_pair_min_target_gap = 0.01
+    config.stage1_collection.probe_pair_max_pairs_per_step = 2
+    config.stage1_collection.probe_pair_boundary_gap_floor = 0.005
+    config.stage1_collection.probe_pair_boundary_keep_per_risky_step = 1
+
+    runner = Stage1ProbeRunner(config=config, probe_backend=None)
+    episode = SimpleNamespace(episode_id="ep_probe_boundary")
+    history = [_scene(), _scene()]
+    candidates = [
+        {"candidate_action": 0, "overall_proxy_risk": 0.50, "collision": False, "min_ttc": 3.0, "min_distance": 12.0},
+        {"candidate_action": 1, "overall_proxy_risk": 0.506, "collision": False, "min_ttc": 3.1, "min_distance": 12.5},
+        {"candidate_action": 2, "overall_proxy_risk": 0.80, "collision": True, "min_ttc": 1.0, "min_distance": 2.0},
+        {"candidate_action": 3, "overall_proxy_risk": 0.20, "collision": False, "min_ttc": 6.0, "min_distance": 20.0},
+    ]
+
+    pairs = runner._probe_pairs_from_candidates(
+        episode=episode,
+        step_index=5,
+        history_scene=history,
+        same_state_proof={"history_hash": "abc"},
+        candidate_records=candidates,
+        append_boundary_pair=True,
+    )
+
+    boundary_pairs = [sample for sample in pairs if bool(sample.meta.get("boundary_pair", False))]
+    main_pairs = [sample for sample in pairs if not bool(sample.meta.get("boundary_pair", False))]
+    assert len(main_pairs) == 2
+    assert len(boundary_pairs) == 1
+    assert runner.summary["pairs_boundary_candidates_seen"] >= 1
+    assert runner.summary["pairs_boundary_appended"] == 1

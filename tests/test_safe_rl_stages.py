@@ -583,6 +583,78 @@ def test_stage2_model_quality_health_keeps_unique_threshold_hard_in_spread_buffe
     assert "world_unique_score_count_low" in health["critical_warnings"]
 
 
+def test_stage2_model_quality_aux_stage4_can_downgrade_unique_only_critical_to_degraded():
+    config = _tiny_config()
+    config.world_model.stage4_aux_min_high_gap_pairs = 128
+    config.world_model.stage4_aux_unique_floor = 12
+    pipeline = SafeRLPipeline(config)
+    run_id = f"ut_stage2_aux_stage4_{uuid.uuid4().hex[:8]}"
+    pipeline._prepare_run_context(stage="stage2", run_id=run_id)
+
+    stage2_report = {
+        "stage5_spread_eligible_pair_count": 0,
+        "stage1_probe_spread_eligible_pair_count": 200,
+        "stage4_spread_eligible_pair_count": 0,
+        "stage1_probe_pair_ranking_accuracy_before_after": {"before": 0.0, "after": 0.80},
+        "stage1_probe_score_spread_before_after": {"before": 0.0, "after": 0.020},
+        "stage1_probe_same_state_score_gap_before_after": {"before": 0.0, "after": 0.020},
+        "stage1_probe_unique_score_count_before_after": {"before": 8.0, "after": 9.0},
+        "stage4_high_gap_pair_count": 256,
+        "stage4_high_gap_unique_score_count_before_after": {"before": 10.0, "after": 14.0},
+        "world_pair_ft_best_metrics": {
+            "pair_ranking_accuracy": 0.75,
+            "score_spread": 0.02,
+            "same_state_score_gap": 0.02,
+            "unique_score_count": 9.0,
+        },
+    }
+
+    stage2_report.update(pipeline._build_stage2_model_quality_gate_metrics(stage2_report))
+    health = pipeline._build_stage2_model_quality_health(stage2_report)
+    assert health["status"] == "degraded"
+    assert health["model_quality_aux_stage4"]["applied"] is True
+    assert health["model_quality_aux_stage4"]["eligible"] is True
+    assert health["model_quality_aux_stage4"]["status_before"] == "critical"
+    assert health["model_quality_aux_stage4"]["status_after"] == "degraded"
+
+
+def test_stage2_model_quality_aux_stage4_reports_reason_codes_when_not_applied():
+    config = _tiny_config()
+    config.world_model.stage4_aux_min_high_gap_pairs = 128
+    config.world_model.stage4_aux_unique_floor = 12
+    pipeline = SafeRLPipeline(config)
+    run_id = f"ut_stage2_aux_stage4_reason_{uuid.uuid4().hex[:8]}"
+    pipeline._prepare_run_context(stage="stage2", run_id=run_id)
+
+    stage2_report = {
+        "stage5_spread_eligible_pair_count": 0,
+        "stage1_probe_spread_eligible_pair_count": 256,
+        "stage4_spread_eligible_pair_count": 0,
+        "stage1_probe_pair_ranking_accuracy_before_after": {"before": 0.0, "after": 0.80},
+        "stage1_probe_score_spread_before_after": {"before": 0.0, "after": 0.008},
+        "stage1_probe_same_state_score_gap_before_after": {"before": 0.0, "after": 0.020},
+        "stage1_probe_unique_score_count_before_after": {"before": 8.0, "after": 9.0},
+        "stage4_high_gap_pair_count": 64,
+        "stage4_high_gap_unique_score_count_before_after": {"before": 9.0, "after": 11.0},
+        "world_pair_ft_best_metrics": {
+            "pair_ranking_accuracy": 0.75,
+            "score_spread": 0.008,
+            "same_state_score_gap": 0.02,
+            "unique_score_count": 9.0,
+        },
+    }
+
+    stage2_report.update(pipeline._build_stage2_model_quality_gate_metrics(stage2_report))
+    health = pipeline._build_stage2_model_quality_health(stage2_report)
+    assert health["status"] == "critical"
+    aux = health["model_quality_aux_stage4"]
+    assert aux["applied"] is False
+    assert aux["eligible"] is False
+    assert "main_source_gap_not_ok" in aux["reasons"]
+    assert "stage4_high_gap_pairs_insufficient" in aux["reasons"]
+    assert "stage4_high_gap_unique_insufficient" in aux["reasons"]
+
+
 def test_stage2_quality_gate_missing_report_warns_and_continues():
     config = _tiny_config()
     pipeline = SafeRLPipeline(config)

@@ -55,6 +55,9 @@ class Stage1ProbeRunner:
             'pairs_dropped_small_gap': 0,
             'pairs_capped_by_budget': 0,
             'pairs_kept_strong_signal': 0,
+            'pairs_boundary_candidates_seen': 0,
+            'pairs_boundary_appended': 0,
+            'pairs_boundary_skipped_no_candidate': 0,
         }
         self.bucket_summary = {}
 
@@ -260,7 +263,14 @@ class Stage1ProbeRunner:
         for action_id in self._probe_action_ids():
             candidate_records.append(self._rollout_probe_candidate(episode, step_index, action_id, same_state_proof))
         self.summary['candidate_rollouts'] += len(candidate_records)
-        pair_samples = self._probe_pairs_from_candidates(episode, step_index, history_scene, same_state_proof, candidate_records)
+        pair_samples = self._probe_pairs_from_candidates(
+            episode,
+            step_index,
+            history_scene,
+            same_state_proof,
+            candidate_records,
+            append_boundary_pair=self._is_high_risk_or_event_window_step(episode, step_index),
+        )
         self.pairs.extend(pair_samples)
         self.summary['pairs_created'] += len(pair_samples)
         return {
@@ -372,11 +382,21 @@ class Stage1ProbeRunner:
         history_scene: Sequence[SceneState],
         same_state_proof: Dict[str, Any],
         candidate_records: Sequence[Dict[str, Any]],
+        append_boundary_pair: bool = False,
     ) -> List[RiskPairSample]:
         pairs: List[RiskPairSample] = []
         min_pair_gap = max(0.0, float(getattr(self.config.stage1_collection, 'probe_pair_min_target_gap', 0.0) or 0.0))
         max_pairs_per_step = int(getattr(self.config.stage1_collection, 'probe_pair_max_pairs_per_step', 0) or 0)
+        boundary_gap_floor = max(
+            0.0,
+            float(getattr(self.config.stage1_collection, 'probe_pair_boundary_gap_floor', 0.005) or 0.0),
+        )
+        boundary_keep_budget = max(
+            0,
+            int(getattr(self.config.stage1_collection, 'probe_pair_boundary_keep_per_risky_step', 1) or 0),
+        )
         pair_candidates: List[Tuple[Tuple[float, float, float, int, int], Dict[str, Any]]] = []
+        boundary_candidates: List[Tuple[Tuple[float, float, float, int, int], Dict[str, Any]]] = []
         ordered = sorted(list(candidate_records), key=lambda item: int(item.get('candidate_action', -1)))
         for idx in range(len(ordered)):
             for jdx in range(idx + 1, len(ordered)):
@@ -386,9 +406,6 @@ class Stage1ProbeRunner:
                 if preferred is None:
                     continue
                 target_gap = abs(float(left.get('overall_proxy_risk', 0.0)) - float(right.get('overall_proxy_risk', 0.0)))
-                if target_gap < min_pair_gap:
-                    self.summary['pairs_dropped_small_gap'] += 1
-                    continue
                 trusted_for_spread = self._probe_pair_trusted_for_spread(left, right)
                 hard_negative = bool(left.get('collision', False) != right.get('collision', False))
                 priority = (
@@ -398,6 +415,24 @@ class Stage1ProbeRunner:
                     int(left['candidate_action']),
                     int(right['candidate_action']),
                 )
+                if target_gap < min_pair_gap:
+                    self.summary['pairs_dropped_small_gap'] += 1
+                    if append_boundary_pair and boundary_keep_budget > 0 and target_gap >= boundary_gap_floor:
+                        self.summary['pairs_boundary_candidates_seen'] += 1
+                        boundary_candidates.append(
+                            (
+                                priority,
+                                {
+                                    'left': left,
+                                    'right': right,
+                                    'preferred': int(preferred),
+                                    'target_gap': float(target_gap),
+                                    'trusted_for_spread': bool(trusted_for_spread),
+                                    'hard_negative': bool(hard_negative),
+                                },
+                            )
+                        )
+                    continue
                 pair_candidates.append(
                     (
                         priority,
@@ -440,11 +475,43 @@ class Stage1ProbeRunner:
                         'hard_negative': bool(hard_negative),
                         'trusted_for_spread': bool(trusted_for_spread),
                         'target_gap': float(item['target_gap']),
+                        'boundary_pair': False,
                         'clear_dominance': bool(trusted_for_spread),
                         **same_state_proof,
                     },
                 )
             )
+        if append_boundary_pair and boundary_keep_budget > 0:
+            boundary_candidates.sort(key=lambda item: item[0])
+            selected_boundary = boundary_candidates[:boundary_keep_budget]
+            if not selected_boundary:
+                self.summary['pairs_boundary_skipped_no_candidate'] += 1
+            for _, item in selected_boundary:
+                left = dict(item['left'])
+                right = dict(item['right'])
+                pairs.append(
+                    RiskPairSample(
+                        history_scene=list(history_scene),
+                        action_a=int(left['candidate_action']),
+                        action_b=int(right['candidate_action']),
+                        preferred_action=int(item['preferred']),
+                        source='stage1_probe_same_state',
+                        weight=0.7,
+                        meta={
+                            'episode_id': episode.episode_id,
+                            'step_index': int(step_index),
+                            'target_risk_a': float(left.get('overall_proxy_risk', 0.0)),
+                            'target_risk_b': float(right.get('overall_proxy_risk', 0.0)),
+                            'hard_negative': bool(item['hard_negative']),
+                            'trusted_for_spread': bool(item['trusted_for_spread']),
+                            'target_gap': float(item['target_gap']),
+                            'boundary_pair': True,
+                            'clear_dominance': bool(item['trusted_for_spread']),
+                            **same_state_proof,
+                        },
+                    )
+                )
+                self.summary['pairs_boundary_appended'] += 1
         return pairs
 
     def _preferred_probe_action(self, left: Dict[str, Any], right: Dict[str, Any]) -> Optional[int]:
@@ -475,6 +542,21 @@ class Stage1ProbeRunner:
         if abs(float(left.get('overall_proxy_risk', 0.0)) - float(right.get('overall_proxy_risk', 0.0))) >= 0.15:
             return True
         return False
+
+    def _is_high_risk_or_event_window_step(self, episode: EpisodeLog, step_index: int) -> bool:
+        if step_index < 0 or step_index >= len(episode.steps):
+            return False
+        labels = episode.steps[step_index].risk_labels
+        selected_by_risk = (
+            bool(labels.collision)
+            or float(labels.min_ttc) <= float(self.config.stage1_collection.probe_trigger_ttc_threshold)
+            or float(labels.min_distance) <= float(self.config.stage1_collection.probe_trigger_min_distance)
+        )
+        if selected_by_risk:
+            return True
+        scheduled_event_steps = self._scheduled_event_steps(episode)
+        event_window_steps = self._event_window_steps(episode, scheduled_event_steps)
+        return step_index in event_window_steps
 
     def same_state_proof_from_scene(self, scene: SceneState, history_scene: Sequence[SceneState]) -> Dict[str, Any]:
         ego = get_ego_vehicle(scene)

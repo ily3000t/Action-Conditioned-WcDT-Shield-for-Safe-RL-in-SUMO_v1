@@ -1326,6 +1326,11 @@ class SafeRLPipeline:
             "stage4_score_spread_before_after": dict(world_pair_ft_report.get("stage4_score_spread_before_after", {})),
             "stage5_unique_score_count_before_after": dict(world_pair_ft_report.get("stage5_unique_score_count_before_after", {})),
             "stage1_probe_unique_score_count_before_after": dict(world_pair_ft_report.get("stage1_probe_unique_score_count_before_after", {})),
+            "stage4_unique_score_count_before_after": dict(world_pair_ft_report.get("stage4_unique_score_count_before_after", {})),
+            "stage4_high_gap_pair_count": int(world_pair_ft_report.get("stage4_high_gap_pair_count", 0)),
+            "stage4_high_gap_unique_score_count_before_after": dict(
+                world_pair_ft_report.get("stage4_high_gap_unique_score_count_before_after", {})
+            ),
             "stage5_spread_eligible_pair_count": int(world_pair_ft_report.get("stage5_spread_eligible_pair_count", 0)),
             "stage1_probe_spread_eligible_pair_count": int(world_pair_ft_report.get("stage1_probe_spread_eligible_pair_count", 0)),
             "stage4_spread_eligible_pair_count": int(world_pair_ft_report.get("stage4_spread_eligible_pair_count", 0)),
@@ -1343,6 +1348,10 @@ class SafeRLPipeline:
         if bool(stage2_report["stage5_requirement_met"]):
             stage2_report["stage2_pair_source_health"]["status"] = "healthy"
         stage2_report["stage2_pair_source_health"]["model_quality"] = self._build_stage2_model_quality_health(stage2_report)
+        stage2_report["model_quality_aux_stage4"] = dict(
+            stage2_report["stage2_pair_source_health"]["model_quality"].get("model_quality_aux_stage4", {})
+        )
+        stage2_report["stage2_pair_source_health"]["model_quality_aux_stage4"] = dict(stage2_report["model_quality_aux_stage4"])
         self._update_warning_summary_with_stage2_pair_source_health(stage2_report["stage2_pair_source_health"])
         self._write_json(self.stage2_training_report_path, stage2_report)
         self._write_risk_v2_eval_summary_from_stage2(stage2_report)
@@ -1488,15 +1497,76 @@ class SafeRLPipeline:
         if world_same_state_score_gap is not None and world_same_state_score_gap < min_same_state_score_gap:
             degraded_warnings.append("world_same_state_score_gap_small")
 
+        status_before_aux = "healthy"
         if critical_warnings:
-            status = "critical"
+            status_before_aux = "critical"
             message = "World pair metrics are critically under-resolved; downstream Stage4/5 will be blocked."
         elif degraded_warnings:
-            status = "degraded"
+            status_before_aux = "degraded"
             message = "World pair metrics are degraded; monitor downstream shield activation carefully."
         else:
-            status = "healthy"
             message = "World pair metrics look healthy for current stage2 inputs."
+
+        stage4_aux_min_high_gap_pairs = int(
+            getattr(self.config.world_model, "stage4_aux_min_high_gap_pairs", 128) or 128
+        )
+        stage4_aux_unique_floor = float(
+            getattr(self.config.world_model, "stage4_aux_unique_floor", 12) or 12
+        )
+        stage4_high_gap_pair_count = int(stage2_report.get("stage4_high_gap_pair_count", 0) or 0)
+        stage4_high_gap_unique_payload = dict(
+            stage2_report.get("stage4_high_gap_unique_score_count_before_after", {}) or {}
+        )
+        stage4_high_gap_unique_after = _to_optional_float(stage4_high_gap_unique_payload.get("after"))
+        stage4_aux_reasons: List[str] = []
+        stage4_aux_eligible = False
+        stage4_aux_applied = False
+        status_after_aux = status_before_aux
+        if status_before_aux == "critical":
+            critical_reason_unique_only = set(critical_warnings) == {"world_unique_score_count_low"}
+            main_source_gap_ok = (
+                world_score_spread is not None
+                and world_score_spread >= min_score_spread
+                and world_same_state_score_gap is not None
+                and world_same_state_score_gap >= min_same_state_score_gap
+            )
+            if not main_source_gap_ok:
+                stage4_aux_reasons.append("main_source_gap_not_ok")
+            if not critical_reason_unique_only:
+                stage4_aux_reasons.append("critical_reason_not_unique_only")
+            if stage4_high_gap_pair_count < stage4_aux_min_high_gap_pairs:
+                stage4_aux_reasons.append("stage4_high_gap_pairs_insufficient")
+            if stage4_high_gap_unique_after is None:
+                stage4_aux_reasons.append("stage4_high_gap_metrics_missing")
+            elif stage4_high_gap_unique_after < stage4_aux_unique_floor:
+                stage4_aux_reasons.append("stage4_high_gap_unique_insufficient")
+            stage4_aux_eligible = len(stage4_aux_reasons) == 0
+            if stage4_aux_eligible:
+                status_after_aux = "degraded"
+                stage4_aux_applied = True
+                message = (
+                    "World pair metrics remain low-resolution on unique-count, "
+                    "but Stage4 high-gap auxiliary signal allows degraded continuation."
+                )
+
+        status = status_after_aux
+        model_quality_aux_stage4 = {
+            "applied": bool(stage4_aux_applied),
+            "eligible": bool(stage4_aux_eligible),
+            "status_before": str(status_before_aux),
+            "status_after": str(status_after_aux),
+            "reasons": list(stage4_aux_reasons),
+            "metrics": {
+                "stage4_high_gap_pair_count": int(stage4_high_gap_pair_count),
+                "stage4_high_gap_unique_after": stage4_high_gap_unique_after,
+            },
+            "thresholds": {
+                "stage4_aux_min_high_gap_pairs": int(stage4_aux_min_high_gap_pairs),
+                "stage4_aux_unique_floor": float(stage4_aux_unique_floor),
+                "min_score_spread": float(min_score_spread),
+                "min_same_state_score_gap": float(min_same_state_score_gap),
+            },
+        }
         return {
             "status": status,
             "message": message,
@@ -1518,6 +1588,7 @@ class SafeRLPipeline:
             "metric_source": metric_source,
             "source_eligible_counts": source_eligible_counts,
             "source_reliable_for_spread_buffer": bool(source_is_reliable),
+            "model_quality_aux_stage4": model_quality_aux_stage4,
         }
 
     def _build_stage2_model_quality_gate_metrics(self, stage2_report: Dict[str, Any]) -> Dict[str, Any]:
@@ -2150,6 +2221,8 @@ class SafeRLPipeline:
             before_stage5_metrics = world_trainer.evaluate_pairs(stage5_pair_samples)
             before_stage1_probe_metrics = world_trainer.evaluate_pairs(stage1_probe_pair_samples)
             before_stage4_metrics = world_trainer.evaluate_pairs(stage4_pair_samples)
+            stage4_high_gap_pair_samples = world_trainer._filter_high_gap_pairs(stage4_pair_samples)
+            before_stage4_high_gap_metrics = world_trainer.evaluate_pairs(stage4_high_gap_pair_samples)
             before_pointwise_metrics = world_trainer._evaluate_risk_only_samples(eval_replay_samples)
             world_pair_metrics = dict(before_pair_metrics)
             world_trainer.last_pair_metrics = dict(world_pair_metrics)
@@ -2193,6 +2266,12 @@ class SafeRLPipeline:
                 "stage4_score_spread_before_after": {"before": float(before_stage4_metrics.get("score_spread", 0.0)), "after": float(before_stage4_metrics.get("score_spread", 0.0))},
                 "stage5_unique_score_count_before_after": {"before": float(before_stage5_metrics.get("unique_score_count", 0.0)), "after": float(before_stage5_metrics.get("unique_score_count", 0.0))},
                 "stage1_probe_unique_score_count_before_after": {"before": float(before_stage1_probe_metrics.get("unique_score_count", 0.0)), "after": float(before_stage1_probe_metrics.get("unique_score_count", 0.0))},
+                "stage4_unique_score_count_before_after": {"before": float(before_stage4_metrics.get("unique_score_count", 0.0)), "after": float(before_stage4_metrics.get("unique_score_count", 0.0))},
+                "stage4_high_gap_pair_count": int(len(stage4_high_gap_pair_samples)),
+                "stage4_high_gap_unique_score_count_before_after": {
+                    "before": float(before_stage4_high_gap_metrics.get("unique_score_count", 0.0)),
+                    "after": float(before_stage4_high_gap_metrics.get("unique_score_count", 0.0)),
+                },
                 "stage5_spread_eligible_pair_count": int(world_trainer._spread_eligible_pair_count(stage5_pair_samples)),
                 "stage1_probe_spread_eligible_pair_count": int(world_trainer._spread_eligible_pair_count(stage1_probe_pair_samples)),
                 "stage4_spread_eligible_pair_count": int(world_trainer._spread_eligible_pair_count(stage4_pair_samples)),
@@ -3443,9 +3522,15 @@ class SafeRLPipeline:
             "stage4_score_spread_before_after": dict(stage2_report.get("stage4_score_spread_before_after", {})),
             "stage5_unique_score_count_before_after": dict(stage2_report.get("stage5_unique_score_count_before_after", {})),
             "stage1_probe_unique_score_count_before_after": dict(stage2_report.get("stage1_probe_unique_score_count_before_after", {})),
+            "stage4_unique_score_count_before_after": dict(stage2_report.get("stage4_unique_score_count_before_after", {})),
+            "stage4_high_gap_pair_count": int(stage2_report.get("stage4_high_gap_pair_count", 0)),
+            "stage4_high_gap_unique_score_count_before_after": dict(
+                stage2_report.get("stage4_high_gap_unique_score_count_before_after", {})
+            ),
             "stage5_spread_eligible_pair_count": int(stage2_report.get("stage5_spread_eligible_pair_count", 0)),
             "stage1_probe_spread_eligible_pair_count": int(stage2_report.get("stage1_probe_spread_eligible_pair_count", 0)),
             "stage4_spread_eligible_pair_count": int(stage2_report.get("stage4_spread_eligible_pair_count", 0)),
+            "model_quality_aux_stage4": dict(stage2_report.get("model_quality_aux_stage4", {})),
             "world_pair_ft_best_epoch": int(stage2_report.get("world_pair_ft_best_epoch", -1)),
             "world_pair_ft_best_metrics": dict(stage2_report.get("world_pair_ft_best_metrics", {})),
             "world_pair_ft_restored_best": bool(stage2_report.get("world_pair_ft_restored_best", False)),
@@ -3481,9 +3566,15 @@ class SafeRLPipeline:
             "stage4_score_spread_before_after": dict(stage2_snapshot["stage4_score_spread_before_after"]),
             "stage5_unique_score_count_before_after": dict(stage2_snapshot["stage5_unique_score_count_before_after"]),
             "stage1_probe_unique_score_count_before_after": dict(stage2_snapshot["stage1_probe_unique_score_count_before_after"]),
+            "stage4_unique_score_count_before_after": dict(stage2_snapshot.get("stage4_unique_score_count_before_after", {})),
+            "stage4_high_gap_pair_count": int(stage2_snapshot.get("stage4_high_gap_pair_count", 0)),
+            "stage4_high_gap_unique_score_count_before_after": dict(
+                stage2_snapshot.get("stage4_high_gap_unique_score_count_before_after", {})
+            ),
             "stage5_spread_eligible_pair_count": int(stage2_snapshot["stage5_spread_eligible_pair_count"]),
             "stage1_probe_spread_eligible_pair_count": int(stage2_snapshot["stage1_probe_spread_eligible_pair_count"]),
             "stage4_spread_eligible_pair_count": int(stage2_snapshot["stage4_spread_eligible_pair_count"]),
+            "model_quality_aux_stage4": dict(stage2_snapshot.get("model_quality_aux_stage4", {})),
             "world_pair_ft_best_epoch": int(stage2_snapshot["world_pair_ft_best_epoch"]),
             "world_pair_ft_best_metrics": dict(stage2_snapshot["world_pair_ft_best_metrics"]),
             "world_pair_ft_restored_best": bool(stage2_snapshot["world_pair_ft_restored_best"]),

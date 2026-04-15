@@ -25,9 +25,15 @@ def test_default_config_loads():
     assert config.stage1_collection.min_gap_between_risk_events == 8
     assert config.stage1_collection.probe_pair_min_target_gap == 0.01
     assert config.stage1_collection.probe_pair_max_pairs_per_step == 12
+    assert config.stage1_collection.probe_pair_boundary_gap_floor == 0.005
+    assert config.stage1_collection.probe_pair_boundary_keep_per_risky_step == 1
     assert config.stage1_collection.stage4_candidate_min_target_gap == 0.01
     assert config.stage1_collection.exclude_structural_from_main is True
     assert config.world_model.min_spread_eligible_pairs_for_gate_source == 128
+    assert config.world_model.pair_ft_min_unique_score_floor == 12
+    assert config.world_model.pair_ft_selection_accuracy_tie_epsilon == 0.0001
+    assert config.world_model.stage4_aux_min_high_gap_pairs == 128
+    assert config.world_model.stage4_aux_unique_floor == 12
     assert config.world_model.min_stage5_pairs_for_world_ft == 50
     assert config.world_model.pair_finetune_gate_mode == "fallback_all_pairs"
     assert config.shield.profile == "balanced"

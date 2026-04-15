@@ -501,7 +501,14 @@ class WorldModelTrainer:
         pair_samples = list(pair_samples or [])
         stage5_pair_samples = list(stage5_pair_samples or [sample for sample in pair_samples if str(sample.source) == 'stage5_trace_first_replacement'])
         stage1_probe_pair_samples = list(stage1_probe_pair_samples or [sample for sample in pair_samples if str(sample.source) == 'stage1_probe_same_state'])
-        stage4_pair_samples = list(stage4_pair_samples or [sample for sample in pair_samples if str(sample.source) == 'stage4_buffer'])
+        stage4_pair_samples = list(
+            stage4_pair_samples
+            or [
+                sample
+                for sample in pair_samples
+                if str(sample.source) in ('stage4_buffer', 'stage4_candidate_rank')
+            ]
+        )
         pair_count = int(len(pair_samples))
         replay_sample_count = int(len(replay_samples))
         eval_replay_samples = self._select_pair_ft_eval_samples(replay_samples)
@@ -512,6 +519,8 @@ class WorldModelTrainer:
         before_stage5_metrics = self.evaluate_pairs(stage5_pair_samples)
         before_stage1_probe_metrics = self.evaluate_pairs(stage1_probe_pair_samples)
         before_stage4_metrics = self.evaluate_pairs(stage4_pair_samples)
+        stage4_high_gap_pair_samples = self._filter_high_gap_pairs(stage4_pair_samples)
+        before_stage4_high_gap_metrics = self.evaluate_pairs(stage4_high_gap_pair_samples)
         before_pointwise_metrics = self._evaluate_risk_only_samples(eval_replay_samples)
         stage5_spread_eligible_count = self._spread_eligible_pair_count(stage5_pair_samples)
         stage1_probe_spread_eligible_count = self._spread_eligible_pair_count(stage1_probe_pair_samples)
@@ -567,6 +576,13 @@ class WorldModelTrainer:
                 'stage4_score_spread_before_after': self._metric_before_after(before_stage4_metrics, before_stage4_metrics, 'score_spread'),
                 'stage5_unique_score_count_before_after': self._metric_before_after(before_stage5_metrics, before_stage5_metrics, 'unique_score_count'),
                 'stage1_probe_unique_score_count_before_after': self._metric_before_after(before_stage1_probe_metrics, before_stage1_probe_metrics, 'unique_score_count'),
+                'stage4_unique_score_count_before_after': self._metric_before_after(before_stage4_metrics, before_stage4_metrics, 'unique_score_count'),
+                'stage4_high_gap_pair_count': int(len(stage4_high_gap_pair_samples)),
+                'stage4_high_gap_unique_score_count_before_after': self._metric_before_after(
+                    before_stage4_high_gap_metrics,
+                    before_stage4_high_gap_metrics,
+                    'unique_score_count',
+                ),
                 'stage5_spread_eligible_pair_count': int(stage5_spread_eligible_count),
                 'stage1_probe_spread_eligible_pair_count': int(stage1_probe_spread_eligible_count),
                 'stage4_spread_eligible_pair_count': int(stage4_spread_eligible_count),
@@ -600,9 +616,16 @@ class WorldModelTrainer:
         source_mix['phase_a_epochs'] = int(phase_a_epochs)
         source_mix['phase_b_epochs'] = int(phase_b_epochs)
         best_eval_pairs = stage5_pair_samples or stage1_probe_pair_samples or pair_samples
-        best_metrics = dict(self.evaluate_pairs(best_eval_pairs))
-        best_epoch = -1
-        best_state = {name: tensor.detach().cpu().clone() for name, tensor in self.model.state_dict().items()}
+        initial_metrics = dict(self.evaluate_pairs(best_eval_pairs))
+        legacy_best_metrics = dict(initial_metrics)
+        legacy_best_epoch = -1
+        legacy_best_state = {name: tensor.detach().cpu().clone() for name, tensor in self.model.state_dict().items()}
+        eligible_best_metrics: Optional[Dict[str, float]] = None
+        eligible_best_epoch = -1
+        eligible_best_state: Optional[Dict[str, torch.Tensor]] = None
+        if self._is_epoch_metrics_eligible_for_unique_guard(initial_metrics):
+            eligible_best_metrics = dict(initial_metrics)
+            eligible_best_state = {name: tensor.detach().cpu().clone() for name, tensor in self.model.state_dict().items()}
         patience = max(0, int(getattr(self.config, 'pair_ft_patience', 0) or 0))
         epochs_without_improvement = 0
         total_stage5_seen_counts = {pair_id: 0 for pair_id in stage5_pair_ids}
@@ -703,6 +726,15 @@ class WorldModelTrainer:
                     'loss_ranking': epoch_ranking / epoch_steps,
                     'loss_spread': epoch_spread / epoch_steps,
                 }
+                eval_metrics = self.evaluate_pairs(best_eval_pairs)
+                epoch_summary.update(
+                    {
+                        'eval_pair_ranking_accuracy': float(eval_metrics.get('pair_ranking_accuracy', 0.0)),
+                        'eval_same_state_score_gap': float(eval_metrics.get('same_state_score_gap', 0.0)),
+                        'eval_score_spread': float(eval_metrics.get('score_spread', 0.0)),
+                        'eval_unique_score_count': float(eval_metrics.get('unique_score_count', 0.0)),
+                    }
+                )
                 epoch_metrics.append(epoch_summary)
                 print(
                     f"[WorldModel PairFT] epoch {epoch_idx + 1}/{total_epochs} ({phase_name}), "
@@ -714,25 +746,57 @@ class WorldModelTrainer:
                     tb_writer.add_scalar('loss/epoch_pointwise', epoch_summary['loss_pointwise'], epoch_idx)
                     tb_writer.add_scalar('loss/epoch_ranking', epoch_summary['loss_ranking'], epoch_idx)
                     tb_writer.add_scalar('loss/epoch_spread', epoch_summary['loss_spread'], epoch_idx)
+                if tb_writer is not None:
+                    tb_writer.add_scalar('eval/epoch_pair_ranking_accuracy', epoch_summary['eval_pair_ranking_accuracy'], epoch_idx)
+                    tb_writer.add_scalar('eval/epoch_same_state_score_gap', epoch_summary['eval_same_state_score_gap'], epoch_idx)
+                    tb_writer.add_scalar('eval/epoch_score_spread', epoch_summary['eval_score_spread'], epoch_idx)
+                    tb_writer.add_scalar('eval/epoch_unique_score_count', epoch_summary['eval_unique_score_count'], epoch_idx)
 
-            current_best_metrics = self.evaluate_pairs(best_eval_pairs)
-            if self._is_better_pair_ft_metrics(current_best_metrics, best_metrics):
-                best_metrics = dict(current_best_metrics)
-                best_epoch = int(epoch_idx)
-                best_state = {name: tensor.detach().cpu().clone() for name, tensor in self.model.state_dict().items()}
-                epochs_without_improvement = 0
-            else:
-                epochs_without_improvement += 1
-                if patience > 0 and epochs_without_improvement >= patience:
-                    break
+                improved_for_patience = False
+                if self._is_better_pair_ft_metrics(eval_metrics, legacy_best_metrics):
+                    legacy_best_metrics = dict(eval_metrics)
+                    legacy_best_epoch = int(epoch_idx)
+                    legacy_best_state = {name: tensor.detach().cpu().clone() for name, tensor in self.model.state_dict().items()}
+                    if eligible_best_metrics is None:
+                        improved_for_patience = True
 
-        self.model.load_state_dict(best_state)
+                if self._is_epoch_metrics_eligible_for_unique_guard(eval_metrics):
+                    if (
+                        eligible_best_metrics is None
+                        or self._compare_pair_ft_metrics_for_selection(eval_metrics, eligible_best_metrics) > 0
+                    ):
+                        eligible_best_metrics = dict(eval_metrics)
+                        eligible_best_epoch = int(epoch_idx)
+                        eligible_best_state = {
+                            name: tensor.detach().cpu().clone()
+                            for name, tensor in self.model.state_dict().items()
+                        }
+                        improved_for_patience = True
+
+                if improved_for_patience:
+                    epochs_without_improvement = 0
+                else:
+                    epochs_without_improvement += 1
+                    if patience > 0 and epochs_without_improvement >= patience:
+                        break
+
+        if eligible_best_state is not None and eligible_best_metrics is not None:
+            selected_best_state = eligible_best_state
+            selected_best_metrics = eligible_best_metrics
+            selected_best_epoch = int(eligible_best_epoch)
+        else:
+            selected_best_state = legacy_best_state
+            selected_best_metrics = legacy_best_metrics
+            selected_best_epoch = int(legacy_best_epoch)
+
+        self.model.load_state_dict(selected_best_state)
         self._restore_grad_state(grad_state)
         self.model.eval()
         after_pair_metrics = self.evaluate_pairs(pair_samples)
         after_stage5_metrics = self.evaluate_pairs(stage5_pair_samples)
         after_stage1_probe_metrics = self.evaluate_pairs(stage1_probe_pair_samples)
         after_stage4_metrics = self.evaluate_pairs(stage4_pair_samples)
+        after_stage4_high_gap_metrics = self.evaluate_pairs(stage4_high_gap_pair_samples)
         after_pointwise_metrics = self._evaluate_risk_only_samples(eval_replay_samples)
         source_mix['stage5_pair_seen_counts'] = dict(total_stage5_seen_counts)
         source_mix['stage5_cap_reached_pairs'] = int(len(stage5_cap_reached_ids))
@@ -761,11 +825,18 @@ class WorldModelTrainer:
             'stage4_score_spread_before_after': self._metric_before_after(before_stage4_metrics, after_stage4_metrics, 'score_spread'),
             'stage5_unique_score_count_before_after': self._metric_before_after(before_stage5_metrics, after_stage5_metrics, 'unique_score_count'),
             'stage1_probe_unique_score_count_before_after': self._metric_before_after(before_stage1_probe_metrics, after_stage1_probe_metrics, 'unique_score_count'),
+            'stage4_unique_score_count_before_after': self._metric_before_after(before_stage4_metrics, after_stage4_metrics, 'unique_score_count'),
+            'stage4_high_gap_pair_count': int(len(stage4_high_gap_pair_samples)),
+            'stage4_high_gap_unique_score_count_before_after': self._metric_before_after(
+                before_stage4_high_gap_metrics,
+                after_stage4_high_gap_metrics,
+                'unique_score_count',
+            ),
             'stage5_spread_eligible_pair_count': int(stage5_spread_eligible_count),
             'stage1_probe_spread_eligible_pair_count': int(stage1_probe_spread_eligible_count),
             'stage4_spread_eligible_pair_count': int(stage4_spread_eligible_count),
-            'world_pair_ft_best_epoch': int(best_epoch),
-            'world_pair_ft_best_metrics': dict(best_metrics),
+            'world_pair_ft_best_epoch': int(selected_best_epoch),
+            'world_pair_ft_best_metrics': dict(selected_best_metrics),
             'world_pair_ft_restored_best': True,
         }
         if tb_writer is not None:
@@ -788,6 +859,59 @@ class WorldModelTrainer:
             'before': float((before_metrics or {}).get(key, 0.0)),
             'after': float((after_metrics or {}).get(key, 0.0)),
         }
+
+    def _filter_high_gap_pairs(self, pair_samples: Sequence[RiskPairSample]) -> List[RiskPairSample]:
+        selected: List[RiskPairSample] = []
+        for sample in pair_samples:
+            target_a = float(sample.meta.get('target_risk_a', 0.0))
+            target_b = float(sample.meta.get('target_risk_b', 0.0))
+            if abs(target_a - target_b) >= float(SPREAD_TARGET_DELTA):
+                selected.append(sample)
+        return selected
+
+    def _is_epoch_metrics_eligible_for_unique_guard(self, metrics: Dict[str, float]) -> bool:
+        min_unique_floor = float(getattr(self.config, 'pair_ft_min_unique_score_floor', 12) or 12)
+        min_spread_floor = float(getattr(self.config, 'pair_ft_min_score_spread_floor', 0.0) or 0.0)
+        min_gap_floor = float(getattr(self.config, 'pair_ft_min_same_state_gap_floor', 0.0) or 0.0)
+        unique_count = float((metrics or {}).get('unique_score_count', 0.0))
+        score_spread = float((metrics or {}).get('score_spread', 0.0))
+        same_state_gap = float((metrics or {}).get('same_state_score_gap', 0.0))
+        return (
+            unique_count >= min_unique_floor
+            and score_spread >= min_spread_floor
+            and same_state_gap >= min_gap_floor
+        )
+
+    def _compare_pair_ft_metrics_for_selection(self, current_metrics: Dict[str, float], best_metrics: Dict[str, float]) -> int:
+        tie_epsilon = float(getattr(self.config, 'pair_ft_selection_accuracy_tie_epsilon', 1e-4) or 1e-4)
+        current_acc = float((current_metrics or {}).get('pair_ranking_accuracy', 0.0))
+        best_acc = float((best_metrics or {}).get('pair_ranking_accuracy', 0.0))
+        if current_acc > best_acc + tie_epsilon:
+            return 1
+        if current_acc < best_acc - tie_epsilon:
+            return -1
+
+        current_unique = float((current_metrics or {}).get('unique_score_count', 0.0))
+        best_unique = float((best_metrics or {}).get('unique_score_count', 0.0))
+        if current_unique > best_unique + 1e-9:
+            return 1
+        if current_unique < best_unique - 1e-9:
+            return -1
+
+        current_gap = float((current_metrics or {}).get('same_state_score_gap', 0.0))
+        best_gap = float((best_metrics or {}).get('same_state_score_gap', 0.0))
+        if current_gap > best_gap + 1e-9:
+            return 1
+        if current_gap < best_gap - 1e-9:
+            return -1
+
+        current_spread = float((current_metrics or {}).get('score_spread', 0.0))
+        best_spread = float((best_metrics or {}).get('score_spread', 0.0))
+        if current_spread > best_spread + 1e-9:
+            return 1
+        if current_spread < best_spread - 1e-9:
+            return -1
+        return 0
 
     def _spread_eligible_pair_count(self, pair_samples: Sequence[RiskPairSample]) -> int:
         count = 0

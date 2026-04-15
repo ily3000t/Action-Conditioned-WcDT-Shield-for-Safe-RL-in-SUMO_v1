@@ -212,6 +212,77 @@ def test_world_pair_best_metric_rejects_collapsed_candidate_with_higher_accuracy
     ) is True
 
 
+def test_world_pair_epoch_eligibility_requires_unique_and_gap_floors():
+    from safe_rl.models.world_model import WorldModelTrainer
+
+    trainer = WorldModelTrainer(
+        config=WorldModelConfig(
+            hidden_dim=64,
+            future_steps=2,
+            multimodal=2,
+            pair_ft_min_unique_score_floor=12,
+            pair_ft_min_score_spread_floor=0.008,
+            pair_ft_min_same_state_gap_floor=0.008,
+        ),
+        history_steps=2,
+        device="cpu",
+    )
+    assert trainer._is_epoch_metrics_eligible_for_unique_guard(
+        {"unique_score_count": 12.0, "score_spread": 0.01, "same_state_score_gap": 0.01}
+    )
+    assert not trainer._is_epoch_metrics_eligible_for_unique_guard(
+        {"unique_score_count": 11.0, "score_spread": 0.01, "same_state_score_gap": 0.01}
+    )
+    assert not trainer._is_epoch_metrics_eligible_for_unique_guard(
+        {"unique_score_count": 12.0, "score_spread": 0.007, "same_state_score_gap": 0.01}
+    )
+
+
+def test_world_pair_selection_compare_uses_unique_gap_spread_when_accuracy_tied():
+    from safe_rl.models.world_model import WorldModelTrainer
+
+    trainer = WorldModelTrainer(
+        config=WorldModelConfig(
+            hidden_dim=64,
+            future_steps=2,
+            multimodal=2,
+            pair_ft_selection_accuracy_tie_epsilon=1e-4,
+        ),
+        history_steps=2,
+        device="cpu",
+    )
+    # ranking accuracy tied within epsilon: unique decides first.
+    assert trainer._compare_pair_ft_metrics_for_selection(
+        {
+            "pair_ranking_accuracy": 0.80001,
+            "unique_score_count": 13.0,
+            "same_state_score_gap": 0.02,
+            "score_spread": 0.02,
+        },
+        {
+            "pair_ranking_accuracy": 0.80000,
+            "unique_score_count": 12.0,
+            "same_state_score_gap": 0.03,
+            "score_spread": 0.03,
+        },
+    ) == 1
+    # unique tied: same-state gap decides.
+    assert trainer._compare_pair_ft_metrics_for_selection(
+        {
+            "pair_ranking_accuracy": 0.80000,
+            "unique_score_count": 12.0,
+            "same_state_score_gap": 0.021,
+            "score_spread": 0.020,
+        },
+        {
+            "pair_ranking_accuracy": 0.80000,
+            "unique_score_count": 12.0,
+            "same_state_score_gap": 0.020,
+            "score_spread": 0.030,
+        },
+    ) == 1
+
+
 def test_world_predictor_does_not_apply_confidence_risk_scaling():
     class _DummyTensorizer:
         def tensorize_inference(self, history_scene, action_id):
