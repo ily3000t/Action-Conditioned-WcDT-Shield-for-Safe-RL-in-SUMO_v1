@@ -2949,6 +2949,9 @@ def test_stage2_base_only_report_marks_pair_finetune_skipped(monkeypatch):
     assert report["pair_finetune_applied"] is False
     assert report["world_eval_metrics"]["traj_ade"] == pytest.approx(1.23)
     assert report["pair_finetune_metrics"] == {"light": {}, "world": {}}
+    assert "stage4_aux_logit_gap_before_after" in report
+    assert "stage4_aux_score_spread_before_after" in report
+    assert "stage4_aux_same_state_score_gap_before_after" in report
 
 
 def test_risk_v2_summary_tracks_after_trace_metrics_by_role():

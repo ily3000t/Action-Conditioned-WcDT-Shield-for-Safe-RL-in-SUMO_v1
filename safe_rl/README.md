@@ -1,21 +1,16 @@
-﻿# SAFE_RL 子模块说明
+﻿# safe_rl 子模块
 
-本目录主要包含 SAFE_RL 的训练与评估实现。配置文件已完成分层收敛。
+普通用户默认只使用 `safe_rl/config/default_safe_rl.yaml`。
 
-## 配置入口
+## 配置目录
 
-- 正式主入口：`safe_rl/config/default_safe_rl.yaml`
+- 主入口：`safe_rl/config/default_safe_rl.yaml`
 - 进阶流程：`safe_rl/config/advanced/`
 - 可视化/评估：`safe_rl/config/visualization/`
+- 实验矩阵：`safe_rl/config/experiments/`
 - 调试：`safe_rl/config/debug/`
-- 实验：`safe_rl/config/experiments/`
-- 兼容/待删除：`safe_rl/config/deprecated/`
 
-## 常用命令
+## 说明
 
-```bash
-python safe_rl_main.py --config safe_rl/config/default_safe_rl.yaml
-python run_safe_rl_v2_pipeline.py --run-id <run_id>
-```
-
-详细运行说明请看仓库根目录 README。
+- `deprecated` 配置层已删除。
+- 配置加载器已改为显式路径，不再支持按文件名自动回溯匹配。

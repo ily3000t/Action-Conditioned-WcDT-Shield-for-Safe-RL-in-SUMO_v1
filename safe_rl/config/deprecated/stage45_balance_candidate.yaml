@@ -1,4 +1,0 @@
-# Deprecated alias of safe_rl_balanced_profile.yaml.
-# Keep for compatibility with old run commands.
-shield:
-  profile: "balanced"

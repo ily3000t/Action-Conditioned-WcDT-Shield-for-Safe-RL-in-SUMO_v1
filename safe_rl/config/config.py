@@ -101,6 +101,8 @@ class WorldModelConfig:
     pair_ft_min_same_state_gap_floor: float = 0.008
     pair_ft_min_unique_score_floor: int = 12
     pair_ft_selection_accuracy_tie_epsilon: float = 1e-4
+    pair_ft_resolution_loss_weight: float = 0.02
+    pair_ft_resolution_min_logit_gap: float = 0.10
     min_spread_eligible_pairs_for_gate_source: int = 128
     stage4_aux_min_high_gap_pairs: int = 128
     stage4_aux_unique_floor: int = 12
@@ -274,18 +276,10 @@ def _resolve_config_path(path: Optional[str], default_path: Path) -> Path:
     direct = requested if requested.is_absolute() else Path(path)
     if direct.exists():
         return direct.resolve()
-    config_root = default_path.parent
-    if not requested.name:
-        raise FileNotFoundError(f"Config path not found: {path}")
-    matches = sorted(config_root.rglob(requested.name))
-    if len(matches) == 1:
-        return matches[0].resolve()
-    if len(matches) > 1:
-        match_list = ", ".join(str(item) for item in matches)
-        raise FileNotFoundError(
-            f"Config path '{path}' is ambiguous after config consolidation. Matches: {match_list}"
-        )
-    raise FileNotFoundError(f"Config path not found: {path}")
+    raise FileNotFoundError(
+        f"Config path not found: {path}. "
+        "Use explicit config paths under safe_rl/config/{default,advanced,visualization,experiments,debug}."
+    )
 
 
 def _resolve_shield_profile(config: SafeRLConfig, shield_data: Optional[dict] = None):

@@ -1,13 +1,14 @@
 from __future__ import annotations
 
 import argparse
+import json
 import re
 import subprocess
 import sys
 from pathlib import Path
-from typing import Sequence
+from typing import Any, Dict, Sequence, Tuple
 
-STEPS: tuple[tuple[str, str, str], ...] = (
+BASE_STEPS: tuple[tuple[str, str, str], ...] = (
     (
         "Stage 4 - collect intervention buffer (self-recovery candidates)",
         "safe_rl/config/default_safe_rl.yaml",
@@ -18,11 +19,11 @@ STEPS: tuple[tuple[str, str, str], ...] = (
         "safe_rl/config/default_safe_rl.yaml",
         "stage2",
     ),
-    (
-        "Stage 5 - distill and evaluate after Stage2 recovery",
-        "safe_rl/config/default_safe_rl.yaml",
-        "stage5",
-    ),
+)
+STAGE5_STEP: tuple[str, str, str] = (
+    "Stage 5 - distill and evaluate after Stage2 recovery",
+    "safe_rl/config/default_safe_rl.yaml",
+    "stage5",
 )
 
 
@@ -87,6 +88,34 @@ def run_step(repo_root: Path, step_name: str, command: Sequence[str], dry_run: b
     return 0
 
 
+def _stage2_report_path(repo_root: Path, run_id: str) -> Path:
+    return repo_root / "safe_rl_output" / "runs" / run_id / "reports" / "stage2_training_report.json"
+
+
+def should_run_stage5_from_stage2_report_payload(payload: Dict[str, Any]) -> Tuple[bool, str, str]:
+    stage2_health = dict(payload.get("stage2_pair_source_health", {}) or {})
+    model_quality = dict(stage2_health.get("model_quality", {}) or {})
+    status = str(model_quality.get("status", "")).strip().lower()
+    if status in {"healthy", "degraded"}:
+        return True, status, ""
+    if not status:
+        return False, "unknown", "missing_model_quality_status"
+    message = str(model_quality.get("message", "") or "")
+    if message:
+        return False, status, message
+    return False, status, f"stage2_model_quality_status={status}"
+
+
+def should_run_stage5_from_stage2_report_path(report_path: Path) -> Tuple[bool, str, str]:
+    if not report_path.exists():
+        return False, "missing", f"missing_stage2_training_report: {report_path}"
+    try:
+        payload = json.loads(report_path.read_text(encoding="utf-8"))
+    except Exception as exc:
+        return False, "invalid", f"failed_to_parse_stage2_training_report: {exc}"
+    return should_run_stage5_from_stage2_report_payload(payload)
+
+
 
 def main() -> int:
     args = parse_args()
@@ -112,11 +141,30 @@ def main() -> int:
     print(f"[SAFE_RL] Python: {args.python_cmd}")
     print()
 
-    for step_name, config_path, stage in STEPS:
+    for step_name, config_path, stage in BASE_STEPS:
         command = build_command(args.python_cmd, config_path, stage, run_id)
         exit_code = run_step(repo_root, step_name, command, args.dry_run)
         if exit_code != 0:
             return exit_code
+
+    stage5_name, stage5_config, stage5_stage = STAGE5_STEP
+    stage5_command = build_command(args.python_cmd, stage5_config, stage5_stage, run_id)
+    if args.dry_run:
+        print("[SAFE_RL] Dry-run mode: Stage5 is conditionally executed when Stage2 model quality is healthy/degraded.")
+        print(format_command(stage5_command))
+        print("[SAFE_RL] Closed-loop dry-run completed successfully.")
+        return 0
+
+    stage2_report_path = _stage2_report_path(repo_root, run_id)
+    run_stage5, stage2_status, skip_reason = should_run_stage5_from_stage2_report_path(stage2_report_path)
+    if not run_stage5:
+        print(f"[SAFE_RL] Stage5 skipped: stage2_status={stage2_status}, reason={skip_reason}")
+        print("[SAFE_RL] Closed-loop revalidation completed (conditional Stage5 skipped).")
+        return 0
+
+    exit_code = run_step(repo_root, stage5_name, stage5_command, dry_run=False)
+    if exit_code != 0:
+        return exit_code
 
     print("[SAFE_RL] Closed-loop revalidation steps completed successfully.")
     return 0

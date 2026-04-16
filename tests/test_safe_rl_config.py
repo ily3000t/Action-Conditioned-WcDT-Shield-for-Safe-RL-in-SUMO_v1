@@ -1,5 +1,7 @@
 ﻿from pathlib import Path
 
+import pytest
+
 from safe_rl.config.config import load_safe_rl_config
 
 
@@ -110,158 +112,19 @@ def test_shield_sweep_config_loads_default_variants():
     ]
 
 
-def test_shield_trace_c_config_loads():
-    config = load_safe_rl_config("safe_rl/config/deprecated/shield_trace_c.yaml")
-    assert config.shield.risk_threshold == 0.30
-    assert config.shield.uncertainty_threshold == 0.45
-    assert config.shield.coarse_top_k == 5
-    assert config.shield_trace.enabled is True
-    assert config.shield_trace.seed_list == [42, 123, 2024]
-    assert config.eval.eval_episodes == 3
+@pytest.mark.parametrize(
+    "legacy_path",
+    [
+        "safe_rl/config/deprecated/shield_trace_c.yaml",
+        "safe_rl/config/deprecated/shield_trace_c_strong.yaml",
+        "safe_rl/config/deprecated/stage2_world_base_only.yaml",
+        "safe_rl/config/deprecated/safe_rl_balanced_profile.yaml",
+    ],
+)
+def test_removed_deprecated_config_paths_fail_fast(legacy_path: str):
+    with pytest.raises(FileNotFoundError):
+        load_safe_rl_config(legacy_path)
 
-def test_shield_trace_c1_config_loads():
-    config = load_safe_rl_config("safe_rl/config/deprecated/shield_trace_c1.yaml")
-    assert config.shield.replacement_min_risk_margin == 0.08
-    assert config.shield.raw_passthrough_risk_threshold == 0.24
-    assert config.shield_trace.trace_dir_name == "shield_trace_c1"
-    assert config.eval.seed_list == [42, 123, 2024]
-
-
-def test_shield_trace_c2_config_loads():
-    config = load_safe_rl_config("safe_rl/config/deprecated/shield_trace_c2.yaml")
-    assert config.shield.replacement_min_risk_margin == 0.10
-    assert config.shield.raw_passthrough_risk_threshold == 0.25
-    assert config.shield_trace.trace_dir_name == "shield_trace_c2"
-    assert config.eval.seed_list == [42, 123, 2024]
-
-def test_shield_trace_c_strong_config_loads():
-    config = load_safe_rl_config("safe_rl/config/deprecated/shield_trace_c_strong.yaml")
-    assert config.shield.replacement_min_risk_margin == 0.15
-    assert config.shield.raw_passthrough_risk_threshold == 0.30
-    assert config.shield_trace.trace_dir_name == "shield_trace_c_strong"
-    assert config.eval.seed_list == [42, 123, 2024]
-
-
-def test_shield_trace_d1_config_loads():
-    config = load_safe_rl_config("safe_rl/config/deprecated/shield_trace_d1.yaml")
-    assert config.shield.replacement_min_risk_margin == 0.10
-    assert config.shield.raw_passthrough_risk_threshold == 0.24
-    assert config.shield_trace.trace_dir_name == "shield_trace_d1"
-    assert config.eval.seed_list == [42, 123, 2024]
-
-
-def test_shield_trace_d2_config_loads():
-    config = load_safe_rl_config("safe_rl/config/deprecated/shield_trace_d2.yaml")
-    assert config.shield.replacement_min_risk_margin == 0.12
-    assert config.shield.raw_passthrough_risk_threshold == 0.26
-    assert config.shield_trace.trace_dir_name == "shield_trace_d2"
-    assert config.eval.seed_list == [42, 123, 2024]
-
-
-def test_shield_trace_d3_config_loads():
-    config = load_safe_rl_config("safe_rl/config/deprecated/shield_trace_d3.yaml")
-    assert config.shield.replacement_min_risk_margin == 0.13
-    assert config.shield.raw_passthrough_risk_threshold == 0.28
-    assert config.shield_trace.trace_dir_name == "shield_trace_d3"
-    assert config.eval.seed_list == [42, 123, 2024]
-
-
-
-def test_shield_trace_e1_config_loads():
-    config = load_safe_rl_config("safe_rl/config/deprecated/shield_trace_e1.yaml")
-    assert config.shield.replacement_min_risk_margin == 0.11
-    assert config.shield.raw_passthrough_risk_threshold == 0.24
-    assert config.shield_trace.trace_dir_name == "shield_trace_e1"
-    assert config.eval.seed_list == [42, 123, 2024]
-
-
-def test_shield_trace_e2_config_loads():
-    config = load_safe_rl_config("safe_rl/config/deprecated/shield_trace_e2.yaml")
-    assert config.shield.replacement_min_risk_margin == 0.10
-    assert config.shield.raw_passthrough_risk_threshold == 0.25
-    assert config.shield_trace.trace_dir_name == "shield_trace_e2"
-    assert config.eval.seed_list == [42, 123, 2024]
-
-
-def test_shield_trace_e3_config_loads():
-    config = load_safe_rl_config("safe_rl/config/deprecated/shield_trace_e3.yaml")
-    assert config.shield.replacement_min_risk_margin == 0.11
-    assert config.shield.raw_passthrough_risk_threshold == 0.25
-    assert config.shield_trace.trace_dir_name == "shield_trace_e3"
-    assert config.eval.seed_list == [42, 123, 2024]
-
-
-def test_shield_trace_f1_config_loads():
-    config = load_safe_rl_config("safe_rl/config/deprecated/shield_trace_f1.yaml")
-    assert config.shield.replacement_min_risk_margin == 0.103
-    assert config.shield.raw_passthrough_risk_threshold == 0.24
-    assert config.shield_trace.trace_dir_name == "shield_trace_f1"
-    assert config.eval.seed_list == [42, 123, 2024]
-
-
-def test_shield_trace_f2_config_loads():
-    config = load_safe_rl_config("safe_rl/config/deprecated/shield_trace_f2.yaml")
-    assert config.shield.replacement_min_risk_margin == 0.106
-    assert config.shield.raw_passthrough_risk_threshold == 0.24
-    assert config.shield_trace.trace_dir_name == "shield_trace_f2"
-    assert config.eval.seed_list == [42, 123, 2024]
-
-
-def test_shield_trace_f3_config_loads():
-    config = load_safe_rl_config("safe_rl/config/deprecated/shield_trace_f3.yaml")
-    assert config.shield.replacement_min_risk_margin == 0.108
-    assert config.shield.raw_passthrough_risk_threshold == 0.24
-    assert config.shield_trace.trace_dir_name == "shield_trace_f3"
-    assert config.eval.seed_list == [42, 123, 2024]
-
-def test_shield_trace_g1_config_loads():
-    config = load_safe_rl_config("safe_rl/config/deprecated/shield_trace_g1.yaml")
-    assert config.shield.replacement_min_risk_margin == 0.05
-    assert config.shield.raw_passthrough_risk_threshold == 0.24
-    assert config.shield_trace.trace_dir_name == "shield_trace_g1"
-    assert config.eval.seed_list == [42, 123, 2024]
-
-
-def test_shield_trace_g2_config_loads():
-    config = load_safe_rl_config("safe_rl/config/deprecated/shield_trace_g2.yaml")
-    assert config.shield.replacement_min_risk_margin == 0.06
-    assert config.shield.raw_passthrough_risk_threshold == 0.24
-    assert config.shield_trace.trace_dir_name == "shield_trace_g2"
-    assert config.eval.seed_list == [42, 123, 2024]
-
-
-def test_shield_trace_g3_config_loads():
-    config = load_safe_rl_config("safe_rl/config/deprecated/shield_trace_g3.yaml")
-    assert config.shield.replacement_min_risk_margin == 0.07
-    assert config.shield.raw_passthrough_risk_threshold == 0.24
-    assert config.shield_trace.trace_dir_name == "shield_trace_g3"
-    assert config.eval.seed_list == [42, 123, 2024]
-
-
-def test_shield_trace_g4_config_loads():
-    config = load_safe_rl_config("safe_rl/config/deprecated/shield_trace_g4.yaml")
-    assert config.shield.replacement_min_risk_margin == 0.08
-    assert config.shield.raw_passthrough_risk_threshold == 0.24
-    assert config.shield_trace.trace_dir_name == "shield_trace_g4"
-    assert config.eval.seed_list == [42, 123, 2024]
-
-
-def test_shield_trace_g5_config_loads():
-    config = load_safe_rl_config("safe_rl/config/deprecated/shield_trace_g5.yaml")
-    assert config.shield.replacement_min_risk_margin == 0.09
-    assert config.shield.raw_passthrough_risk_threshold == 0.24
-    assert config.shield_trace.trace_dir_name == "shield_trace_g5"
-    assert config.eval.seed_list == [42, 123, 2024]
-
-
-def test_stage2_world_base_only_config_loads():
-    config = load_safe_rl_config("safe_rl/config/deprecated/stage2_world_base_only.yaml")
-    assert config.light_risk.pair_finetune is False
-    assert config.world_model.pair_finetune is False
-    assert config.light_risk.epochs == 50
-    assert config.world_model.epochs == 10
-    assert config.light_risk.pair_ft_eval_max_samples == 2048
-    assert config.world_model.pair_ft_eval_max_samples == 2048
 
 def test_stage2_v2_world_pair_focus_config_loads():
     config = load_safe_rl_config("safe_rl/config/advanced/stage2_v2_world_pair_focus.yaml")
@@ -369,15 +232,11 @@ def test_risk_model_v2_defaults_enabled():
     assert config.world_model.pair_ft_tie_gap_epsilon == 0.01
     assert config.world_model.pair_ft_min_score_spread_floor == 0.008
     assert config.world_model.pair_ft_min_same_state_gap_floor == 0.008
+    assert config.world_model.pair_ft_resolution_loss_weight == 0.02
+    assert config.world_model.pair_ft_resolution_min_logit_gap == 0.10
     assert config.world_model.pair_ft_freeze_traj_decoder is True
     assert config.world_model.pair_ft_freeze_backbone == "partial"
 
-
-def test_safe_rl_balanced_profile_config_loads():
-    config = load_safe_rl_config("safe_rl/config/deprecated/safe_rl_balanced_profile.yaml")
-    assert config.shield.profile == "balanced"
-    assert config.shield.raw_passthrough_risk_threshold == 0.193
-    assert config.shield.replacement_min_risk_margin == 0.104
 
 
 def test_explicit_shield_thresholds_override_profile_defaults():
@@ -399,4 +258,5 @@ def test_explicit_shield_thresholds_override_profile_defaults():
     assert config.shield.profile == "balanced"
     assert config.shield.raw_passthrough_risk_threshold == 0.22
     assert config.shield.replacement_min_risk_margin == 0.11
+
 

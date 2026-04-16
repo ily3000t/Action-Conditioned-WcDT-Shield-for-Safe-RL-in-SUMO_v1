@@ -342,9 +342,11 @@ def test_world_pair_losses_use_logit_space_when_available():
         weight=1.0,
         meta={"target_risk_a": 0.1, "target_risk_b": 0.8, "trusted_for_spread": True},
     )
-    ranking_loss, spread_loss = trainer._compute_pair_losses([pair])
+    ranking_loss, spread_loss, resolution_loss, diagnostics = trainer._compute_pair_losses([pair], enable_resolution=False)
     assert float(ranking_loss.item()) == pytest.approx(0.0, abs=1e-6)
     assert float(spread_loss.item()) == pytest.approx(0.0, abs=1e-6)
+    assert float(resolution_loss.item()) == pytest.approx(0.0, abs=1e-6)
+    assert diagnostics["stage4_aux_active_pair_count"] == 0
 
 
 def test_world_pair_losses_tie_aware_skips_small_target_gap_for_ranking():
@@ -378,9 +380,83 @@ def test_world_pair_losses_tie_aware_skips_small_target_gap_for_ranking():
         weight=1.0,
         meta={"target_risk_a": 0.500, "target_risk_b": 0.505, "trusted_for_spread": False},
     )
-    ranking_loss, spread_loss = trainer._compute_pair_losses([pair])
+    ranking_loss, spread_loss, resolution_loss, diagnostics = trainer._compute_pair_losses([pair], enable_resolution=False)
     assert float(ranking_loss.item()) == pytest.approx(0.0, abs=1e-6)
     assert float(spread_loss.item()) == pytest.approx(0.0, abs=1e-6)
+    assert float(resolution_loss.item()) == pytest.approx(0.0, abs=1e-6)
+    assert diagnostics["stage4_aux_active_pair_count"] == 0
+
+
+def test_world_resolution_loss_only_applies_to_stage4_aux_pairs():
+    from safe_rl.models.world_model import WorldModelTrainer
+
+    trainer = WorldModelTrainer(
+        config=WorldModelConfig(
+            hidden_dim=64,
+            future_steps=2,
+            multimodal=2,
+            pair_ft_resolution_min_logit_gap=0.10,
+            pair_ft_resolution_loss_weight=0.02,
+        ),
+        history_steps=2,
+        device="cpu",
+    )
+
+    class _NarrowGapModel(torch.nn.Module):
+        def forward(self, batch):
+            actions = batch["candidate_action"]
+            action_float = actions.to(torch.float32)
+            logits = torch.where(action_float == 4.0, torch.full_like(action_float, 0.00), torch.full_like(action_float, 0.05))
+            probs = torch.sigmoid(logits)
+            bs = int(actions.shape[0])
+            return {
+                "traj": torch.zeros((bs, 1, 1, 1, 5), dtype=torch.float32),
+                "confidence": torch.zeros((bs, 1, 2), dtype=torch.float32),
+                "risk_type_logits": torch.zeros((bs, 3), dtype=torch.float32),
+                "risk_score_logit": logits,
+                "risk_score": probs,
+                "uncertainty": torch.zeros((bs,), dtype=torch.float32),
+            }
+
+    trainer.model = _NarrowGapModel().to(trainer.device)
+    stage4_aux_pair = RiskPairSample(
+        history_scene=_history_scene()[:2],
+        action_a=4,
+        action_b=3,
+        preferred_action=4,
+        source="stage4_candidate_rank",
+        weight=1.0,
+        meta={
+            "target_risk_a": 0.30,
+            "target_risk_b": 0.80,
+            "trusted_for_spread": False,
+            "stage4_aux_candidate": True,
+        },
+    )
+    stage1_pair = RiskPairSample(
+        history_scene=_history_scene()[:2],
+        action_a=4,
+        action_b=3,
+        preferred_action=4,
+        source="stage1_probe_same_state",
+        weight=1.0,
+        meta={
+            "target_risk_a": 0.30,
+            "target_risk_b": 0.80,
+            "trusted_for_spread": False,
+            "stage4_aux_candidate": True,
+        },
+    )
+
+    _, _, resolution_on, diag_on = trainer._compute_pair_losses([stage4_aux_pair], enable_resolution=True)
+    _, _, resolution_off, diag_off = trainer._compute_pair_losses([stage1_pair], enable_resolution=True)
+    _, _, resolution_disabled, _ = trainer._compute_pair_losses([stage4_aux_pair], enable_resolution=False)
+
+    assert float(resolution_on.item()) > 0.0
+    assert diag_on["stage4_aux_active_pair_count"] == 1
+    assert float(resolution_off.item()) == pytest.approx(0.0, abs=1e-6)
+    assert diag_off["stage4_aux_active_pair_count"] == 0
+    assert float(resolution_disabled.item()) == pytest.approx(0.0, abs=1e-6)
 
 
 def test_world_evaluate_pairs_restores_train_mode():

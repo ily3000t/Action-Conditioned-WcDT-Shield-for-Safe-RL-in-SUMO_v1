@@ -1431,6 +1431,15 @@ class SafeRLPipeline:
             "stage4_aux_unique_score_count_before_after": dict(
                 world_pair_ft_report.get("stage4_aux_unique_score_count_before_after", {})
             ),
+            "stage4_aux_logit_gap_before_after": dict(
+                world_pair_ft_report.get("stage4_aux_logit_gap_before_after", {})
+            ),
+            "stage4_aux_score_spread_before_after": dict(
+                world_pair_ft_report.get("stage4_aux_score_spread_before_after", {})
+            ),
+            "stage4_aux_same_state_score_gap_before_after": dict(
+                world_pair_ft_report.get("stage4_aux_same_state_score_gap_before_after", {})
+            ),
             "stage5_spread_eligible_pair_count": int(world_pair_ft_report.get("stage5_spread_eligible_pair_count", 0)),
             "stage1_probe_spread_eligible_pair_count": int(world_pair_ft_report.get("stage1_probe_spread_eligible_pair_count", 0)),
             "stage4_spread_eligible_pair_count": int(world_pair_ft_report.get("stage4_spread_eligible_pair_count", 0)),
@@ -2341,6 +2350,7 @@ class SafeRLPipeline:
             before_stage4_high_gap_metrics = world_trainer.evaluate_pairs(stage4_high_gap_pair_samples)
             stage4_aux_pair_samples = world_trainer._filter_stage4_aux_pairs(stage4_pair_samples)
             before_stage4_aux_metrics = world_trainer.evaluate_pairs(stage4_aux_pair_samples)
+            before_stage4_aux_logit_gap = world_trainer._evaluate_pair_logit_gap_metrics(stage4_aux_pair_samples)
             before_pointwise_metrics = world_trainer._evaluate_risk_only_samples(eval_replay_samples)
             world_pair_metrics = dict(before_pair_metrics)
             world_trainer.last_pair_metrics = dict(world_pair_metrics)
@@ -2394,6 +2404,18 @@ class SafeRLPipeline:
                 "stage4_aux_unique_score_count_before_after": {
                     "before": float(before_stage4_aux_metrics.get("unique_score_count", 0.0)),
                     "after": float(before_stage4_aux_metrics.get("unique_score_count", 0.0)),
+                },
+                "stage4_aux_logit_gap_before_after": {
+                    "before": float(before_stage4_aux_logit_gap.get("mean_abs_logit_gap", 0.0)),
+                    "after": float(before_stage4_aux_logit_gap.get("mean_abs_logit_gap", 0.0)),
+                },
+                "stage4_aux_score_spread_before_after": {
+                    "before": float(before_stage4_aux_metrics.get("score_spread", 0.0)),
+                    "after": float(before_stage4_aux_metrics.get("score_spread", 0.0)),
+                },
+                "stage4_aux_same_state_score_gap_before_after": {
+                    "before": float(before_stage4_aux_metrics.get("same_state_score_gap", 0.0)),
+                    "after": float(before_stage4_aux_metrics.get("same_state_score_gap", 0.0)),
                 },
                 "stage5_spread_eligible_pair_count": int(world_trainer._spread_eligible_pair_count(stage5_pair_samples)),
                 "stage1_probe_spread_eligible_pair_count": int(world_trainer._spread_eligible_pair_count(stage1_probe_pair_samples)),
@@ -3654,6 +3676,15 @@ class SafeRLPipeline:
             "stage4_aux_unique_score_count_before_after": dict(
                 stage2_report.get("stage4_aux_unique_score_count_before_after", {})
             ),
+            "stage4_aux_logit_gap_before_after": dict(
+                stage2_report.get("stage4_aux_logit_gap_before_after", {})
+            ),
+            "stage4_aux_score_spread_before_after": dict(
+                stage2_report.get("stage4_aux_score_spread_before_after", {})
+            ),
+            "stage4_aux_same_state_score_gap_before_after": dict(
+                stage2_report.get("stage4_aux_same_state_score_gap_before_after", {})
+            ),
             "stage5_spread_eligible_pair_count": int(stage2_report.get("stage5_spread_eligible_pair_count", 0)),
             "stage1_probe_spread_eligible_pair_count": int(stage2_report.get("stage1_probe_spread_eligible_pair_count", 0)),
             "stage4_spread_eligible_pair_count": int(stage2_report.get("stage4_spread_eligible_pair_count", 0)),
@@ -3701,6 +3732,15 @@ class SafeRLPipeline:
             "stage4_aux_pair_count": int(stage2_snapshot.get("stage4_aux_pair_count", 0)),
             "stage4_aux_unique_score_count_before_after": dict(
                 stage2_snapshot.get("stage4_aux_unique_score_count_before_after", {})
+            ),
+            "stage4_aux_logit_gap_before_after": dict(
+                stage2_snapshot.get("stage4_aux_logit_gap_before_after", {})
+            ),
+            "stage4_aux_score_spread_before_after": dict(
+                stage2_snapshot.get("stage4_aux_score_spread_before_after", {})
+            ),
+            "stage4_aux_same_state_score_gap_before_after": dict(
+                stage2_snapshot.get("stage4_aux_same_state_score_gap_before_after", {})
             ),
             "stage5_spread_eligible_pair_count": int(stage2_snapshot["stage5_spread_eligible_pair_count"]),
             "stage1_probe_spread_eligible_pair_count": int(stage2_snapshot["stage1_probe_spread_eligible_pair_count"]),
