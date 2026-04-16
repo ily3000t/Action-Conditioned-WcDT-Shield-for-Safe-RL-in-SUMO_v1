@@ -64,6 +64,7 @@ world_model:
   min_spread_eligible_pairs_for_gate_source: 128
   stage4_aux_min_high_gap_pairs: 128
   stage4_aux_unique_floor: 12
+  stage4_aux_target_gap_threshold: 0.10
   uncertainty_weight: 0.1
   pair_finetune_gate_mode: "fallback_all_pairs"
 

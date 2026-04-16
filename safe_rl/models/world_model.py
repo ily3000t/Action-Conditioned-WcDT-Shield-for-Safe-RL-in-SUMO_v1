@@ -521,6 +521,8 @@ class WorldModelTrainer:
         before_stage4_metrics = self.evaluate_pairs(stage4_pair_samples)
         stage4_high_gap_pair_samples = self._filter_high_gap_pairs(stage4_pair_samples)
         before_stage4_high_gap_metrics = self.evaluate_pairs(stage4_high_gap_pair_samples)
+        stage4_aux_pair_samples = self._filter_stage4_aux_pairs(stage4_pair_samples)
+        before_stage4_aux_metrics = self.evaluate_pairs(stage4_aux_pair_samples)
         before_pointwise_metrics = self._evaluate_risk_only_samples(eval_replay_samples)
         stage5_spread_eligible_count = self._spread_eligible_pair_count(stage5_pair_samples)
         stage1_probe_spread_eligible_count = self._spread_eligible_pair_count(stage1_probe_pair_samples)
@@ -581,6 +583,12 @@ class WorldModelTrainer:
                 'stage4_high_gap_unique_score_count_before_after': self._metric_before_after(
                     before_stage4_high_gap_metrics,
                     before_stage4_high_gap_metrics,
+                    'unique_score_count',
+                ),
+                'stage4_aux_pair_count': int(len(stage4_aux_pair_samples)),
+                'stage4_aux_unique_score_count_before_after': self._metric_before_after(
+                    before_stage4_aux_metrics,
+                    before_stage4_aux_metrics,
                     'unique_score_count',
                 ),
                 'stage5_spread_eligible_pair_count': int(stage5_spread_eligible_count),
@@ -797,6 +805,7 @@ class WorldModelTrainer:
         after_stage1_probe_metrics = self.evaluate_pairs(stage1_probe_pair_samples)
         after_stage4_metrics = self.evaluate_pairs(stage4_pair_samples)
         after_stage4_high_gap_metrics = self.evaluate_pairs(stage4_high_gap_pair_samples)
+        after_stage4_aux_metrics = self.evaluate_pairs(stage4_aux_pair_samples)
         after_pointwise_metrics = self._evaluate_risk_only_samples(eval_replay_samples)
         source_mix['stage5_pair_seen_counts'] = dict(total_stage5_seen_counts)
         source_mix['stage5_cap_reached_pairs'] = int(len(stage5_cap_reached_ids))
@@ -830,6 +839,12 @@ class WorldModelTrainer:
             'stage4_high_gap_unique_score_count_before_after': self._metric_before_after(
                 before_stage4_high_gap_metrics,
                 after_stage4_high_gap_metrics,
+                'unique_score_count',
+            ),
+            'stage4_aux_pair_count': int(len(stage4_aux_pair_samples)),
+            'stage4_aux_unique_score_count_before_after': self._metric_before_after(
+                before_stage4_aux_metrics,
+                after_stage4_aux_metrics,
                 'unique_score_count',
             ),
             'stage5_spread_eligible_pair_count': int(stage5_spread_eligible_count),
@@ -866,6 +881,21 @@ class WorldModelTrainer:
             target_a = float(sample.meta.get('target_risk_a', 0.0))
             target_b = float(sample.meta.get('target_risk_b', 0.0))
             if abs(target_a - target_b) >= float(SPREAD_TARGET_DELTA):
+                selected.append(sample)
+        return selected
+
+    def _filter_stage4_aux_pairs(self, pair_samples: Sequence[RiskPairSample]) -> List[RiskPairSample]:
+        threshold = float(getattr(self.config, 'stage4_aux_target_gap_threshold', 0.10) or 0.0)
+        selected: List[RiskPairSample] = []
+        for sample in pair_samples:
+            if str(sample.source) != 'stage4_candidate_rank':
+                continue
+            meta = dict(sample.meta or {})
+            aux_gap = float(meta.get('stage4_aux_gap', meta.get('target_gap', 0.0)) or 0.0)
+            if bool(meta.get('stage4_aux_candidate', False)):
+                selected.append(sample)
+                continue
+            if aux_gap >= threshold:
                 selected.append(sample)
         return selected
 

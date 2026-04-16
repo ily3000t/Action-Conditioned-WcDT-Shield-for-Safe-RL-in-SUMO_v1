@@ -351,6 +351,9 @@ def test_stage4_pair_builder_uses_candidate_rank_pairs_without_interventions():
     assert summary["candidate_pairs_created"] == 1
     assert summary["buffer_pairs_created"] == 0
     assert summary["skipped_candidate_small_gap"] == 0
+    assert summary["stage4_aux_candidates_seen"] == 1
+    assert summary["stage4_aux_candidates_created"] == 0
+    assert summary["stage4_aux_candidates_skipped_duplicate"] == 1
 
 
 def test_stage4_pair_builder_filters_small_gap_candidates():
@@ -394,6 +397,113 @@ def test_stage4_pair_builder_filters_small_gap_candidates():
     assert len(candidate_pairs) == 0
     assert summary["candidate_pairs_created"] == 0
     assert summary["skipped_candidate_small_gap"] == 1
+    assert summary["stage4_aux_candidates_seen"] == 1
+    assert summary["stage4_aux_candidates_skipped_duplicate"] == 1
+
+
+def test_stage4_pair_builder_adds_contrast_pair_by_max_risk_gap():
+    from safe_rl.data.types import SceneState, VehicleState, dataclass_to_dict
+
+    config = _tiny_config()
+    config.stage1_collection.stage4_candidate_min_target_gap = 0.01
+    config.world_model.stage4_aux_target_gap_threshold = 0.10
+    pipeline = SafeRLPipeline(config)
+    run_id = f"ut_stage4_contrast_pair_{uuid.uuid4().hex[:8]}"
+    pipeline._prepare_run_context(stage="stage2", run_id=run_id)
+
+    history = [SceneState(timestamp=0.0, ego_id="ego", vehicles=[VehicleState("ego", 0.0, 4.0, 20.0, 0.0, 0.0, 0.0, 0.0, 1)])] * 2
+    history_payload = dataclass_to_dict(history)
+    pipeline._write_json(
+        pipeline.distill_supervision_path,
+        {
+            "sample_count": 1,
+            "intervened_sample_count": 0,
+            "non_intervened_sample_count": 1,
+            "samples": [
+                {
+                    "history_feature": [],
+                    "raw_action": 4,
+                    "final_action": 4,
+                    "intervened": False,
+                    "raw_risk": 0.50,
+                    "final_risk": 0.50,
+                    "reason": "raw_passthrough",
+                    "candidate_evaluations": [
+                        {"action_id": 4, "evaluated": True, "fine_risk": 0.50, "uncertainty": 0.10, "distance_to_raw": 0},
+                        {"action_id": 3, "evaluated": True, "fine_risk": 0.20, "uncertainty": 0.50, "distance_to_raw": 1},
+                        {"action_id": 8, "evaluated": True, "fine_risk": 0.95, "uncertainty": 0.01, "distance_to_raw": 2},
+                    ],
+                    "meta": {"episode_id": "ep_0", "episode_step": 3, "history_scene": history_payload},
+                }
+            ],
+        },
+    )
+
+    stage4_pairs, summary = pipeline._build_stage4_pair_samples()
+    candidate_pairs = [sample for sample in stage4_pairs if str(sample.source) == "stage4_candidate_rank"]
+    assert len(candidate_pairs) == 2
+    best_pair = next(sample for sample in candidate_pairs if bool(sample.meta.get("contrast_candidate_rank")) is False)
+    contrast_pair = next(sample for sample in candidate_pairs if bool(sample.meta.get("contrast_candidate_rank")) is True)
+
+    assert best_pair.action_b == 3
+    assert contrast_pair.action_b == 8
+    assert float(contrast_pair.meta["target_gap"]) == pytest.approx(0.45)
+    assert float(contrast_pair.meta["stage4_aux_gap"]) == pytest.approx(0.45)
+    assert contrast_pair.meta["stage4_aux_candidate"] is True
+
+    assert summary["stage4_aux_candidates_seen"] == 1
+    assert summary["stage4_aux_candidates_created"] == 1
+    assert summary["stage4_aux_candidates_skipped_duplicate"] == 0
+    assert summary["stage4_aux_candidates_skipped_low_gap"] == 0
+
+
+def test_stage4_pair_builder_marks_contrast_low_gap_for_aux_window():
+    from safe_rl.data.types import SceneState, VehicleState, dataclass_to_dict
+
+    config = _tiny_config()
+    config.stage1_collection.stage4_candidate_min_target_gap = 0.01
+    config.world_model.stage4_aux_target_gap_threshold = 0.10
+    pipeline = SafeRLPipeline(config)
+    run_id = f"ut_stage4_contrast_aux_low_gap_{uuid.uuid4().hex[:8]}"
+    pipeline._prepare_run_context(stage="stage2", run_id=run_id)
+
+    history = [SceneState(timestamp=0.0, ego_id="ego", vehicles=[VehicleState("ego", 0.0, 4.0, 20.0, 0.0, 0.0, 0.0, 0.0, 1)])] * 2
+    history_payload = dataclass_to_dict(history)
+    pipeline._write_json(
+        pipeline.distill_supervision_path,
+        {
+            "sample_count": 1,
+            "intervened_sample_count": 0,
+            "non_intervened_sample_count": 1,
+            "samples": [
+                {
+                    "history_feature": [],
+                    "raw_action": 4,
+                    "final_action": 4,
+                    "intervened": False,
+                    "raw_risk": 0.50,
+                    "final_risk": 0.50,
+                    "reason": "raw_passthrough",
+                    "candidate_evaluations": [
+                        {"action_id": 4, "evaluated": True, "fine_risk": 0.50, "uncertainty": 0.10, "distance_to_raw": 0},
+                        {"action_id": 3, "evaluated": True, "fine_risk": 0.46, "uncertainty": 0.50, "distance_to_raw": 1},
+                        {"action_id": 8, "evaluated": True, "fine_risk": 0.58, "uncertainty": 0.01, "distance_to_raw": 2},
+                    ],
+                    "meta": {"episode_id": "ep_0", "episode_step": 3, "history_scene": history_payload},
+                }
+            ],
+        },
+    )
+
+    stage4_pairs, summary = pipeline._build_stage4_pair_samples()
+    candidate_pairs = [sample for sample in stage4_pairs if str(sample.source) == "stage4_candidate_rank"]
+    assert len(candidate_pairs) == 2
+    contrast_pair = next(sample for sample in candidate_pairs if bool(sample.meta.get("contrast_candidate_rank")) is True)
+    assert contrast_pair.meta["stage4_aux_candidate"] is False
+    assert float(contrast_pair.meta["stage4_aux_gap"]) == pytest.approx(0.08)
+    assert summary["stage4_aux_candidates_seen"] == 1
+    assert summary["stage4_aux_candidates_created"] == 0
+    assert summary["stage4_aux_candidates_skipped_low_gap"] == 1
 
 
 def test_stage2_model_quality_health_marks_critical_for_low_resolution():
@@ -599,8 +709,10 @@ def test_stage2_model_quality_aux_stage4_can_downgrade_unique_only_critical_to_d
         "stage1_probe_score_spread_before_after": {"before": 0.0, "after": 0.020},
         "stage1_probe_same_state_score_gap_before_after": {"before": 0.0, "after": 0.020},
         "stage1_probe_unique_score_count_before_after": {"before": 8.0, "after": 9.0},
-        "stage4_high_gap_pair_count": 256,
-        "stage4_high_gap_unique_score_count_before_after": {"before": 10.0, "after": 14.0},
+        "stage4_high_gap_pair_count": 0,
+        "stage4_high_gap_unique_score_count_before_after": {"before": 10.0, "after": 0.0},
+        "stage4_aux_pair_count": 256,
+        "stage4_aux_unique_score_count_before_after": {"before": 10.0, "after": 14.0},
         "world_pair_ft_best_metrics": {
             "pair_ranking_accuracy": 0.75,
             "score_spread": 0.02,
@@ -634,8 +746,10 @@ def test_stage2_model_quality_aux_stage4_reports_reason_codes_when_not_applied()
         "stage1_probe_score_spread_before_after": {"before": 0.0, "after": 0.008},
         "stage1_probe_same_state_score_gap_before_after": {"before": 0.0, "after": 0.020},
         "stage1_probe_unique_score_count_before_after": {"before": 8.0, "after": 9.0},
-        "stage4_high_gap_pair_count": 64,
-        "stage4_high_gap_unique_score_count_before_after": {"before": 9.0, "after": 11.0},
+        "stage4_high_gap_pair_count": 256,
+        "stage4_high_gap_unique_score_count_before_after": {"before": 9.0, "after": 20.0},
+        "stage4_aux_pair_count": 64,
+        "stage4_aux_unique_score_count_before_after": {"before": 9.0, "after": 11.0},
         "world_pair_ft_best_metrics": {
             "pair_ranking_accuracy": 0.75,
             "score_spread": 0.008,

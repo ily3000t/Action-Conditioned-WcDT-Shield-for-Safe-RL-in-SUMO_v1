@@ -786,12 +786,17 @@ class SafeRLPipeline:
             "skipped_candidate_no_alternative": 0,
             "skipped_candidate_invalid_actions": 0,
             "skipped_candidate_small_gap": 0,
+            "stage4_aux_candidates_seen": 0,
+            "stage4_aux_candidates_created": 0,
+            "stage4_aux_candidates_skipped_low_gap": 0,
+            "stage4_aux_candidates_skipped_duplicate": 0,
             "skipped_missing_buffer_file": 0,
             "skipped_missing_distill_supervision_file": 0,
         }
         pair_samples: List[RiskPairSample] = []
         stage4_weight = float(self.config.light_risk.stage4_pair_weight if stage4_weight is None else stage4_weight)
         stage4_min_target_gap = float(getattr(self.config.stage1_collection, "stage4_candidate_min_target_gap", 0.01) or 0.0)
+        stage4_aux_target_gap = float(getattr(self.config.world_model, "stage4_aux_target_gap_threshold", 0.10) or 0.0)
         if self.buffer_path is not None and self.buffer_path.exists():
             buffer = InterventionBuffer(capacity=max(10000, self.config.distill.trigger_buffer_size * 4))
             buffer.load(str(self.buffer_path))
@@ -804,6 +809,7 @@ class SafeRLPipeline:
                     summary["skipped_equal_risk"] += 1
                     continue
                 preferred_action = int(record.final_action if float(record.final_risk) < float(record.raw_risk) else record.raw_action)
+                target_gap = abs(float(record.raw_risk) - float(record.final_risk))
                 proof = self._build_same_state_proof([dataclass_to_dict(scene) for scene in list(record.history_scene)], {})
                 sample = RiskPairSample(
                     history_scene=list(record.history_scene),
@@ -815,10 +821,14 @@ class SafeRLPipeline:
                     meta={
                         "target_risk_a": float(record.raw_risk),
                         "target_risk_b": float(record.final_risk),
+                        "target_gap": float(target_gap),
+                        "stage4_aux_gap": float(target_gap),
+                        "stage4_aux_candidate": bool(target_gap >= stage4_aux_target_gap),
                         "reason": str(record.reason),
                         "episode_id": str(dict(record.meta or {}).get("episode_id", "")),
                         "hard_negative": False,
                         "trusted_for_spread": False,
+                        "contrast_candidate_rank": False,
                         **proof,
                     },
                 )
@@ -907,36 +917,90 @@ class SafeRLPipeline:
             best = alternatives[0]
             raw_risk = float(raw_eval.get("fine_risk", 0.0))
             best_risk = float(best.get("fine_risk", 0.0))
-            risk_gap = abs(raw_risk - best_risk)
-            if risk_gap <= 1e-8:
+            best_gap = abs(raw_risk - best_risk)
+            if best_gap <= 1e-8:
                 summary["skipped_equal_risk"] += 1
+            else:
+                if best_gap < stage4_min_target_gap:
+                    summary["skipped_candidate_small_gap"] += 1
+                else:
+                    preferred_action = int(best["action_id"] if best_risk < raw_risk else raw_action)
+                    proof = self._build_same_state_proof(history_scene_payload, {})
+                    sample = RiskPairSample(
+                        history_scene=history_scene,
+                        action_a=int(raw_action),
+                        action_b=int(best["action_id"]),
+                        preferred_action=preferred_action,
+                        source="stage4_candidate_rank",
+                        weight=float(stage4_weight),
+                        meta={
+                            "target_risk_a": float(raw_risk),
+                            "target_risk_b": float(best_risk),
+                            "target_gap": float(best_gap),
+                            "stage4_aux_gap": float(best_gap),
+                            "stage4_aux_candidate": bool(best_gap >= stage4_aux_target_gap),
+                            "reason": str(payload.get("reason", "")),
+                            "episode_id": str(meta.get("episode_id", "")),
+                            "hard_negative": False,
+                            "trusted_for_spread": False,
+                            "candidate_rank_pair": True,
+                            "contrast_candidate_rank": False,
+                            **proof,
+                        },
+                    )
+                    pair_samples.append(sample)
+                    summary["pairs_created"] += 1
+                    summary["candidate_pairs_created"] += 1
+
+            contrast = max(
+                alternatives,
+                key=lambda item: (
+                    abs(raw_risk - float(item.get("fine_risk", 0.0))),
+                    -int(item.get("action_id", -1)),
+                ),
+            )
+            summary["stage4_aux_candidates_seen"] += 1
+            contrast_risk = float(contrast.get("fine_risk", 0.0))
+            contrast_gap = abs(raw_risk - contrast_risk)
+            if int(contrast["action_id"]) == int(best["action_id"]):
+                summary["stage4_aux_candidates_skipped_duplicate"] += 1
                 continue
-            if risk_gap < stage4_min_target_gap:
+            if contrast_gap < stage4_min_target_gap:
                 summary["skipped_candidate_small_gap"] += 1
                 continue
-            preferred_action = int(best["action_id"] if best_risk < raw_risk else raw_action)
+
+            contrast_is_aux = bool(contrast_gap >= stage4_aux_target_gap)
+            if not contrast_is_aux:
+                summary["stage4_aux_candidates_skipped_low_gap"] += 1
+            preferred_action = int(contrast["action_id"] if contrast_risk < raw_risk else raw_action)
             proof = self._build_same_state_proof(history_scene_payload, {})
             sample = RiskPairSample(
                 history_scene=history_scene,
                 action_a=int(raw_action),
-                action_b=int(best["action_id"]),
+                action_b=int(contrast["action_id"]),
                 preferred_action=preferred_action,
                 source="stage4_candidate_rank",
                 weight=float(stage4_weight),
                 meta={
                     "target_risk_a": float(raw_risk),
-                    "target_risk_b": float(best_risk),
+                    "target_risk_b": float(contrast_risk),
+                    "target_gap": float(contrast_gap),
+                    "stage4_aux_gap": float(contrast_gap),
+                    "stage4_aux_candidate": bool(contrast_is_aux),
                     "reason": str(payload.get("reason", "")),
                     "episode_id": str(meta.get("episode_id", "")),
                     "hard_negative": False,
                     "trusted_for_spread": False,
                     "candidate_rank_pair": True,
+                    "contrast_candidate_rank": True,
                     **proof,
                 },
             )
             pair_samples.append(sample)
             summary["pairs_created"] += 1
             summary["candidate_pairs_created"] += 1
+            if contrast_is_aux:
+                summary["stage4_aux_candidates_created"] += 1
         return pair_samples, summary
 
     def _preferred_action_from_trace_suffix(
@@ -1331,6 +1395,10 @@ class SafeRLPipeline:
             "stage4_high_gap_unique_score_count_before_after": dict(
                 world_pair_ft_report.get("stage4_high_gap_unique_score_count_before_after", {})
             ),
+            "stage4_aux_pair_count": int(world_pair_ft_report.get("stage4_aux_pair_count", 0)),
+            "stage4_aux_unique_score_count_before_after": dict(
+                world_pair_ft_report.get("stage4_aux_unique_score_count_before_after", {})
+            ),
             "stage5_spread_eligible_pair_count": int(world_pair_ft_report.get("stage5_spread_eligible_pair_count", 0)),
             "stage1_probe_spread_eligible_pair_count": int(world_pair_ft_report.get("stage1_probe_spread_eligible_pair_count", 0)),
             "stage4_spread_eligible_pair_count": int(world_pair_ft_report.get("stage4_spread_eligible_pair_count", 0)),
@@ -1513,11 +1581,24 @@ class SafeRLPipeline:
         stage4_aux_unique_floor = float(
             getattr(self.config.world_model, "stage4_aux_unique_floor", 12) or 12
         )
-        stage4_high_gap_pair_count = int(stage2_report.get("stage4_high_gap_pair_count", 0) or 0)
-        stage4_high_gap_unique_payload = dict(
-            stage2_report.get("stage4_high_gap_unique_score_count_before_after", {}) or {}
+        stage4_aux_target_gap_threshold = float(
+            getattr(self.config.world_model, "stage4_aux_target_gap_threshold", 0.10) or 0.0
         )
-        stage4_high_gap_unique_after = _to_optional_float(stage4_high_gap_unique_payload.get("after"))
+        stage4_aux_pair_count = int(
+            stage2_report.get(
+                "stage4_aux_pair_count",
+                stage2_report.get("stage4_high_gap_pair_count", 0),
+            )
+            or 0
+        )
+        stage4_aux_unique_payload = dict(
+            stage2_report.get(
+                "stage4_aux_unique_score_count_before_after",
+                stage2_report.get("stage4_high_gap_unique_score_count_before_after", {}),
+            )
+            or {}
+        )
+        stage4_aux_unique_after = _to_optional_float(stage4_aux_unique_payload.get("after"))
         stage4_aux_reasons: List[str] = []
         stage4_aux_eligible = False
         stage4_aux_applied = False
@@ -1534,11 +1615,11 @@ class SafeRLPipeline:
                 stage4_aux_reasons.append("main_source_gap_not_ok")
             if not critical_reason_unique_only:
                 stage4_aux_reasons.append("critical_reason_not_unique_only")
-            if stage4_high_gap_pair_count < stage4_aux_min_high_gap_pairs:
+            if stage4_aux_pair_count < stage4_aux_min_high_gap_pairs:
                 stage4_aux_reasons.append("stage4_high_gap_pairs_insufficient")
-            if stage4_high_gap_unique_after is None:
+            if stage4_aux_unique_after is None:
                 stage4_aux_reasons.append("stage4_high_gap_metrics_missing")
-            elif stage4_high_gap_unique_after < stage4_aux_unique_floor:
+            elif stage4_aux_unique_after < stage4_aux_unique_floor:
                 stage4_aux_reasons.append("stage4_high_gap_unique_insufficient")
             stage4_aux_eligible = len(stage4_aux_reasons) == 0
             if stage4_aux_eligible:
@@ -1557,12 +1638,15 @@ class SafeRLPipeline:
             "status_after": str(status_after_aux),
             "reasons": list(stage4_aux_reasons),
             "metrics": {
-                "stage4_high_gap_pair_count": int(stage4_high_gap_pair_count),
-                "stage4_high_gap_unique_after": stage4_high_gap_unique_after,
+                "stage4_aux_pair_count": int(stage4_aux_pair_count),
+                "stage4_aux_unique_after": stage4_aux_unique_after,
+                "stage4_high_gap_pair_count": int(stage4_aux_pair_count),
+                "stage4_high_gap_unique_after": stage4_aux_unique_after,
             },
             "thresholds": {
                 "stage4_aux_min_high_gap_pairs": int(stage4_aux_min_high_gap_pairs),
                 "stage4_aux_unique_floor": float(stage4_aux_unique_floor),
+                "stage4_aux_target_gap_threshold": float(stage4_aux_target_gap_threshold),
                 "min_score_spread": float(min_score_spread),
                 "min_same_state_score_gap": float(min_same_state_score_gap),
             },
@@ -2223,6 +2307,8 @@ class SafeRLPipeline:
             before_stage4_metrics = world_trainer.evaluate_pairs(stage4_pair_samples)
             stage4_high_gap_pair_samples = world_trainer._filter_high_gap_pairs(stage4_pair_samples)
             before_stage4_high_gap_metrics = world_trainer.evaluate_pairs(stage4_high_gap_pair_samples)
+            stage4_aux_pair_samples = world_trainer._filter_stage4_aux_pairs(stage4_pair_samples)
+            before_stage4_aux_metrics = world_trainer.evaluate_pairs(stage4_aux_pair_samples)
             before_pointwise_metrics = world_trainer._evaluate_risk_only_samples(eval_replay_samples)
             world_pair_metrics = dict(before_pair_metrics)
             world_trainer.last_pair_metrics = dict(world_pair_metrics)
@@ -2271,6 +2357,11 @@ class SafeRLPipeline:
                 "stage4_high_gap_unique_score_count_before_after": {
                     "before": float(before_stage4_high_gap_metrics.get("unique_score_count", 0.0)),
                     "after": float(before_stage4_high_gap_metrics.get("unique_score_count", 0.0)),
+                },
+                "stage4_aux_pair_count": int(len(stage4_aux_pair_samples)),
+                "stage4_aux_unique_score_count_before_after": {
+                    "before": float(before_stage4_aux_metrics.get("unique_score_count", 0.0)),
+                    "after": float(before_stage4_aux_metrics.get("unique_score_count", 0.0)),
                 },
                 "stage5_spread_eligible_pair_count": int(world_trainer._spread_eligible_pair_count(stage5_pair_samples)),
                 "stage1_probe_spread_eligible_pair_count": int(world_trainer._spread_eligible_pair_count(stage1_probe_pair_samples)),
@@ -3527,6 +3618,10 @@ class SafeRLPipeline:
             "stage4_high_gap_unique_score_count_before_after": dict(
                 stage2_report.get("stage4_high_gap_unique_score_count_before_after", {})
             ),
+            "stage4_aux_pair_count": int(stage2_report.get("stage4_aux_pair_count", 0)),
+            "stage4_aux_unique_score_count_before_after": dict(
+                stage2_report.get("stage4_aux_unique_score_count_before_after", {})
+            ),
             "stage5_spread_eligible_pair_count": int(stage2_report.get("stage5_spread_eligible_pair_count", 0)),
             "stage1_probe_spread_eligible_pair_count": int(stage2_report.get("stage1_probe_spread_eligible_pair_count", 0)),
             "stage4_spread_eligible_pair_count": int(stage2_report.get("stage4_spread_eligible_pair_count", 0)),
@@ -3570,6 +3665,10 @@ class SafeRLPipeline:
             "stage4_high_gap_pair_count": int(stage2_snapshot.get("stage4_high_gap_pair_count", 0)),
             "stage4_high_gap_unique_score_count_before_after": dict(
                 stage2_snapshot.get("stage4_high_gap_unique_score_count_before_after", {})
+            ),
+            "stage4_aux_pair_count": int(stage2_snapshot.get("stage4_aux_pair_count", 0)),
+            "stage4_aux_unique_score_count_before_after": dict(
+                stage2_snapshot.get("stage4_aux_unique_score_count_before_after", {})
             ),
             "stage5_spread_eligible_pair_count": int(stage2_snapshot["stage5_spread_eligible_pair_count"]),
             "stage1_probe_spread_eligible_pair_count": int(stage2_snapshot["stage1_probe_spread_eligible_pair_count"]),
