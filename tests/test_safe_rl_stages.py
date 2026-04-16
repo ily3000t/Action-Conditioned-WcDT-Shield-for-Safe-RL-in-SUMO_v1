@@ -354,6 +354,10 @@ def test_stage4_pair_builder_uses_candidate_rank_pairs_without_interventions():
     assert summary["stage4_aux_candidates_seen"] == 1
     assert summary["stage4_aux_candidates_created"] == 0
     assert summary["stage4_aux_candidates_skipped_duplicate"] == 1
+    stats = dict(summary["stage4_aux_gap_stats"])
+    assert stats["count"] == 1
+    assert stats["min"] == pytest.approx(0.41)
+    assert stats["p99"] == pytest.approx(stats["max"])
 
 
 def test_stage4_pair_builder_filters_small_gap_candidates():
@@ -399,6 +403,10 @@ def test_stage4_pair_builder_filters_small_gap_candidates():
     assert summary["skipped_candidate_small_gap"] == 1
     assert summary["stage4_aux_candidates_seen"] == 1
     assert summary["stage4_aux_candidates_skipped_duplicate"] == 1
+    stats = dict(summary["stage4_aux_gap_stats"])
+    assert stats["count"] == 0
+    assert stats["p95"] is None
+    assert stats["p99"] is None
 
 
 def test_stage4_pair_builder_adds_contrast_pair_by_max_risk_gap():
@@ -455,6 +463,11 @@ def test_stage4_pair_builder_adds_contrast_pair_by_max_risk_gap():
     assert summary["stage4_aux_candidates_created"] == 1
     assert summary["stage4_aux_candidates_skipped_duplicate"] == 0
     assert summary["stage4_aux_candidates_skipped_low_gap"] == 0
+    stats = dict(summary["stage4_aux_gap_stats"])
+    assert stats["count"] == 2
+    assert stats["max"] == pytest.approx(0.45)
+    assert stats["p95"] >= stats["p50"]
+    assert stats["p99"] >= stats["p95"]
 
 
 def test_stage4_pair_builder_marks_contrast_low_gap_for_aux_window():
@@ -504,6 +517,10 @@ def test_stage4_pair_builder_marks_contrast_low_gap_for_aux_window():
     assert summary["stage4_aux_candidates_seen"] == 1
     assert summary["stage4_aux_candidates_created"] == 0
     assert summary["stage4_aux_candidates_skipped_low_gap"] == 1
+    stats = dict(summary["stage4_aux_gap_stats"])
+    assert stats["count"] == 2
+    assert stats["max"] == pytest.approx(0.08)
+    assert stats["p99"] == pytest.approx(stats["max"])
 
 
 def test_stage2_model_quality_health_marks_critical_for_low_resolution():

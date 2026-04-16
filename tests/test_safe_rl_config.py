@@ -34,7 +34,7 @@ def test_default_config_loads():
     assert config.world_model.pair_ft_selection_accuracy_tie_epsilon == 0.0001
     assert config.world_model.stage4_aux_min_high_gap_pairs == 128
     assert config.world_model.stage4_aux_unique_floor == 12
-    assert config.world_model.stage4_aux_target_gap_threshold == 0.10
+    assert config.world_model.stage4_aux_target_gap_threshold == 0.068
     assert config.world_model.min_stage5_pairs_for_world_ft == 50
     assert config.world_model.pair_finetune_gate_mode == "fallback_all_pairs"
     assert config.shield.profile == "balanced"

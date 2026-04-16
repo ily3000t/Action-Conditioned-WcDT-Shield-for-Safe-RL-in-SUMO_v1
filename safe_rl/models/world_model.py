@@ -885,7 +885,7 @@ class WorldModelTrainer:
         return selected
 
     def _filter_stage4_aux_pairs(self, pair_samples: Sequence[RiskPairSample]) -> List[RiskPairSample]:
-        threshold = float(getattr(self.config, 'stage4_aux_target_gap_threshold', 0.10) or 0.0)
+        threshold = float(getattr(self.config, 'stage4_aux_target_gap_threshold', 0.068) or 0.0)
         selected: List[RiskPairSample] = []
         for sample in pair_samples:
             if str(sample.source) != 'stage4_candidate_rank':

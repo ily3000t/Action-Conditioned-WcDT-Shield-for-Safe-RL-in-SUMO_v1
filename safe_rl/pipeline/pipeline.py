@@ -790,13 +790,23 @@ class SafeRLPipeline:
             "stage4_aux_candidates_created": 0,
             "stage4_aux_candidates_skipped_low_gap": 0,
             "stage4_aux_candidates_skipped_duplicate": 0,
+            "stage4_aux_gap_stats": {
+                "count": 0,
+                "min": None,
+                "p50": None,
+                "p95": None,
+                "p99": None,
+                "max": None,
+                "mean": None,
+            },
             "skipped_missing_buffer_file": 0,
             "skipped_missing_distill_supervision_file": 0,
         }
         pair_samples: List[RiskPairSample] = []
+        stage4_aux_gap_values: List[float] = []
         stage4_weight = float(self.config.light_risk.stage4_pair_weight if stage4_weight is None else stage4_weight)
         stage4_min_target_gap = float(getattr(self.config.stage1_collection, "stage4_candidate_min_target_gap", 0.01) or 0.0)
-        stage4_aux_target_gap = float(getattr(self.config.world_model, "stage4_aux_target_gap_threshold", 0.10) or 0.0)
+        stage4_aux_target_gap = float(getattr(self.config.world_model, "stage4_aux_target_gap_threshold", 0.068) or 0.0)
         if self.buffer_path is not None and self.buffer_path.exists():
             buffer = InterventionBuffer(capacity=max(10000, self.config.distill.trigger_buffer_size * 4))
             buffer.load(str(self.buffer_path))
@@ -833,6 +843,7 @@ class SafeRLPipeline:
                     },
                 )
                 pair_samples.append(sample)
+                stage4_aux_gap_values.append(float(target_gap))
                 summary["pairs_created"] += 1
                 summary["buffer_pairs_created"] += 1
         else:
@@ -949,6 +960,7 @@ class SafeRLPipeline:
                         },
                     )
                     pair_samples.append(sample)
+                    stage4_aux_gap_values.append(float(best_gap))
                     summary["pairs_created"] += 1
                     summary["candidate_pairs_created"] += 1
 
@@ -997,10 +1009,30 @@ class SafeRLPipeline:
                 },
             )
             pair_samples.append(sample)
+            stage4_aux_gap_values.append(float(contrast_gap))
             summary["pairs_created"] += 1
             summary["candidate_pairs_created"] += 1
             if contrast_is_aux:
                 summary["stage4_aux_candidates_created"] += 1
+
+        if stage4_aux_gap_values:
+            gaps = sorted(float(value) for value in stage4_aux_gap_values)
+            size = len(gaps)
+
+            def _percentile(q: float) -> float:
+                idx = int(round((size - 1) * float(q)))
+                idx = max(0, min(size - 1, idx))
+                return float(gaps[idx])
+
+            summary["stage4_aux_gap_stats"] = {
+                "count": int(size),
+                "min": float(gaps[0]),
+                "p50": _percentile(0.50),
+                "p95": _percentile(0.95),
+                "p99": _percentile(0.99),
+                "max": float(gaps[-1]),
+                "mean": float(sum(gaps) / float(size)),
+            }
         return pair_samples, summary
 
     def _preferred_action_from_trace_suffix(
@@ -1582,7 +1614,7 @@ class SafeRLPipeline:
             getattr(self.config.world_model, "stage4_aux_unique_floor", 12) or 12
         )
         stage4_aux_target_gap_threshold = float(
-            getattr(self.config.world_model, "stage4_aux_target_gap_threshold", 0.10) or 0.0
+            getattr(self.config.world_model, "stage4_aux_target_gap_threshold", 0.068) or 0.0
         )
         stage4_aux_pair_count = int(
             stage2_report.get(

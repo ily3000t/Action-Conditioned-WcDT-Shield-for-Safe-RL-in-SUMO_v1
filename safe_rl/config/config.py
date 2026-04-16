@@ -104,7 +104,7 @@ class WorldModelConfig:
     min_spread_eligible_pairs_for_gate_source: int = 128
     stage4_aux_min_high_gap_pairs: int = 128
     stage4_aux_unique_floor: int = 12
-    stage4_aux_target_gap_threshold: float = 0.10
+    stage4_aux_target_gap_threshold: float = 0.068
     min_stage5_pairs_for_world_ft: int = 50
     pair_finetune_gate_mode: str = "fallback_all_pairs"
     multimodal: int = 6
