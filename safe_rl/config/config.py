@@ -267,6 +267,27 @@ def _load_yaml_dict(path: Path) -> dict:
         return yaml.safe_load(f) or {}
 
 
+def _resolve_config_path(path: Optional[str], default_path: Path) -> Path:
+    if path is None:
+        return default_path
+    requested = Path(path)
+    direct = requested if requested.is_absolute() else Path(path)
+    if direct.exists():
+        return direct.resolve()
+    config_root = default_path.parent
+    if not requested.name:
+        raise FileNotFoundError(f"Config path not found: {path}")
+    matches = sorted(config_root.rglob(requested.name))
+    if len(matches) == 1:
+        return matches[0].resolve()
+    if len(matches) > 1:
+        match_list = ", ".join(str(item) for item in matches)
+        raise FileNotFoundError(
+            f"Config path '{path}' is ambiguous after config consolidation. Matches: {match_list}"
+        )
+    raise FileNotFoundError(f"Config path not found: {path}")
+
+
 def _resolve_shield_profile(config: SafeRLConfig, shield_data: Optional[dict] = None):
     payload = dict(shield_data or {})
     profile = str(getattr(config.shield, "profile", "legacy") or "legacy").strip().lower()
@@ -296,7 +317,7 @@ def _resolve_shield_profile(config: SafeRLConfig, shield_data: Optional[dict] = 
 def load_safe_rl_config(path: Optional[str] = None) -> SafeRLConfig:
     config = SafeRLConfig()
     default_path = (Path(__file__).resolve().parent / "default_safe_rl.yaml").resolve()
-    target_path = default_path if path is None else Path(path).resolve()
+    target_path = _resolve_config_path(path, default_path)
     default_data = _load_yaml_dict(default_path)
 
     if target_path != default_path:

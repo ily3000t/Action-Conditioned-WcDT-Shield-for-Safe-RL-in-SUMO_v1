@@ -1481,17 +1481,17 @@ class SafeRLPipeline:
         recommendation_commands: List[str] = []
         if self.run_id:
             recommendation_commands.append(
-                f"python safe_rl_main.py --config safe_rl/config/stage5_pair_bootstrap.yaml --stage stage5 --run-id {self.run_id}"
+                f"python safe_rl_main.py --config safe_rl/config/advanced/stage5_pair_bootstrap.yaml --stage stage5 --run-id {self.run_id}"
             )
             recommendation_commands.append(
-                f"python safe_rl_main.py --config safe_rl/config/stage2_v2_world_pair_focus.yaml --stage stage2 --run-id {self.run_id}"
+                f"python safe_rl_main.py --config safe_rl/config/advanced/stage2_v2_world_pair_focus.yaml --stage stage2 --run-id {self.run_id}"
             )
         else:
             recommendation_commands.append(
-                "python safe_rl_main.py --config safe_rl/config/stage5_pair_bootstrap.yaml --stage stage5 --run-id <run_id>"
+                "python safe_rl_main.py --config safe_rl/config/advanced/stage5_pair_bootstrap.yaml --stage stage5 --run-id <run_id>"
             )
             recommendation_commands.append(
-                "python safe_rl_main.py --config safe_rl/config/stage2_v2_world_pair_focus.yaml --stage stage2 --run-id <run_id>"
+                "python safe_rl_main.py --config safe_rl/config/advanced/stage2_v2_world_pair_focus.yaml --stage stage2 --run-id <run_id>"
             )
 
         if stage5_requirement_met:
@@ -1989,15 +1989,15 @@ class SafeRLPipeline:
         if self.run_id:
             recommendation_commands.extend(
                 [
-                    f"python safe_rl_main.py --config safe_rl/config/safe_rl_balanced_profile.yaml --stage stage4 --run-id {self.run_id}",
-                    f"python safe_rl_main.py --config safe_rl/config/safe_rl_balanced_profile.yaml --stage stage5 --run-id {self.run_id}",
+                    f"python safe_rl_main.py --config safe_rl/config/default_safe_rl.yaml --stage stage4 --run-id {self.run_id}",
+                    f"python safe_rl_main.py --config safe_rl/config/default_safe_rl.yaml --stage stage5 --run-id {self.run_id}",
                 ]
             )
         else:
             recommendation_commands.extend(
                 [
-                    "python safe_rl_main.py --config safe_rl/config/safe_rl_balanced_profile.yaml --stage stage4 --run-id <run_id>",
-                    "python safe_rl_main.py --config safe_rl/config/safe_rl_balanced_profile.yaml --stage stage5 --run-id <run_id>",
+                    "python safe_rl_main.py --config safe_rl/config/default_safe_rl.yaml --stage stage4 --run-id <run_id>",
+                    "python safe_rl_main.py --config safe_rl/config/default_safe_rl.yaml --stage stage5 --run-id <run_id>",
                 ]
             )
 
@@ -2040,15 +2040,15 @@ class SafeRLPipeline:
                 if self.run_id:
                     recommendation_commands.extend(
                         [
-                            f"python safe_rl_main.py --config safe_rl/config/stage5_pair_bootstrap.yaml --stage stage5 --run-id {self.run_id}",
-                            f"python safe_rl_main.py --config safe_rl/config/stage2_v2_world_pair_focus.yaml --stage stage2 --run-id {self.run_id}",
+                            f"python safe_rl_main.py --config safe_rl/config/advanced/stage5_pair_bootstrap.yaml --stage stage5 --run-id {self.run_id}",
+                            f"python safe_rl_main.py --config safe_rl/config/advanced/stage2_v2_world_pair_focus.yaml --stage stage2 --run-id {self.run_id}",
                         ]
                     )
                 else:
                     recommendation_commands.extend(
                         [
-                            "python safe_rl_main.py --config safe_rl/config/stage5_pair_bootstrap.yaml --stage stage5 --run-id <run_id>",
-                            "python safe_rl_main.py --config safe_rl/config/stage2_v2_world_pair_focus.yaml --stage stage2 --run-id <run_id>",
+                            "python safe_rl_main.py --config safe_rl/config/advanced/stage5_pair_bootstrap.yaml --stage stage5 --run-id <run_id>",
+                            "python safe_rl_main.py --config safe_rl/config/advanced/stage2_v2_world_pair_focus.yaml --stage stage2 --run-id <run_id>",
                         ]
                     )
 

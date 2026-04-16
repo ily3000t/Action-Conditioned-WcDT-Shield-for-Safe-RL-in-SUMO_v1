@@ -20,9 +20,9 @@ echo [SAFE_RL] Python: %PYTHON_CMD%
 echo.
 
 call :run_step "Stage 1 - build pointwise and stage1 probe data" "%PYTHON_CMD%" safe_rl_main.py --config safe_rl/config/default_safe_rl.yaml --stage stage1 --run-id %RUN_ID%
-call :run_step "Stage 5 - bootstrap strong pairs" "%PYTHON_CMD%" safe_rl_main.py --config safe_rl/config/stage5_pair_bootstrap.yaml --stage stage5 --run-id %RUN_ID%
-call :run_step "Stage 2 - world-focused v2 training" "%PYTHON_CMD%" safe_rl_main.py --config safe_rl/config/stage2_v2_world_pair_focus.yaml --stage stage2 --run-id %RUN_ID%
-call :run_step "Stage 5 - held-out after-trace validation" "%PYTHON_CMD%" safe_rl_main.py --config safe_rl/config/shield_trace_holdout_c1.yaml --stage stage5 --run-id %RUN_ID%
+call :run_step "Stage 5 - bootstrap strong pairs" "%PYTHON_CMD%" safe_rl_main.py --config safe_rl/config/advanced/stage5_pair_bootstrap.yaml --stage stage5 --run-id %RUN_ID%
+call :run_step "Stage 2 - world-focused v2 training" "%PYTHON_CMD%" safe_rl_main.py --config safe_rl/config/advanced/stage2_v2_world_pair_focus.yaml --stage stage2 --run-id %RUN_ID%
+call :run_step "Stage 5 - held-out after-trace validation" "%PYTHON_CMD%" safe_rl_main.py --config safe_rl/config/experiments/shield_trace_holdout_c1.yaml --stage stage5 --run-id %RUN_ID%
 
 echo.
 echo [SAFE_RL] All 4 steps completed successfully.

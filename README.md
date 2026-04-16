@@ -1,217 +1,100 @@
-# WcDT SAFE_RL 运行手册
+﻿# WcDT SAFE_RL
 
-本文档只包含两部分：
-- 运行方式
-- 配置文件入口说明
+## 主入口（一句话）
+普通用户只看并只用 `safe_rl/config/default_safe_rl.yaml`。
 
-## 1. 主入口
-
-```bash
-python safe_rl_main.py --config <config_path>
-python safe_rl_main.py --config <config_path> --stage <all|stage1|stage2|stage3|stage4|stage5> --run-id <run_id>
-```
-
-规则：
-- `--stage all` 可不传 `--run-id`，系统会自动生成新的 `run_id`
-- `--stage != all` 必须传入已存在的 `run_id`
-- 分阶段运行时，后续阶段必须复用同一个 `run_id`
-
-## 2. 运行前准备
+## 基础运行
 
 ```bash
-conda activate pytorch
-python -c "import torch; print(torch.__version__)"
-python scenarios/highway_merge/build_network.py
-```
-
-如 SUMO 安装路径与默认不一致，请在配置中检查并修改：
-- `sim.sumo_home`
-- `sim.sumo_bin`
-- `sim.sumo_gui_bin`
-- `sim.netconvert_bin`
-
-## 3. 常用运行命令
-
-1. 全链路一次跑完（默认正式入口）
-
-```bash
+# 全链路
 python safe_rl_main.py --config safe_rl/config/default_safe_rl.yaml
+
+# 分阶段复用同一 run
+python safe_rl_main.py --config safe_rl/config/default_safe_rl.yaml --stage stage1 --run-id <run_id>
+python safe_rl_main.py --config safe_rl/config/default_safe_rl.yaml --stage stage2 --run-id <run_id>
+python safe_rl_main.py --config safe_rl/config/default_safe_rl.yaml --stage stage3 --run-id <run_id>
+python safe_rl_main.py --config safe_rl/config/default_safe_rl.yaml --stage stage4 --run-id <run_id>
+python safe_rl_main.py --config safe_rl/config/default_safe_rl.yaml --stage stage5 --run-id <run_id>
 ```
 
-2. 分阶段运行（同一个 `run_id`）
+## 配置分层（已收敛）
+
+- 主入口层（唯一正式入口）
+  - `safe_rl/config/default_safe_rl.yaml`
+
+- 进阶流程层
+  - `safe_rl/config/advanced/stage2_v2_world_pair_focus.yaml`
+  - `safe_rl/config/advanced/stage5_pair_bootstrap.yaml`
+  - `safe_rl/config/advanced/stage45_recovery.yaml`
+
+- 可视化与评估层
+  - `safe_rl/config/visualization/stage5_eval_hardening.yaml`
+  - `safe_rl/config/visualization/stage45_cost_desensitize.yaml`
+  - `safe_rl/config/visualization/stage5_trace_capture_default.yaml`
+  - `safe_rl/config/visualization/stage5_trace_capture_cost.yaml`
+
+- 实验层
+  - `safe_rl/config/experiments/shield_sweep.yaml`
+  - `safe_rl/config/experiments/shield_trace_holdout_c1.yaml`
+
+- 调试层
+  - `safe_rl/config/debug/quick_check.yaml`
+  - `safe_rl/config/debug/smoke_test.yaml`
+  - `safe_rl/config/debug/debug_real_sumo.yaml`
+  - `safe_rl/config/debug/debug_stage3_sumo.yaml`
+  - `safe_rl/config/debug/shield_sanity.yaml`
+
+- 兼容/待删除层（不推荐新实验继续使用）
+  - `safe_rl/config/deprecated/*`
+  - 例如：`shield_trace_c_strong.yaml`、`stage45_balance_candidate.yaml`、`safe_rl_balanced_profile.yaml`
+
+> 说明：配置加载器已支持“按文件名回溯查找”，旧路径命令在大多数情况下仍可兼容，但请逐步迁移到新目录。
+
+## 常用辅助命令
 
 ```bash
-python safe_rl_main.py --config safe_rl/config/default_safe_rl.yaml --stage stage1 --run-id exp_001
-python safe_rl_main.py --config safe_rl/config/default_safe_rl.yaml --stage stage2 --run-id exp_001
-python safe_rl_main.py --config safe_rl/config/default_safe_rl.yaml --stage stage3 --run-id exp_001
-python safe_rl_main.py --config safe_rl/config/default_safe_rl.yaml --stage stage4 --run-id exp_001
-python safe_rl_main.py --config safe_rl/config/default_safe_rl.yaml --stage stage5 --run-id exp_001
+# 闭环复验（stage4 -> stage2 -> stage5）
+python run_safe_rl_v2_pipeline.py --run-id <run_id>
+
+# v2 批处理（stage1 -> stage5 bootstrap -> stage2 focus -> stage5 holdout）
+run_safe_rl_v2_pipeline.cmd <run_id>
 ```
 
-3. 现有 run 上仅复跑 Stage4 + Stage5
+## 第二阶段修改方案（Resolution Loss，仅 Stage4-aux 子集）
+当前状态是：aux 窗口已打通（pair 数足够），但 `stage4_aux_unique_after` 仍低于 12。
+
+建议按下面顺序做第二阶段：
+
+1. 仅在 world pair-ft 中增加“Stage4-aux 子集轻量分辨率约束”
+- 只对 `source=stage4_candidate_rank` 且 `stage4_aux_candidate=true` 的样本生效。
+- 不改主 pointwise/ranking/spread 的权重结构。
+- 新增弱权重 `resolution_loss_weight`（建议 0.02 起步）。
+
+2. 分辨率损失设计（轻量、可控）
+- 目标：拉开同状态下的风险分数档位，避免 unique 塌缩。
+- 推荐形式：对 batch 内风险分数做最小间隔/方差增强约束（只在 Stage4-aux 子集）。
+
+3. 评估与门禁不变
+- Stage5 hard-gate 语义不放宽。
+- 继续以 `model_quality_aux_stage4` 的 reason code 判读是否脱离 `critical`。
+
+4. 验收指标
+- `stage4_aux_pair_count >= 128`（应保持）
+- `stage4_aux_unique_after >= 12`
+- 若满足上述条件，再看 `critical -> degraded` 是否触发。
+
+## 可视化链路（V1）
 
 ```bash
-python safe_rl_main.py --config safe_rl/config/default_safe_rl.yaml --stage stage4 --run-id <existing_run_id>
-python safe_rl_main.py --config safe_rl/config/default_safe_rl.yaml --stage stage5 --run-id <existing_run_id>
-```
+# trace capture
+python safe_rl_main.py --config safe_rl/config/visualization/stage5_trace_capture_default.yaml --stage stage5 --run-id <run_id>
 
-4. Stage2 world pair-finetune 专项（高级入口）
-
-```bash
-python safe_rl_main.py --config safe_rl/config/stage2_v2_world_pair_focus.yaml --stage stage2 --run-id <run_id>
-```
-
-5. Stage5 pair bootstrap（补数入口）
-
-```bash
-python safe_rl_main.py --config safe_rl/config/stage5_pair_bootstrap.yaml --stage stage5 --run-id <run_id>
-```
-
-6. Stage4/5 应急回退（仅故障恢复）
-
-```bash
-python safe_rl_main.py --config safe_rl/config/stage45_recovery.yaml --stage stage4 --run-id <run_id>
-python safe_rl_main.py --config safe_rl/config/stage45_recovery.yaml --stage stage5 --run-id <run_id>
-```
-
-## 4. 配置入口分层（主入口 vs 实验入口）
-
-### 4.1 主入口（普通用户只看这里）
-
-| 配置文件 | 说明 |
-|---|---|
-| `safe_rl/config/default_safe_rl.yaml` | 唯一正式默认入口（全链路基线，默认 `shield.profile=balanced`） |
-
-说明：`default_safe_rl.yaml` 已默认启用 balanced，不需要再切换 `safe_rl_balanced_profile.yaml`。
-
-### 4.2 高级入口（按需使用）
-
-| 配置文件 | 说明 |
-|---|---|
-| `safe_rl/config/stage2_v2_world_pair_focus.yaml` | Stage2 world pair-finetune 专项入口 |
-| `safe_rl/config/stage5_pair_bootstrap.yaml` | Stage5 pair 数据补齐入口 |
-| `safe_rl/config/stage45_recovery.yaml` | Stage4/5 应急回退入口 |
-
-### 4.3 调试入口（开发者附录）
-
-- `safe_rl/config/quick_check.yaml`
-- `safe_rl/config/smoke_test.yaml`
-- `safe_rl/config/debug_real_sumo.yaml`
-- `safe_rl/config/debug_stage3_sumo.yaml`
-- `safe_rl/config/shield_sanity.yaml`
-
-### 4.4 实验矩阵入口（论文/扫参/trace）
-
-- `safe_rl/config/shield_sweep.yaml`
-- `safe_rl/config/shield_trace_c*.yaml / d*.yaml / e*.yaml / f*.yaml / g*.yaml`
-- `safe_rl/config/shield_trace_holdout_c1.yaml`
-
-### 4.5 兼容别名与降级入口（不作为主入口）
-
-- `safe_rl/config/safe_rl_balanced_profile.yaml`：兼容别名（与 default 的 balanced 行为一致）
-- `safe_rl/config/stage45_balance_candidate.yaml`：deprecated alias，仅兼容旧命令
-- `safe_rl/config/stage2_world_base_only.yaml`：ablation 入口，不作为主流程推荐
-
-## 5. 其他入口
-
-1. 批处理入口（v2 流程）
-
-```bash
-python run_safe_rl_v2_pipeline.py
-python run_safe_rl_v2_pipeline.py --run-id 20260331_172102
-python run_safe_rl_v2_pipeline.py --dry-run
-```
-
-2. 兼容任务入口
-
-```bash
-python main.py
-```
-
-## 6. TensorBoard
-
-```bash
-tensorboard --logdir safe_rl_output/runs --port 6006
-```
-
-日志目录：
-
-```text
-safe_rl_output/runs/<run_id>/tensorboard/
-```
-
-## 7. Stage4 Zero-Intervention Diagnostics
-
-- `warning_summary.json` is updated in a stage-merge style: existing Stage1 collector summary is preserved, and Stage2/Stage4 health is appended under both top-level keys and `by_stage`.
-- If Stage4 still has zero replacements and `stage4_buffer_report.json -> shield_activation_diagnostics -> raw_risk_stats.p99` stays far below `thresholds.raw_threshold_used` for a long window, likely causes are:
-  - risk-model score resolution/calibration is too weak
-  - Stage4 policy visits a more conservative state distribution than Stage1/2 training data
-  - this is not necessarily a shield replacement-logic bug
-
-## 8. New Evaluation/Desensitization Profiles
-
-- `default_safe_rl.yaml` remains the main entry and keeps `shield.profile=balanced`.
-- Use independent profiles to avoid mixed-variable attribution:
-  - `stage5_eval_hardening.yaml`: evaluation only (`eval.eval_episodes=90`, expanded seeds).
-  - `stage45_cost_desensitize.yaml`: Stage4/5 behavior desensitization only (`blocked_distance_margin_slope`, distill lr/epochs).
-
-Run commands:
-
-```bash
-# Evaluation hardening only
-python safe_rl_main.py --config safe_rl/config/stage5_eval_hardening.yaml --stage stage5 --run-id <run_id>
-
-# Cost desensitization only
-python safe_rl_main.py --config safe_rl/config/stage45_cost_desensitize.yaml --stage stage4 --run-id <run_id>
-python safe_rl_main.py --config safe_rl/config/stage45_cost_desensitize.yaml --stage stage5 --run-id <run_id>
-```
-
-Notes:
-- `stage5_eval_hardening.yaml` uses seed-group holdout (same scenario, different seed groups).
-- Seed-group holdout is **not** scenario distribution holdout.
-
-## 9. Visualization V1 (Trace Capture Isolated)
-
-Run order:
-
-```bash
-# 1) Trace capture (default behavior)
-python safe_rl_main.py --config safe_rl/config/stage5_trace_capture_default.yaml --stage stage5 --run-id <run_id>
-
-# 2) Trace capture (cost-desensitized behavior)
-python safe_rl_main.py --config safe_rl/config/stage5_trace_capture_cost.yaml --stage stage5 --run-id <run_id>
-```
-
-Use dedicated trace directories (do not mix):
-- `stage5_trace_capture_default`
-- `stage5_trace_capture_cost`
-
-Anomaly selection and GIF export:
-
-```bash
-# 3) Select anomaly cases
+# anomaly 选择
 python -m safe_rl.visualization.select_anomaly_cases --run-id <run_id> --trace-dir stage5_trace_capture_default --top-k 20
 
-# 4) Export top-K GIF replays
+# GIF 导出
 python -m safe_rl.visualization.export_paired_gif --run-id <run_id> --trace-dir stage5_trace_capture_default --top-k 10
+
+# GUI 深挖
+python -m safe_rl.visualization.replay_in_sumo_gui --run-id <run_id> --seed <seed> --mode shielded --trace-dir stage5_trace_capture_default --base-config safe_rl/config/visualization/stage5_trace_capture_default.yaml
 ```
-
-Single-case replay:
-
-```bash
-# Render one pair file
-python -m safe_rl.visualization.replay_episode --pair-file <pair_json_path> --output <gif_path>
-
-# GUI deep-dive for one selected seed/mode
-python -m safe_rl.visualization.replay_in_sumo_gui --run-id <run_id> --seed <seed> --mode shielded --trace-dir stage5_trace_capture_default --base-config safe_rl/config/stage5_trace_capture_default.yaml
-```
-
-Notes:
-- Standard flow is `capture -> anomaly -> gif -> gui`.
-- GUI replay is for case-level deep-dive; offline replay remains the primary batch comparison tool.
-- Pair trace payload now supports `baseline_steps / shielded_steps / distilled_steps`.
-- Older trace files without `distilled_steps` are downgraded to dual-track replay with explicit `distilled_unavailable=true`.
-- If strict rules select zero cases, anomaly selector falls back to `fallback_top_signal` ranking to keep diagnosis usable.
-- Heading anomaly checks use this fixed unit rule:
-  - if `abs(heading) > 2*pi`, treat as degrees
-  - otherwise convert radians to degrees before threshold checks

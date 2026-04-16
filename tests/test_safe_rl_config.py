@@ -1,4 +1,4 @@
-from pathlib import Path
+﻿from pathlib import Path
 
 from safe_rl.config.config import load_safe_rl_config
 
@@ -74,13 +74,13 @@ def test_tensorboard_config_override():
 
 
 def test_debug_real_config_uses_warn_collision_action():
-    config = load_safe_rl_config("safe_rl/config/debug_real_sumo.yaml")
+    config = load_safe_rl_config("safe_rl/config/debug/debug_real_sumo.yaml")
     assert config.sim.collision_action == "warn"
     assert config.sim.collision_stoptime == 1.0
 
 
 def test_debug_stage3_config_is_real_debug_profile():
-    config = load_safe_rl_config("safe_rl/config/debug_stage3_sumo.yaml")
+    config = load_safe_rl_config("safe_rl/config/debug/debug_stage3_sumo.yaml")
     assert config.sim.collision_action == "warn"
     assert config.ppo.use_sb3 is True
     assert config.ppo.total_timesteps == 1024
@@ -89,7 +89,7 @@ def test_debug_stage3_config_is_real_debug_profile():
 
 
 def test_shield_sanity_config_uses_aggressive_thresholds():
-    config = load_safe_rl_config("safe_rl/config/shield_sanity.yaml")
+    config = load_safe_rl_config("safe_rl/config/debug/shield_sanity.yaml")
     assert config.shield.risk_threshold == 0.05
     assert config.shield.uncertainty_threshold == 1.0
     assert config.shield.coarse_top_k == 7
@@ -98,7 +98,7 @@ def test_shield_sanity_config_uses_aggressive_thresholds():
 
 
 def test_shield_sweep_config_loads_default_variants():
-    config = load_safe_rl_config("safe_rl/config/shield_sweep.yaml")
+    config = load_safe_rl_config("safe_rl/config/experiments/shield_sweep.yaml")
     assert config.shield_sweep.enabled is True
     assert config.shield_sweep.target_intervention_min == 0.05
     assert config.shield_sweep.target_intervention_max == 0.30
@@ -111,7 +111,7 @@ def test_shield_sweep_config_loads_default_variants():
 
 
 def test_shield_trace_c_config_loads():
-    config = load_safe_rl_config("safe_rl/config/shield_trace_c.yaml")
+    config = load_safe_rl_config("safe_rl/config/deprecated/shield_trace_c.yaml")
     assert config.shield.risk_threshold == 0.30
     assert config.shield.uncertainty_threshold == 0.45
     assert config.shield.coarse_top_k == 5
@@ -120,7 +120,7 @@ def test_shield_trace_c_config_loads():
     assert config.eval.eval_episodes == 3
 
 def test_shield_trace_c1_config_loads():
-    config = load_safe_rl_config("safe_rl/config/shield_trace_c1.yaml")
+    config = load_safe_rl_config("safe_rl/config/deprecated/shield_trace_c1.yaml")
     assert config.shield.replacement_min_risk_margin == 0.08
     assert config.shield.raw_passthrough_risk_threshold == 0.24
     assert config.shield_trace.trace_dir_name == "shield_trace_c1"
@@ -128,14 +128,14 @@ def test_shield_trace_c1_config_loads():
 
 
 def test_shield_trace_c2_config_loads():
-    config = load_safe_rl_config("safe_rl/config/shield_trace_c2.yaml")
+    config = load_safe_rl_config("safe_rl/config/deprecated/shield_trace_c2.yaml")
     assert config.shield.replacement_min_risk_margin == 0.10
     assert config.shield.raw_passthrough_risk_threshold == 0.25
     assert config.shield_trace.trace_dir_name == "shield_trace_c2"
     assert config.eval.seed_list == [42, 123, 2024]
 
 def test_shield_trace_c_strong_config_loads():
-    config = load_safe_rl_config("safe_rl/config/shield_trace_c_strong.yaml")
+    config = load_safe_rl_config("safe_rl/config/deprecated/shield_trace_c_strong.yaml")
     assert config.shield.replacement_min_risk_margin == 0.15
     assert config.shield.raw_passthrough_risk_threshold == 0.30
     assert config.shield_trace.trace_dir_name == "shield_trace_c_strong"
@@ -143,7 +143,7 @@ def test_shield_trace_c_strong_config_loads():
 
 
 def test_shield_trace_d1_config_loads():
-    config = load_safe_rl_config("safe_rl/config/shield_trace_d1.yaml")
+    config = load_safe_rl_config("safe_rl/config/deprecated/shield_trace_d1.yaml")
     assert config.shield.replacement_min_risk_margin == 0.10
     assert config.shield.raw_passthrough_risk_threshold == 0.24
     assert config.shield_trace.trace_dir_name == "shield_trace_d1"
@@ -151,7 +151,7 @@ def test_shield_trace_d1_config_loads():
 
 
 def test_shield_trace_d2_config_loads():
-    config = load_safe_rl_config("safe_rl/config/shield_trace_d2.yaml")
+    config = load_safe_rl_config("safe_rl/config/deprecated/shield_trace_d2.yaml")
     assert config.shield.replacement_min_risk_margin == 0.12
     assert config.shield.raw_passthrough_risk_threshold == 0.26
     assert config.shield_trace.trace_dir_name == "shield_trace_d2"
@@ -159,7 +159,7 @@ def test_shield_trace_d2_config_loads():
 
 
 def test_shield_trace_d3_config_loads():
-    config = load_safe_rl_config("safe_rl/config/shield_trace_d3.yaml")
+    config = load_safe_rl_config("safe_rl/config/deprecated/shield_trace_d3.yaml")
     assert config.shield.replacement_min_risk_margin == 0.13
     assert config.shield.raw_passthrough_risk_threshold == 0.28
     assert config.shield_trace.trace_dir_name == "shield_trace_d3"
@@ -168,7 +168,7 @@ def test_shield_trace_d3_config_loads():
 
 
 def test_shield_trace_e1_config_loads():
-    config = load_safe_rl_config("safe_rl/config/shield_trace_e1.yaml")
+    config = load_safe_rl_config("safe_rl/config/deprecated/shield_trace_e1.yaml")
     assert config.shield.replacement_min_risk_margin == 0.11
     assert config.shield.raw_passthrough_risk_threshold == 0.24
     assert config.shield_trace.trace_dir_name == "shield_trace_e1"
@@ -176,7 +176,7 @@ def test_shield_trace_e1_config_loads():
 
 
 def test_shield_trace_e2_config_loads():
-    config = load_safe_rl_config("safe_rl/config/shield_trace_e2.yaml")
+    config = load_safe_rl_config("safe_rl/config/deprecated/shield_trace_e2.yaml")
     assert config.shield.replacement_min_risk_margin == 0.10
     assert config.shield.raw_passthrough_risk_threshold == 0.25
     assert config.shield_trace.trace_dir_name == "shield_trace_e2"
@@ -184,7 +184,7 @@ def test_shield_trace_e2_config_loads():
 
 
 def test_shield_trace_e3_config_loads():
-    config = load_safe_rl_config("safe_rl/config/shield_trace_e3.yaml")
+    config = load_safe_rl_config("safe_rl/config/deprecated/shield_trace_e3.yaml")
     assert config.shield.replacement_min_risk_margin == 0.11
     assert config.shield.raw_passthrough_risk_threshold == 0.25
     assert config.shield_trace.trace_dir_name == "shield_trace_e3"
@@ -192,7 +192,7 @@ def test_shield_trace_e3_config_loads():
 
 
 def test_shield_trace_f1_config_loads():
-    config = load_safe_rl_config("safe_rl/config/shield_trace_f1.yaml")
+    config = load_safe_rl_config("safe_rl/config/deprecated/shield_trace_f1.yaml")
     assert config.shield.replacement_min_risk_margin == 0.103
     assert config.shield.raw_passthrough_risk_threshold == 0.24
     assert config.shield_trace.trace_dir_name == "shield_trace_f1"
@@ -200,7 +200,7 @@ def test_shield_trace_f1_config_loads():
 
 
 def test_shield_trace_f2_config_loads():
-    config = load_safe_rl_config("safe_rl/config/shield_trace_f2.yaml")
+    config = load_safe_rl_config("safe_rl/config/deprecated/shield_trace_f2.yaml")
     assert config.shield.replacement_min_risk_margin == 0.106
     assert config.shield.raw_passthrough_risk_threshold == 0.24
     assert config.shield_trace.trace_dir_name == "shield_trace_f2"
@@ -208,14 +208,14 @@ def test_shield_trace_f2_config_loads():
 
 
 def test_shield_trace_f3_config_loads():
-    config = load_safe_rl_config("safe_rl/config/shield_trace_f3.yaml")
+    config = load_safe_rl_config("safe_rl/config/deprecated/shield_trace_f3.yaml")
     assert config.shield.replacement_min_risk_margin == 0.108
     assert config.shield.raw_passthrough_risk_threshold == 0.24
     assert config.shield_trace.trace_dir_name == "shield_trace_f3"
     assert config.eval.seed_list == [42, 123, 2024]
 
 def test_shield_trace_g1_config_loads():
-    config = load_safe_rl_config("safe_rl/config/shield_trace_g1.yaml")
+    config = load_safe_rl_config("safe_rl/config/deprecated/shield_trace_g1.yaml")
     assert config.shield.replacement_min_risk_margin == 0.05
     assert config.shield.raw_passthrough_risk_threshold == 0.24
     assert config.shield_trace.trace_dir_name == "shield_trace_g1"
@@ -223,7 +223,7 @@ def test_shield_trace_g1_config_loads():
 
 
 def test_shield_trace_g2_config_loads():
-    config = load_safe_rl_config("safe_rl/config/shield_trace_g2.yaml")
+    config = load_safe_rl_config("safe_rl/config/deprecated/shield_trace_g2.yaml")
     assert config.shield.replacement_min_risk_margin == 0.06
     assert config.shield.raw_passthrough_risk_threshold == 0.24
     assert config.shield_trace.trace_dir_name == "shield_trace_g2"
@@ -231,7 +231,7 @@ def test_shield_trace_g2_config_loads():
 
 
 def test_shield_trace_g3_config_loads():
-    config = load_safe_rl_config("safe_rl/config/shield_trace_g3.yaml")
+    config = load_safe_rl_config("safe_rl/config/deprecated/shield_trace_g3.yaml")
     assert config.shield.replacement_min_risk_margin == 0.07
     assert config.shield.raw_passthrough_risk_threshold == 0.24
     assert config.shield_trace.trace_dir_name == "shield_trace_g3"
@@ -239,7 +239,7 @@ def test_shield_trace_g3_config_loads():
 
 
 def test_shield_trace_g4_config_loads():
-    config = load_safe_rl_config("safe_rl/config/shield_trace_g4.yaml")
+    config = load_safe_rl_config("safe_rl/config/deprecated/shield_trace_g4.yaml")
     assert config.shield.replacement_min_risk_margin == 0.08
     assert config.shield.raw_passthrough_risk_threshold == 0.24
     assert config.shield_trace.trace_dir_name == "shield_trace_g4"
@@ -247,7 +247,7 @@ def test_shield_trace_g4_config_loads():
 
 
 def test_shield_trace_g5_config_loads():
-    config = load_safe_rl_config("safe_rl/config/shield_trace_g5.yaml")
+    config = load_safe_rl_config("safe_rl/config/deprecated/shield_trace_g5.yaml")
     assert config.shield.replacement_min_risk_margin == 0.09
     assert config.shield.raw_passthrough_risk_threshold == 0.24
     assert config.shield_trace.trace_dir_name == "shield_trace_g5"
@@ -255,7 +255,7 @@ def test_shield_trace_g5_config_loads():
 
 
 def test_stage2_world_base_only_config_loads():
-    config = load_safe_rl_config("safe_rl/config/stage2_world_base_only.yaml")
+    config = load_safe_rl_config("safe_rl/config/deprecated/stage2_world_base_only.yaml")
     assert config.light_risk.pair_finetune is False
     assert config.world_model.pair_finetune is False
     assert config.light_risk.epochs == 50
@@ -264,7 +264,7 @@ def test_stage2_world_base_only_config_loads():
     assert config.world_model.pair_ft_eval_max_samples == 2048
 
 def test_stage2_v2_world_pair_focus_config_loads():
-    config = load_safe_rl_config("safe_rl/config/stage2_v2_world_pair_focus.yaml")
+    config = load_safe_rl_config("safe_rl/config/advanced/stage2_v2_world_pair_focus.yaml")
     assert config.light_risk.pair_finetune is False
     assert config.world_model.pair_finetune is True
     assert config.light_risk.epochs == 50
@@ -278,7 +278,7 @@ def test_stage2_v2_world_pair_focus_config_loads():
 
 
 def test_shield_trace_holdout_c1_config_loads():
-    config = load_safe_rl_config("safe_rl/config/shield_trace_holdout_c1.yaml")
+    config = load_safe_rl_config("safe_rl/config/experiments/shield_trace_holdout_c1.yaml")
     assert config.shield.replacement_min_risk_margin == 0.08
     assert config.shield.raw_passthrough_risk_threshold == 0.24
     assert config.shield_trace.trace_dir_name == "shield_trace_holdout_c1"
@@ -289,7 +289,7 @@ def test_shield_trace_holdout_c1_config_loads():
 
 def test_partial_trace_config_inherits_default_sim_settings():
     default_config = load_safe_rl_config("safe_rl/config/default_safe_rl.yaml")
-    config = load_safe_rl_config("safe_rl/config/shield_trace_holdout_c1.yaml")
+    config = load_safe_rl_config("safe_rl/config/experiments/shield_trace_holdout_c1.yaml")
     assert config.sim.sumo_cfg == default_config.sim.sumo_cfg
     assert config.sim.sumo_home == default_config.sim.sumo_home
     assert config.sim.sumo_bin == default_config.sim.sumo_bin
@@ -297,7 +297,7 @@ def test_partial_trace_config_inherits_default_sim_settings():
 
 
 def test_stage5_pair_bootstrap_config_loads():
-    config = load_safe_rl_config("safe_rl/config/stage5_pair_bootstrap.yaml")
+    config = load_safe_rl_config("safe_rl/config/advanced/stage5_pair_bootstrap.yaml")
     assert config.shield.risk_threshold == 0.30
     assert config.shield.replacement_min_risk_margin == 0.02
     assert config.shield.raw_passthrough_risk_threshold == 0.24
@@ -310,14 +310,14 @@ def test_stage5_pair_bootstrap_config_loads():
 
 
 def test_stage5_eval_hardening_config_loads():
-    config = load_safe_rl_config("safe_rl/config/stage5_eval_hardening.yaml")
+    config = load_safe_rl_config("safe_rl/config/visualization/stage5_eval_hardening.yaml")
     assert config.eval.eval_episodes == 90
     assert len(config.eval.seed_list) >= 12
     assert config.tensorboard.run_name == "stage5_eval_hardening"
 
 
 def test_stage45_cost_desensitize_config_loads():
-    config = load_safe_rl_config("safe_rl/config/stage45_cost_desensitize.yaml")
+    config = load_safe_rl_config("safe_rl/config/visualization/stage45_cost_desensitize.yaml")
     assert config.shield.blocked_distance_margin_slope == 0.015
     assert config.distill.learning_rate == 0.0003
     assert config.distill.epochs == 8
@@ -325,7 +325,7 @@ def test_stage45_cost_desensitize_config_loads():
 
 
 def test_stage5_trace_capture_default_config_loads():
-    config = load_safe_rl_config("safe_rl/config/stage5_trace_capture_default.yaml")
+    config = load_safe_rl_config("safe_rl/config/visualization/stage5_trace_capture_default.yaml")
     assert config.shield_trace.enabled is True
     assert config.shield_trace.save_pair_traces is True
     assert config.shield_trace.trace_dir_name == "stage5_trace_capture_default"
@@ -336,7 +336,7 @@ def test_stage5_trace_capture_default_config_loads():
 
 
 def test_stage5_trace_capture_cost_config_loads():
-    config = load_safe_rl_config("safe_rl/config/stage5_trace_capture_cost.yaml")
+    config = load_safe_rl_config("safe_rl/config/visualization/stage5_trace_capture_cost.yaml")
     assert config.shield_trace.enabled is True
     assert config.shield_trace.save_pair_traces is True
     assert config.shield_trace.trace_dir_name == "stage5_trace_capture_cost"
@@ -374,7 +374,7 @@ def test_risk_model_v2_defaults_enabled():
 
 
 def test_safe_rl_balanced_profile_config_loads():
-    config = load_safe_rl_config("safe_rl/config/safe_rl_balanced_profile.yaml")
+    config = load_safe_rl_config("safe_rl/config/deprecated/safe_rl_balanced_profile.yaml")
     assert config.shield.profile == "balanced"
     assert config.shield.raw_passthrough_risk_threshold == 0.193
     assert config.shield.replacement_min_risk_margin == 0.104
@@ -399,3 +399,4 @@ def test_explicit_shield_thresholds_override_profile_defaults():
     assert config.shield.profile == "balanced"
     assert config.shield.raw_passthrough_risk_threshold == 0.22
     assert config.shield.replacement_min_risk_margin == 0.11
+
