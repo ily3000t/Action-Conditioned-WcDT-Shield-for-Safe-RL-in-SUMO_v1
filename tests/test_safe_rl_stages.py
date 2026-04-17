@@ -2366,6 +2366,22 @@ def test_stage2_report_includes_pair_finetune_metadata(monkeypatch):
             "world_pair_ft": {
                 "before_pair_metrics": {"pair_ranking_accuracy": 0.4, "same_state_score_gap": 0.01, "score_spread": 0.01, "hard_negative_accuracy": 0.4},
                 "after_pair_metrics": {"pair_ranking_accuracy": 0.7, "same_state_score_gap": 0.03, "score_spread": 0.04, "hard_negative_accuracy": 0.7},
+                "epoch_metrics": [
+                    {
+                        "epoch": 0.0,
+                        "stage4_aux_active_pair_count": 0.0,
+                        "stage4_aux_active_pair_fraction": 0.0,
+                        "stage4_aux_logit_gap_mean": 0.0,
+                        "stage4_aux_resolution_loss": 0.0,
+                    },
+                    {
+                        "epoch": 1.0,
+                        "stage4_aux_active_pair_count": 2.0,
+                        "stage4_aux_active_pair_fraction": 0.2,
+                        "stage4_aux_logit_gap_mean": 0.11,
+                        "stage4_aux_resolution_loss": 0.03,
+                    },
+                ],
                 "world_pair_ft_frozen_modules": ["traj_decoder"],
                 "world_pair_ft_trainable_modules": ["fusion", "risk_score_head"],
                 "stage5_pair_ranking_accuracy_before_after": {"before": 0.55, "after": 0.75},
@@ -2429,6 +2445,12 @@ def test_stage2_report_includes_pair_finetune_metadata(monkeypatch):
     assert report["stage4_spread_eligible_pair_count"] == 0
     assert report["stage5_unique_score_count_before_after"]["after"] == pytest.approx(22.0)
     assert report["stage1_probe_unique_score_count_before_after"]["after"] == pytest.approx(17.0)
+    world_epoch_metrics = list(report["pair_finetune_metrics"]["world"]["epoch_metrics"])
+    assert "stage4_aux_logit_gap_mean" in world_epoch_metrics[0]
+    assert world_epoch_metrics[0]["stage4_aux_active_pair_count"] == pytest.approx(0.0)
+    assert world_epoch_metrics[0]["stage4_aux_logit_gap_mean"] == pytest.approx(0.0)
+    assert world_epoch_metrics[1]["stage4_aux_active_pair_count"] == pytest.approx(2.0)
+    assert world_epoch_metrics[1]["stage4_aux_logit_gap_mean"] == pytest.approx(0.11)
     assert report["world_pair_ft_best_epoch"] == 1
     assert report["world_pair_ft_restored_best"] is True
     assert report["world_pair_finetune_mode"] == "fallback_all_pairs"

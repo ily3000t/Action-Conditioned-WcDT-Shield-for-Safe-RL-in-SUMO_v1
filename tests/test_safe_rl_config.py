@@ -233,7 +233,7 @@ def test_risk_model_v2_defaults_enabled():
     assert config.world_model.pair_ft_min_score_spread_floor == 0.008
     assert config.world_model.pair_ft_min_same_state_gap_floor == 0.008
     assert config.world_model.pair_ft_resolution_loss_weight == 0.02
-    assert config.world_model.pair_ft_resolution_min_logit_gap == 0.10
+    assert config.world_model.pair_ft_resolution_min_logit_gap == 0.14
     assert config.world_model.pair_ft_freeze_traj_decoder is True
     assert config.world_model.pair_ft_freeze_backbone == "partial"
 

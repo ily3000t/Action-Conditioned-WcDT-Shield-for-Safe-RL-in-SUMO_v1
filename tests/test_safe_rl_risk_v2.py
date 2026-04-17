@@ -395,7 +395,7 @@ def test_world_resolution_loss_only_applies_to_stage4_aux_pairs():
             hidden_dim=64,
             future_steps=2,
             multimodal=2,
-            pair_ft_resolution_min_logit_gap=0.10,
+            pair_ft_resolution_min_logit_gap=0.14,
             pair_ft_resolution_loss_weight=0.02,
         ),
         history_steps=2,
@@ -454,8 +454,14 @@ def test_world_resolution_loss_only_applies_to_stage4_aux_pairs():
 
     assert float(resolution_on.item()) > 0.0
     assert diag_on["stage4_aux_active_pair_count"] == 1
+    assert diag_on["stage4_aux_logit_gap_mean"] == pytest.approx(0.05, abs=1e-6)
+    assert diag_on["stage4_aux_below_margin_count"] == 1
+    assert diag_on["stage4_aux_below_margin_fraction"] == pytest.approx(1.0, abs=1e-6)
     assert float(resolution_off.item()) == pytest.approx(0.0, abs=1e-6)
     assert diag_off["stage4_aux_active_pair_count"] == 0
+    assert diag_off["stage4_aux_logit_gap_mean"] == pytest.approx(0.0, abs=1e-6)
+    assert diag_off["stage4_aux_below_margin_count"] == 0
+    assert diag_off["stage4_aux_below_margin_fraction"] == pytest.approx(0.0, abs=1e-6)
     assert float(resolution_disabled.item()) == pytest.approx(0.0, abs=1e-6)
 
 

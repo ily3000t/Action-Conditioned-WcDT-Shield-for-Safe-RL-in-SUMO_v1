@@ -62,7 +62,7 @@ world_model:
   pair_ft_min_unique_score_floor: 12
   pair_ft_selection_accuracy_tie_epsilon: 0.0001
   pair_ft_resolution_loss_weight: 0.02
-  pair_ft_resolution_min_logit_gap: 0.10
+  pair_ft_resolution_min_logit_gap: 0.14
   min_spread_eligible_pairs_for_gate_source: 128
   stage4_aux_min_high_gap_pairs: 128
   stage4_aux_unique_floor: 12
