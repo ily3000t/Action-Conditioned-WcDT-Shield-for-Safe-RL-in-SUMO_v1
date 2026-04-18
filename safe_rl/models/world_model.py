@@ -621,6 +621,16 @@ class WorldModelTrainer:
             f"trusted_pairs={trusted_pair_count}, hard_negatives={hard_negative_count}, replay_samples={replay_sample_count}, "
             f"eval_replay_samples={eval_replay_sample_count}"
         )
+        resolution_min_score_gap = float(getattr(self.config, 'pair_ft_resolution_min_score_gap', 0.03) or 0.03)
+        resolution_legacy_min_logit_gap = float(getattr(self.config, 'pair_ft_resolution_min_logit_gap', 0.14) or 0.14)
+        print(
+            f"[WorldModel PairFT] resolution_space=score, min_score_gap={resolution_min_score_gap:.4f}, "
+            f"resolution_weight={float(getattr(self.config, 'pair_ft_resolution_loss_weight', 0.0) or 0.0):.4f}"
+        )
+        print(
+            "[WorldModel PairFT] compatibility note: pair_ft_resolution_min_logit_gap is loaded "
+            "for backward compatibility but ignored because resolution_space=score."
+        )
         replay_loader = self._build_replay_loader(replay_samples)
         replay_iter = iter(replay_loader) if replay_loader is not None else None
         stage4_loader = self._build_pair_loader(stage4_pair_samples)
@@ -665,7 +675,9 @@ class WorldModelTrainer:
             epoch_stage5_seen_counts = {pair_id: 0 for pair_id in stage5_pair_ids}
             epoch_stage4_aux_active_pairs = 0
             epoch_stage4_aux_logit_gap_sum = 0.0
-            epoch_stage4_aux_below_margin_count = 0
+            epoch_stage4_aux_score_gap_values: List[float] = []
+            epoch_stage4_aux_below_score_margin_count = 0
+            epoch_stage4_aux_below_logit_margin_count = 0
             epoch_stage4_pairs_seen = 0
             step_targets = [1]
             if stage5_pair_samples and stage5_batch_size > 0:
@@ -729,7 +741,12 @@ class WorldModelTrainer:
                         stage4_aux_active_count = int(stage4_diag.get('stage4_aux_active_pair_count', 0))
                         epoch_stage4_aux_active_pairs += stage4_aux_active_count
                         epoch_stage4_aux_logit_gap_sum += float(stage4_diag.get('stage4_aux_logit_gap_mean', 0.0)) * float(stage4_aux_active_count)
-                        epoch_stage4_aux_below_margin_count += int(stage4_diag.get('stage4_aux_below_margin_count', 0))
+                        epoch_stage4_aux_score_gap_values.extend(
+                            float(value)
+                            for value in list(stage4_diag.get('stage4_aux_score_gaps', []) or [])
+                        )
+                        epoch_stage4_aux_below_score_margin_count += int(stage4_diag.get('stage4_aux_below_score_margin_count', 0))
+                        epoch_stage4_aux_below_logit_margin_count += int(stage4_diag.get('stage4_aux_below_margin_count', 0))
 
                 ranking_loss = torch.mean(torch.stack(ranking_terms)) if ranking_terms else self._zero_loss()
                 spread_loss = torch.mean(torch.stack(spread_terms)) if spread_terms else self._zero_loss()
@@ -787,9 +804,31 @@ class WorldModelTrainer:
                         if epoch_stage4_aux_active_pairs > 0
                         else 0.0
                     ),
-                    'stage4_aux_below_margin_count': float(epoch_stage4_aux_below_margin_count),
+                    'stage4_aux_score_gap_mean': (
+                        float(np.mean(epoch_stage4_aux_score_gap_values))
+                        if epoch_stage4_aux_score_gap_values
+                        else 0.0
+                    ),
+                    'stage4_aux_score_gap_p50': (
+                        float(np.quantile(epoch_stage4_aux_score_gap_values, 0.50))
+                        if epoch_stage4_aux_score_gap_values
+                        else 0.0
+                    ),
+                    'stage4_aux_score_gap_p90': (
+                        float(np.quantile(epoch_stage4_aux_score_gap_values, 0.90))
+                        if epoch_stage4_aux_score_gap_values
+                        else 0.0
+                    ),
+                    'stage4_aux_below_score_margin_count': float(epoch_stage4_aux_below_score_margin_count),
+                    'stage4_aux_below_score_margin_fraction': (
+                        float(epoch_stage4_aux_below_score_margin_count) / float(epoch_stage4_aux_active_pairs)
+                        if epoch_stage4_aux_active_pairs > 0
+                        else 0.0
+                    ),
+                    # Backward-compatible logit-space diagnostics.
+                    'stage4_aux_below_margin_count': float(epoch_stage4_aux_below_logit_margin_count),
                     'stage4_aux_below_margin_fraction': (
-                        float(epoch_stage4_aux_below_margin_count) / float(epoch_stage4_aux_active_pairs)
+                        float(epoch_stage4_aux_below_logit_margin_count) / float(epoch_stage4_aux_active_pairs)
                         if epoch_stage4_aux_active_pairs > 0
                         else 0.0
                     ),
@@ -819,6 +858,11 @@ class WorldModelTrainer:
                     tb_writer.add_scalar('eval/epoch_stage4_aux_active_pair_count', epoch_summary['stage4_aux_active_pair_count'], epoch_idx)
                     tb_writer.add_scalar('eval/epoch_stage4_aux_active_pair_fraction', epoch_summary['stage4_aux_active_pair_fraction'], epoch_idx)
                     tb_writer.add_scalar('eval/epoch_stage4_aux_logit_gap_mean', epoch_summary['stage4_aux_logit_gap_mean'], epoch_idx)
+                    tb_writer.add_scalar('eval/epoch_stage4_aux_score_gap_mean', epoch_summary['stage4_aux_score_gap_mean'], epoch_idx)
+                    tb_writer.add_scalar('eval/epoch_stage4_aux_score_gap_p50', epoch_summary['stage4_aux_score_gap_p50'], epoch_idx)
+                    tb_writer.add_scalar('eval/epoch_stage4_aux_score_gap_p90', epoch_summary['stage4_aux_score_gap_p90'], epoch_idx)
+                    tb_writer.add_scalar('eval/epoch_stage4_aux_below_score_margin_count', epoch_summary['stage4_aux_below_score_margin_count'], epoch_idx)
+                    tb_writer.add_scalar('eval/epoch_stage4_aux_below_score_margin_fraction', epoch_summary['stage4_aux_below_score_margin_fraction'], epoch_idx)
                     tb_writer.add_scalar('eval/epoch_stage4_aux_below_margin_count', epoch_summary['stage4_aux_below_margin_count'], epoch_idx)
                     tb_writer.add_scalar('eval/epoch_stage4_aux_below_margin_fraction', epoch_summary['stage4_aux_below_margin_fraction'], epoch_idx)
                 if tb_writer is not None:
@@ -888,6 +932,9 @@ class WorldModelTrainer:
             'before_pointwise_metrics': before_pointwise_metrics,
             'after_pointwise_metrics': after_pointwise_metrics,
             'epoch_metrics': epoch_metrics,
+            'resolution_space': 'score',
+            'pair_ft_resolution_min_score_gap': float(getattr(self.config, 'pair_ft_resolution_min_score_gap', 0.03) or 0.03),
+            'pair_ft_resolution_min_logit_gap_compat': float(getattr(self.config, 'pair_ft_resolution_min_logit_gap', 0.14) or 0.14),
             'world_pair_ft_frozen_modules': frozen_modules,
             'world_pair_ft_trainable_modules': trainable_modules,
             'world_pair_ft_source_mix': dict(source_mix),
@@ -1252,32 +1299,65 @@ class WorldModelTrainer:
         spread_denom = torch.clamp(torch.sum(spread_mask * weight), min=1.0)
         spread_loss = torch.sum(spread_loss * weight) / spread_denom
         resolution_mask = stage4_aux_mask.to(torch.float32) if enable_resolution else torch.zeros_like(weight)
-        resolution_gap = torch.abs(score_a_logit - score_b_logit)
+        resolution_score_gap = torch.abs(score_a - score_b)
+        resolution_logit_gap = torch.abs(score_a_logit - score_b_logit)
+        min_score_gap = float(getattr(self.config, 'pair_ft_resolution_min_score_gap', 0.03) or 0.03)
         min_logit_gap = float(getattr(self.config, 'pair_ft_resolution_min_logit_gap', 0.14) or 0.14)
-        resolution_terms = torch.relu(torch.tensor(min_logit_gap, dtype=resolution_gap.dtype, device=resolution_gap.device) - resolution_gap)
+        resolution_terms = torch.relu(
+            torch.tensor(min_score_gap, dtype=resolution_score_gap.dtype, device=resolution_score_gap.device)
+            - resolution_score_gap
+        )
         active_resolution_mask = resolution_mask > 0.0
         active_resolution_count = int(torch.sum(resolution_mask).item())
         if enable_resolution and active_resolution_count > 0:
             resolution_loss = torch.sum(resolution_terms * resolution_mask) / torch.clamp(torch.sum(resolution_mask), min=1.0)
-            active_resolution_gap = resolution_gap[active_resolution_mask]
-            stage4_aux_logit_gap_mean = float(torch.mean(active_resolution_gap).item()) if active_resolution_gap.numel() > 0 else 0.0
-            stage4_aux_below_margin_count = int(torch.sum((active_resolution_gap < min_logit_gap).to(torch.int32)).item())
+            active_resolution_logit_gap = resolution_logit_gap[active_resolution_mask]
+            active_resolution_score_gap = resolution_score_gap[active_resolution_mask]
+            stage4_aux_logit_gap_mean = (
+                float(torch.mean(active_resolution_logit_gap).item())
+                if active_resolution_logit_gap.numel() > 0
+                else 0.0
+            )
+            stage4_aux_score_gap_values = (
+                active_resolution_score_gap.detach().cpu().numpy().astype(float).tolist()
+                if active_resolution_score_gap.numel() > 0
+                else []
+            )
+            stage4_aux_below_margin_count = int(torch.sum((active_resolution_logit_gap < min_logit_gap).to(torch.int32)).item())
             stage4_aux_below_margin_fraction = (
                 float(stage4_aux_below_margin_count) / float(active_resolution_count)
+                if active_resolution_count > 0
+                else 0.0
+            )
+            stage4_aux_below_score_margin_count = int(torch.sum((active_resolution_score_gap < min_score_gap).to(torch.int32)).item())
+            stage4_aux_below_score_margin_fraction = (
+                float(stage4_aux_below_score_margin_count) / float(active_resolution_count)
                 if active_resolution_count > 0
                 else 0.0
             )
         else:
             resolution_loss = self._zero_loss()
             stage4_aux_logit_gap_mean = 0.0
+            stage4_aux_score_gap_values = []
             stage4_aux_below_margin_count = 0
             stage4_aux_below_margin_fraction = 0.0
+            stage4_aux_below_score_margin_count = 0
+            stage4_aux_below_score_margin_fraction = 0.0
         diagnostics = {
             'stage4_aux_active_pair_count': int(active_resolution_count),
             'stage4_aux_batch_size': int(weight.shape[0]),
             'stage4_aux_logit_gap_mean': float(stage4_aux_logit_gap_mean),
+            'stage4_aux_score_gaps': stage4_aux_score_gap_values,
+            'stage4_aux_score_gap_mean': float(np.mean(stage4_aux_score_gap_values)) if stage4_aux_score_gap_values else 0.0,
+            'stage4_aux_score_gap_p50': float(np.quantile(stage4_aux_score_gap_values, 0.50)) if stage4_aux_score_gap_values else 0.0,
+            'stage4_aux_score_gap_p90': float(np.quantile(stage4_aux_score_gap_values, 0.90)) if stage4_aux_score_gap_values else 0.0,
+            'stage4_aux_below_score_margin_count': int(stage4_aux_below_score_margin_count),
+            'stage4_aux_below_score_margin_fraction': float(stage4_aux_below_score_margin_fraction),
             'stage4_aux_below_margin_count': int(stage4_aux_below_margin_count),
             'stage4_aux_below_margin_fraction': float(stage4_aux_below_margin_fraction),
+            'resolution_space': 'score',
+            'pair_ft_resolution_min_score_gap': float(min_score_gap),
+            'pair_ft_resolution_min_logit_gap_compat': float(min_logit_gap),
         }
         return ranking_loss, spread_loss, resolution_loss, diagnostics
 
