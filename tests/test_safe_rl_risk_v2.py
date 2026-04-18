@@ -457,6 +457,7 @@ def test_world_resolution_loss_only_applies_to_stage4_aux_pairs():
     assert diag_on["stage4_aux_active_pair_count"] == 1
     assert diag_on["resolution_space"] == "score"
     assert diag_on["pair_ft_resolution_min_score_gap"] == pytest.approx(0.03, abs=1e-6)
+    assert diag_on["ignored_legacy_logit_margin"] == pytest.approx(0.14, abs=1e-6)
     assert diag_on["stage4_aux_logit_gap_mean"] == pytest.approx(0.05, abs=1e-6)
     assert diag_on["stage4_aux_score_gap_mean"] == pytest.approx(0.012497, abs=1e-4)
     assert diag_on["stage4_aux_score_gap_p50"] == pytest.approx(diag_on["stage4_aux_score_gap_mean"], abs=1e-9)

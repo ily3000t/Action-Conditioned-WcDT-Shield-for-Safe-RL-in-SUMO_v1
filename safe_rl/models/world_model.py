@@ -565,6 +565,10 @@ class WorldModelTrainer:
                 'before_pointwise_metrics': before_pointwise_metrics,
                 'after_pointwise_metrics': before_pointwise_metrics,
                 'epoch_metrics': [],
+                'resolution_space': 'score',
+                'pair_ft_resolution_min_score_gap': float(getattr(self.config, 'pair_ft_resolution_min_score_gap', 0.03) or 0.03),
+                'ignored_legacy_logit_margin': float(getattr(self.config, 'pair_ft_resolution_min_logit_gap', 0.14) or 0.14),
+                'pair_ft_resolution_min_logit_gap_compat': float(getattr(self.config, 'pair_ft_resolution_min_logit_gap', 0.14) or 0.14),
                 'world_pair_ft_frozen_modules': [],
                 'world_pair_ft_trainable_modules': [],
                 'world_pair_ft_source_mix': dict(source_mix),
@@ -934,6 +938,7 @@ class WorldModelTrainer:
             'epoch_metrics': epoch_metrics,
             'resolution_space': 'score',
             'pair_ft_resolution_min_score_gap': float(getattr(self.config, 'pair_ft_resolution_min_score_gap', 0.03) or 0.03),
+            'ignored_legacy_logit_margin': float(getattr(self.config, 'pair_ft_resolution_min_logit_gap', 0.14) or 0.14),
             'pair_ft_resolution_min_logit_gap_compat': float(getattr(self.config, 'pair_ft_resolution_min_logit_gap', 0.14) or 0.14),
             'world_pair_ft_frozen_modules': frozen_modules,
             'world_pair_ft_trainable_modules': trainable_modules,
@@ -1357,6 +1362,7 @@ class WorldModelTrainer:
             'stage4_aux_below_margin_fraction': float(stage4_aux_below_margin_fraction),
             'resolution_space': 'score',
             'pair_ft_resolution_min_score_gap': float(min_score_gap),
+            'ignored_legacy_logit_margin': float(min_logit_gap),
             'pair_ft_resolution_min_logit_gap_compat': float(min_logit_gap),
         }
         return ranking_loss, spread_loss, resolution_loss, diagnostics

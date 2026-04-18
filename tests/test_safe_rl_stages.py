@@ -2392,6 +2392,9 @@ def test_stage2_report_includes_pair_finetune_metadata(monkeypatch):
                         "stage4_aux_below_score_margin_fraction": 0.5,
                     },
                 ],
+                "resolution_space": "score",
+                "pair_ft_resolution_min_score_gap": 0.03,
+                "ignored_legacy_logit_margin": 0.14,
                 "world_pair_ft_frozen_modules": ["traj_decoder"],
                 "world_pair_ft_trainable_modules": ["fusion", "risk_score_head"],
                 "stage5_pair_ranking_accuracy_before_after": {"before": 0.55, "after": 0.75},
@@ -2467,6 +2470,8 @@ def test_stage2_report_includes_pair_finetune_metadata(monkeypatch):
     assert world_epoch_metrics[1]["stage4_aux_active_pair_count"] == pytest.approx(2.0)
     assert world_epoch_metrics[1]["stage4_aux_logit_gap_mean"] == pytest.approx(0.11)
     assert world_epoch_metrics[1]["stage4_aux_score_gap_mean"] == pytest.approx(0.022)
+    assert report["pair_finetune_metrics"]["world"]["resolution_space"] == "score"
+    assert report["pair_finetune_metrics"]["world"]["ignored_legacy_logit_margin"] == pytest.approx(0.14)
     assert report["world_pair_ft_best_epoch"] == 1
     assert report["world_pair_ft_restored_best"] is True
     assert report["world_pair_finetune_mode"] == "fallback_all_pairs"

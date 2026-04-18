@@ -116,6 +116,79 @@ def should_run_stage5_from_stage2_report_path(report_path: Path) -> Tuple[bool, 
     return should_run_stage5_from_stage2_report_payload(payload)
 
 
+def summarize_stage2_resolution_progress(payload: Dict[str, Any]) -> Dict[str, Any]:
+    world_pair_ft = dict(dict(payload.get("pair_finetune_metrics", {}) or {}).get("world", {}) or {})
+    epoch_metrics = list(world_pair_ft.get("epoch_metrics", []) or [])
+    active_counts = [float(dict(epoch or {}).get("stage4_aux_active_pair_count", 0.0) or 0.0) for epoch in epoch_metrics]
+    resolution_losses = [float(dict(epoch or {}).get("stage4_aux_resolution_loss", 0.0) or 0.0) for epoch in epoch_metrics]
+    below_score_margin_fractions = [
+        float(dict(epoch or {}).get("stage4_aux_below_score_margin_fraction", 0.0) or 0.0)
+        for epoch in epoch_metrics
+    ]
+    active_below_score_margin_fractions = [
+        fraction for fraction, active in zip(below_score_margin_fractions, active_counts) if float(active) > 0.0
+    ]
+    has_active_pairs = any(float(item) > 0.0 for item in active_counts)
+    has_resolution_loss = any(float(item) > 0.0 for item in resolution_losses)
+    has_below_score_margin = any(float(item) > 0.0 for item in active_below_score_margin_fractions)
+    below_score_margin_trend_down = False
+    if len(active_below_score_margin_fractions) >= 2:
+        below_score_margin_trend_down = (
+            float(active_below_score_margin_fractions[-1]) < float(active_below_score_margin_fractions[0]) - 1e-9
+        )
+
+    stage4_aux_unique_after = float(
+        dict(payload.get("stage4_aux_unique_score_count_before_after", {}) or {}).get("after", 0.0) or 0.0
+    )
+    world_pair_ft_best_epoch = int(payload.get("world_pair_ft_best_epoch", -1) or -1)
+    return {
+        "stage4_aux_active_pair_count_max": float(max(active_counts) if active_counts else 0.0),
+        "stage4_aux_resolution_loss_max": float(max(resolution_losses) if resolution_losses else 0.0),
+        "stage4_aux_below_score_margin_fraction_first": (
+            float(active_below_score_margin_fractions[0]) if active_below_score_margin_fractions else 0.0
+        ),
+        "stage4_aux_below_score_margin_fraction_last": (
+            float(active_below_score_margin_fractions[-1]) if active_below_score_margin_fractions else 0.0
+        ),
+        "stage4_aux_unique_after": float(stage4_aux_unique_after),
+        "world_pair_ft_best_epoch": int(world_pair_ft_best_epoch),
+        "has_active_pairs": bool(has_active_pairs),
+        "has_resolution_loss": bool(has_resolution_loss),
+        "has_below_score_margin": bool(has_below_score_margin),
+        "below_score_margin_trend_down": bool(below_score_margin_trend_down),
+    }
+
+
+def print_stage2_resolution_progress(summary: Dict[str, Any]) -> None:
+    print("[SAFE_RL] Stage2 score-space resolution checks:")
+    print(
+        "[SAFE_RL] 1) active_pairs>0: "
+        f"{summary.get('has_active_pairs')} (max_active={summary.get('stage4_aux_active_pair_count_max')})"
+    )
+    print(
+        "[SAFE_RL] 2) resolution_loss>0: "
+        f"{summary.get('has_resolution_loss')} (max_resolution={summary.get('stage4_aux_resolution_loss_max')})"
+    )
+    print(
+        "[SAFE_RL] 3) below_score_margin_fraction>0: "
+        f"{summary.get('has_below_score_margin')} "
+        f"(first={summary.get('stage4_aux_below_score_margin_fraction_first')}, "
+        f"last={summary.get('stage4_aux_below_score_margin_fraction_last')}, "
+        f"trend_down={summary.get('below_score_margin_trend_down')})"
+    )
+    print(
+        "[SAFE_RL] 4) stage4_aux_unique_after>8: "
+        f"{float(summary.get('stage4_aux_unique_after', 0.0)) > 8.0} "
+        f"(value={summary.get('stage4_aux_unique_after')})"
+    )
+    print(
+        "[SAFE_RL] 5) world_pair_ft_best_epoch!=-1: "
+        f"{int(summary.get('world_pair_ft_best_epoch', -1)) != -1} "
+        f"(value={summary.get('world_pair_ft_best_epoch')})"
+    )
+    print()
+
+
 
 def main() -> int:
     args = parse_args()
@@ -156,7 +229,17 @@ def main() -> int:
         return 0
 
     stage2_report_path = _stage2_report_path(repo_root, run_id)
-    run_stage5, stage2_status, skip_reason = should_run_stage5_from_stage2_report_path(stage2_report_path)
+    stage2_report_payload: Dict[str, Any] = {}
+    if stage2_report_path.exists():
+        try:
+            stage2_report_payload = json.loads(stage2_report_path.read_text(encoding="utf-8"))
+        except Exception:
+            stage2_report_payload = {}
+    if stage2_report_payload:
+        print_stage2_resolution_progress(summarize_stage2_resolution_progress(stage2_report_payload))
+        run_stage5, stage2_status, skip_reason = should_run_stage5_from_stage2_report_payload(stage2_report_payload)
+    else:
+        run_stage5, stage2_status, skip_reason = should_run_stage5_from_stage2_report_path(stage2_report_path)
     if not run_stage5:
         print(f"[SAFE_RL] Stage5 skipped: stage2_status={stage2_status}, reason={skip_reason}")
         print("[SAFE_RL] Closed-loop revalidation completed (conditional Stage5 skipped).")

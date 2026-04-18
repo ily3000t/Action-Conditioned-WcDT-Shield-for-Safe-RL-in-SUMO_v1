@@ -3,6 +3,8 @@ import uuid
 from pathlib import Path
 
 from run_safe_rl_v2_pipeline import (
+    print_stage2_resolution_progress,
+    summarize_stage2_resolution_progress,
     should_run_stage5_from_stage2_report_path,
     should_run_stage5_from_stage2_report_payload,
 )
@@ -84,3 +86,44 @@ def test_should_run_stage5_from_report_path_reads_json():
     assert allowed is True
     assert status == "degraded"
     assert reason == ""
+
+
+def test_summarize_stage2_resolution_progress_reports_ordered_checks(capsys):
+    payload = {
+        "pair_finetune_metrics": {
+            "world": {
+                "epoch_metrics": [
+                    {
+                        "stage4_aux_active_pair_count": 0.0,
+                        "stage4_aux_resolution_loss": 0.0,
+                        "stage4_aux_below_score_margin_fraction": 0.0,
+                    },
+                    {
+                        "stage4_aux_active_pair_count": 64.0,
+                        "stage4_aux_resolution_loss": 0.12,
+                        "stage4_aux_below_score_margin_fraction": 0.75,
+                    },
+                    {
+                        "stage4_aux_active_pair_count": 64.0,
+                        "stage4_aux_resolution_loss": 0.08,
+                        "stage4_aux_below_score_margin_fraction": 0.40,
+                    },
+                ]
+            }
+        },
+        "stage4_aux_unique_score_count_before_after": {"after": 9.0},
+        "world_pair_ft_best_epoch": 1,
+    }
+    summary = summarize_stage2_resolution_progress(payload)
+    assert summary["has_active_pairs"] is True
+    assert summary["has_resolution_loss"] is True
+    assert summary["has_below_score_margin"] is True
+    assert summary["below_score_margin_trend_down"] is True
+    assert summary["stage4_aux_unique_after"] == 9.0
+    assert summary["world_pair_ft_best_epoch"] == 1
+
+    print_stage2_resolution_progress(summary)
+    captured = capsys.readouterr()
+    assert "Stage2 score-space resolution checks" in captured.out
+    assert "active_pairs>0: True" in captured.out
+    assert "resolution_loss>0: True" in captured.out
