@@ -2,8 +2,13 @@ import json
 import uuid
 from pathlib import Path
 
+import pytest
+
+from run_safe_rl_v2_pipeline import main as runner_main
 from run_safe_rl_v2_pipeline import (
     print_stage2_resolution_progress,
+    print_stage2_probe_progress,
+    summarize_stage2_probe_progress,
     summarize_stage2_resolution_progress,
     should_run_stage5_from_stage2_report_path,
     should_run_stage5_from_stage2_report_payload,
@@ -127,3 +132,97 @@ def test_summarize_stage2_resolution_progress_reports_ordered_checks(capsys):
     assert "Stage2 score-space resolution checks" in captured.out
     assert "active_pairs>0: True" in captured.out
     assert "resolution_loss>0: True" in captured.out
+
+
+def test_summarize_stage2_probe_progress_reports_main_metrics(capsys):
+    payload = {
+        "stage1_probe_pairs_created": 312,
+        "stage1_probe_unique_score_count_before_after": {"before": 9.0, "after": 11.0},
+        "ranking_metrics": {"world": {"unique_score_count": 11.0}},
+        "model_quality_metric_source": "stage1_probe",
+        "stage2_pair_source_health": {"model_quality": {"status": "degraded"}},
+    }
+    summary = summarize_stage2_probe_progress(payload)
+    assert summary["stage1_probe_pairs_created"] == 312
+    assert summary["stage1_probe_unique_after"] == 11.0
+    assert summary["world_unique_score_count"] == 11.0
+    assert summary["model_quality_status"] == "degraded"
+    assert summary["model_quality_metric_source"] == "stage1_probe"
+
+    print_stage2_probe_progress(summary)
+    captured = capsys.readouterr()
+    assert "Stage2 Stage1-probe recovery checks" in captured.out
+    assert "stage1_probe_pairs_created: 312" in captured.out
+    assert "stage1_probe_unique_after: 11.0" in captured.out
+    assert "world_unique_score_count: 11.0" in captured.out
+
+
+def test_runner_stage1_probe_recovery_dry_run(monkeypatch, capsys):
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "run_safe_rl_v2_pipeline.py",
+            "--mode",
+            "stage1_probe_recovery",
+            "--run-id",
+            "20260414_200057",
+            "--dry-run",
+        ],
+    )
+    code = runner_main()
+    captured = capsys.readouterr()
+    assert code == 0
+    assert "Mode: stage1_probe_recovery" in captured.out
+    assert "--stage stage1" in captured.out
+    assert "--stage stage2" in captured.out
+    assert "Stage5 is intentionally not attempted in this mode by default." in captured.out
+
+
+def test_runner_stage1_probe_recovery_executes_stage1_stage2_only(monkeypatch, capsys):
+    calls = []
+
+    def _fake_run_step(repo_root, step_name, command, dry_run):
+        _ = repo_root
+        calls.append((step_name, list(command), dry_run))
+        return 0
+
+    def _fake_stage2_report_path(repo_root, run_id):
+        _ = repo_root
+        return _local_tmp_dir(f"stage2_report_{run_id}") / "stage2_training_report.json"
+
+    report_path = _fake_stage2_report_path(Path("."), "20260414_200057")
+    report_path.parent.mkdir(parents=True, exist_ok=True)
+    report_path.write_text(
+        json.dumps(
+            {
+                "stage1_probe_pairs_created": 300,
+                "stage1_probe_unique_score_count_before_after": {"after": 10.0},
+                "ranking_metrics": {"world": {"unique_score_count": 10.0}},
+                "model_quality_metric_source": "stage1_probe",
+                "stage2_pair_source_health": {"model_quality": {"status": "critical"}},
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    monkeypatch.setattr("run_safe_rl_v2_pipeline.run_step", _fake_run_step)
+    monkeypatch.setattr("run_safe_rl_v2_pipeline._stage2_report_path", _fake_stage2_report_path)
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "run_safe_rl_v2_pipeline.py",
+            "--mode",
+            "stage1_probe_recovery",
+            "--run-id",
+            "20260414_200057",
+        ],
+    )
+    code = runner_main()
+    captured = capsys.readouterr()
+    assert code == 0
+    assert len(calls) == 2
+    assert "--stage" in calls[0][1]
+    assert calls[0][1][calls[0][1].index("--stage") + 1] == "stage1"
+    assert calls[1][1][calls[1][1].index("--stage") + 1] == "stage2"
+    assert all("--stage stage5" not in " ".join(item[1]) for item in calls)
+    assert "Stage1-probe recovery sequence completed" in captured.out

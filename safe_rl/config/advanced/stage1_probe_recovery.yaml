@@ -1,0 +1,9 @@
+# Stage1-driven recovery override.
+# Thin profile: increase Stage1 probe coverage for stage1 -> stage2 revalidation.
+
+stage1_collection:
+  probe_max_steps_per_episode: 6
+  probe_pair_boundary_keep_per_risky_step: 2
+
+tensorboard:
+  run_name: "stage1_probe_recovery"

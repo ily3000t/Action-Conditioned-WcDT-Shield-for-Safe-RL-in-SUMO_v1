@@ -8,7 +8,7 @@ import sys
 from pathlib import Path
 from typing import Any, Dict, Sequence, Tuple
 
-BASE_STEPS: tuple[tuple[str, str, str], ...] = (
+STAGE4_BASE_STEPS: tuple[tuple[str, str, str], ...] = (
     (
         "Stage 4 - collect intervention buffer (self-recovery candidates)",
         "safe_rl/config/default_safe_rl.yaml",
@@ -20,16 +20,32 @@ BASE_STEPS: tuple[tuple[str, str, str], ...] = (
         "stage2",
     ),
 )
-STAGE5_STEP: tuple[str, str, str] = (
+STAGE4_STAGE5_STEP: tuple[str, str, str] = (
     "Stage 5 - distill and evaluate after Stage2 recovery",
     "safe_rl/config/default_safe_rl.yaml",
     "stage5",
+)
+STAGE1_BASE_STEPS: tuple[tuple[str, str, str], ...] = (
+    (
+        "Stage 1 - recollect probe-rich data",
+        "safe_rl/config/advanced/stage1_probe_recovery.yaml",
+        "stage1",
+    ),
+    (
+        "Stage 2 - retrain world/light models with updated Stage1 probe data",
+        "safe_rl/config/advanced/stage1_probe_recovery.yaml",
+        "stage2",
+    ),
 )
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Run SAFE_RL closed-loop revalidation sequence: stage4 -> stage2 -> stage5.",
+        description=(
+            "Run SAFE_RL revalidation sequence. "
+            "Modes: stage4_recovery (stage4 -> stage2 -> conditional stage5), "
+            "stage1_probe_recovery (stage1 -> stage2, no stage5 by default)."
+        ),
     )
     parser.add_argument(
         "--run-id",
@@ -41,6 +57,21 @@ def parse_args() -> argparse.Namespace:
         dest="python_cmd",
         default=sys.executable,
         help="Python executable to use. Default: current interpreter.",
+    )
+    parser.add_argument(
+        "--mode",
+        choices=("stage4_recovery", "stage1_probe_recovery"),
+        default="stage4_recovery",
+        help="Execution mode. Default: stage4_recovery.",
+    )
+    parser.add_argument(
+        "--config",
+        default=None,
+        help=(
+            "Optional config override for all steps in selected mode. "
+            "Default: safe_rl/config/default_safe_rl.yaml for stage4_recovery, "
+            "safe_rl/config/advanced/stage1_probe_recovery.yaml for stage1_probe_recovery."
+        ),
     )
     parser.add_argument(
         "--dry-run",
@@ -189,10 +220,44 @@ def print_stage2_resolution_progress(summary: Dict[str, Any]) -> None:
     print()
 
 
+def summarize_stage2_probe_progress(payload: Dict[str, Any]) -> Dict[str, Any]:
+    stage2_health = dict(payload.get("stage2_pair_source_health", {}) or {})
+    model_quality = dict(stage2_health.get("model_quality", {}) or {})
+    ranking_world = dict(dict(payload.get("ranking_metrics", {}) or {}).get("world", {}) or {})
+    stage1_unique = dict(payload.get("stage1_probe_unique_score_count_before_after", {}) or {})
+    return {
+        "stage1_probe_pairs_created": int(payload.get("stage1_probe_pairs_created", 0) or 0),
+        "stage1_probe_unique_after": float(stage1_unique.get("after", 0.0) or 0.0),
+        "world_unique_score_count": float(ranking_world.get("unique_score_count", 0.0) or 0.0),
+        "model_quality_status": str(model_quality.get("status", "")).strip().lower() or "unknown",
+        "model_quality_metric_source": str(payload.get("model_quality_metric_source", "unknown")),
+    }
+
+
+def print_stage2_probe_progress(summary: Dict[str, Any]) -> None:
+    print("[SAFE_RL] Stage2 Stage1-probe recovery checks:")
+    print(f"[SAFE_RL] - stage1_probe_pairs_created: {summary.get('stage1_probe_pairs_created')}")
+    print(f"[SAFE_RL] - stage1_probe_unique_after: {summary.get('stage1_probe_unique_after')}")
+    print(f"[SAFE_RL] - world_unique_score_count: {summary.get('world_unique_score_count')}")
+    print(
+        "[SAFE_RL] - model_quality: "
+        f"status={summary.get('model_quality_status')}, "
+        f"metric_source={summary.get('model_quality_metric_source')}"
+    )
+    print()
+
+
 
 def main() -> int:
     args = parse_args()
     repo_root = Path(__file__).resolve().parent
+    if args.mode == "stage1_probe_recovery":
+        default_config = "safe_rl/config/advanced/stage1_probe_recovery.yaml"
+        base_steps = STAGE1_BASE_STEPS
+    else:
+        default_config = "safe_rl/config/default_safe_rl.yaml"
+        base_steps = STAGE4_BASE_STEPS
+    selected_config = str(args.config or default_config)
     run_id = str(args.run_id or "").strip()
     if not run_id:
         runs_root = repo_root / "safe_rl_output" / "runs"
@@ -212,16 +277,39 @@ def main() -> int:
     print(f"[SAFE_RL] Repo root: {repo_root}")
     print(f"[SAFE_RL] Run ID: {run_id}")
     print(f"[SAFE_RL] Python: {args.python_cmd}")
+    print(f"[SAFE_RL] Mode: {args.mode}")
+    print(f"[SAFE_RL] Config: {selected_config}")
     print()
 
-    for step_name, config_path, stage in BASE_STEPS:
-        command = build_command(args.python_cmd, config_path, stage, run_id)
+    for step_name, _, stage in base_steps:
+        command = build_command(args.python_cmd, selected_config, stage, run_id)
         exit_code = run_step(repo_root, step_name, command, args.dry_run)
         if exit_code != 0:
             return exit_code
 
-    stage5_name, stage5_config, stage5_stage = STAGE5_STEP
-    stage5_command = build_command(args.python_cmd, stage5_config, stage5_stage, run_id)
+    if args.mode == "stage1_probe_recovery":
+        if args.dry_run:
+            print("[SAFE_RL] Dry-run mode: stage1_probe_recovery executes stage1 -> stage2 only.")
+            print("[SAFE_RL] Stage5 is intentionally not attempted in this mode by default.")
+            print("[SAFE_RL] Closed-loop dry-run completed successfully.")
+            return 0
+
+        stage2_report_path = _stage2_report_path(repo_root, run_id)
+        stage2_report_payload: Dict[str, Any] = {}
+        if stage2_report_path.exists():
+            try:
+                stage2_report_payload = json.loads(stage2_report_path.read_text(encoding="utf-8"))
+            except Exception:
+                stage2_report_payload = {}
+        if stage2_report_payload:
+            print_stage2_probe_progress(summarize_stage2_probe_progress(stage2_report_payload))
+        else:
+            print(f"[SAFE_RL] Stage2 report missing or invalid: {stage2_report_path}")
+        print("[SAFE_RL] Stage1-probe recovery sequence completed (Stage5 not attempted by design).")
+        return 0
+
+    stage5_name, _, stage5_stage = STAGE4_STAGE5_STEP
+    stage5_command = build_command(args.python_cmd, selected_config, stage5_stage, run_id)
     if args.dry_run:
         print("[SAFE_RL] Dry-run mode: Stage5 is conditionally executed when Stage2 model quality is healthy/degraded.")
         print(format_command(stage5_command))
