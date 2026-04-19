@@ -529,6 +529,17 @@ class WorldModelTrainer:
         stage1_probe_spread_eligible_count = self._spread_eligible_pair_count(stage1_probe_pair_samples)
         stage4_spread_eligible_count = self._spread_eligible_pair_count(stage4_pair_samples)
         stage5_pair_ids = [self._stage5_pair_identifier(sample, index) for index, sample in enumerate(stage5_pair_samples)]
+        stage4_mix_every_n_steps = max(
+            1,
+            int(
+                getattr(
+                    self.config,
+                    'pair_ft_stage4_mix_every_n_steps',
+                    STAGE4_MIX_EVERY_N_STEPS,
+                )
+                or STAGE4_MIX_EVERY_N_STEPS
+            ),
+        )
         source_mix = {
             'phase_a_epochs': 0,
             'phase_b_epochs': 0,
@@ -541,7 +552,7 @@ class WorldModelTrainer:
             'stage5_pair_count': int(len(stage5_pair_samples)),
             'stage1_probe_pair_count': int(len(stage1_probe_pair_samples)),
             'stage4_pair_count': int(len(stage4_pair_samples)),
-            'stage4_mix_every_n_steps': int(STAGE4_MIX_EVERY_N_STEPS),
+            'stage4_mix_every_n_steps': int(stage4_mix_every_n_steps),
             'stage5_pair_cap': int(getattr(self.config, 'stage5_pair_max_seen_per_epoch', 0) or 0),
             'stage5_pair_seen_counts': {pair_id: 0 for pair_id in stage5_pair_ids},
             'stage5_cap_reached_pairs': 0,
@@ -730,7 +741,7 @@ class WorldModelTrainer:
                         source_mix['stage1_probe_steps'] += 1
                         source_mix['stage1_probe_pairs_seen'] += len(stage1_probe_batch)
 
-                if epoch_idx >= phase_a_epochs and stage4_loader is not None and (step_idx + 1) % int(STAGE4_MIX_EVERY_N_STEPS) == 0:
+                if epoch_idx >= phase_a_epochs and stage4_loader is not None and (step_idx + 1) % int(stage4_mix_every_n_steps) == 0:
                     stage4_batch, stage4_iter = self._next_pair_batch(stage4_iter, stage4_loader)
                     if stage4_batch:
                         stage4_ranking_loss, _, stage4_resolution_loss, stage4_diag = self._compute_pair_losses(

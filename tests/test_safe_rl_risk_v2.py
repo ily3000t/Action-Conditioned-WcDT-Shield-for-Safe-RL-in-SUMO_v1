@@ -495,3 +495,43 @@ def test_world_evaluate_pairs_restores_train_mode():
     )
     _ = trainer.evaluate_pairs([pair])
     assert trainer.model.training is True
+
+
+def test_world_pair_ft_source_mix_uses_configured_stage4_mix_frequency():
+    from safe_rl.models.world_model import WorldModelTrainer
+
+    trainer = WorldModelTrainer(
+        config=WorldModelConfig(
+            hidden_dim=64,
+            future_steps=2,
+            multimodal=2,
+            pair_finetune=False,
+            pair_ft_stage4_mix_every_n_steps=2,
+        ),
+        history_steps=2,
+        device="cpu",
+    )
+    _ = trainer.fine_tune_pairs(pair_samples=[], replay_samples=[])
+    report = dict(trainer.last_pair_ft_report or {})
+    source_mix = dict(report.get("world_pair_ft_source_mix", {}) or {})
+    assert source_mix.get("stage4_mix_every_n_steps") == 2
+
+
+def test_world_pair_ft_source_mix_stage4_mix_frequency_is_clamped_to_one():
+    from safe_rl.models.world_model import WorldModelTrainer
+
+    trainer = WorldModelTrainer(
+        config=WorldModelConfig(
+            hidden_dim=64,
+            future_steps=2,
+            multimodal=2,
+            pair_finetune=False,
+            pair_ft_stage4_mix_every_n_steps=0,
+        ),
+        history_steps=2,
+        device="cpu",
+    )
+    _ = trainer.fine_tune_pairs(pair_samples=[], replay_samples=[])
+    report = dict(trainer.last_pair_ft_report or {})
+    source_mix = dict(report.get("world_pair_ft_source_mix", {}) or {})
+    assert source_mix.get("stage4_mix_every_n_steps") == 1

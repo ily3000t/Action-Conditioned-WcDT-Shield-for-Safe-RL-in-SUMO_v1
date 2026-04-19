@@ -1,0 +1,8 @@
+# Stage2-only auxiliary push override.
+# Thin profile: only increase Stage4 pair mixing frequency in world pair-finetune.
+
+world_model:
+  pair_ft_stage4_mix_every_n_steps: 2
+
+tensorboard:
+  run_name: "stage2_stage4_aux_push"

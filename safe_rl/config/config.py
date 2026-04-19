@@ -101,6 +101,7 @@ class WorldModelConfig:
     pair_ft_min_same_state_gap_floor: float = 0.008
     pair_ft_min_unique_score_floor: int = 12
     pair_ft_selection_accuracy_tie_epsilon: float = 1e-4
+    pair_ft_stage4_mix_every_n_steps: int = 4
     pair_ft_resolution_loss_weight: float = 0.02
     pair_ft_resolution_min_score_gap: float = 0.03
     pair_ft_resolution_min_logit_gap: float = 0.14

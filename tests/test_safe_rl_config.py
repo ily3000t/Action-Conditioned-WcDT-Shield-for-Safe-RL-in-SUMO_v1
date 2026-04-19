@@ -232,6 +232,7 @@ def test_risk_model_v2_defaults_enabled():
     assert config.world_model.pair_ft_tie_gap_epsilon == 0.01
     assert config.world_model.pair_ft_min_score_spread_floor == 0.008
     assert config.world_model.pair_ft_min_same_state_gap_floor == 0.008
+    assert config.world_model.pair_ft_stage4_mix_every_n_steps == 4
     assert config.world_model.pair_ft_resolution_loss_weight == 0.02
     assert config.world_model.pair_ft_resolution_min_score_gap == 0.03
     assert config.world_model.pair_ft_resolution_min_logit_gap == 0.14
@@ -259,5 +260,12 @@ def test_explicit_shield_thresholds_override_profile_defaults():
     assert config.shield.profile == "balanced"
     assert config.shield.raw_passthrough_risk_threshold == 0.22
     assert config.shield.replacement_min_risk_margin == 0.11
+
+
+def test_stage2_stage4_aux_push_config_loads():
+    config = load_safe_rl_config("safe_rl/config/advanced/stage2_stage4_aux_push.yaml")
+    assert config.world_model.pair_ft_stage4_mix_every_n_steps == 2
+    assert config.world_model.pair_ft_resolution_loss_weight == 0.02
+    assert config.world_model.pair_ft_resolution_min_score_gap == 0.03
 
 

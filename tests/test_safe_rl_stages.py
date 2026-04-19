@@ -2411,7 +2411,16 @@ def test_stage2_report_includes_pair_finetune_metadata(monkeypatch):
                 "world_pair_ft_best_metrics": {"pair_ranking_accuracy": 0.75, "same_state_score_gap": 0.05},
                 "world_pair_ft_restored_best": True,
             },
-            "world_pair_ft_source_mix": {"stage5_steps": 3, "stage4_steps": 1, "stage5_pairs_seen": 3, "stage4_pairs_seen": 1, "stage5_pair_seen_counts": {"p0": 2, "p1": 1}, "stage5_pair_cap": 8, "stage5_cap_reached_pairs": 0},
+            "world_pair_ft_source_mix": {
+                "stage5_steps": 3,
+                "stage4_steps": 1,
+                "stage5_pairs_seen": 3,
+                "stage4_pairs_seen": 1,
+                "stage4_mix_every_n_steps": 4,
+                "stage5_pair_seen_counts": {"p0": 2, "p1": 1},
+                "stage5_pair_cap": 8,
+                "stage5_cap_reached_pairs": 0,
+            },
         }
 
     monkeypatch.setattr("safe_rl.pipeline.pipeline.SafeRLEvaluator", _DummyEvaluator)
@@ -2440,12 +2449,14 @@ def test_stage2_report_includes_pair_finetune_metadata(monkeypatch):
     assert report["world_pair_ft_trainable_modules"] == ["fusion", "risk_score_head"]
     assert report["world_pair_ft_source_mix"]["stage5_steps"] == 3
     assert report["world_pair_ft_source_mix"]["stage4_steps"] == 1
+    assert report["world_pair_ft_source_mix"]["stage4_mix_every_n_steps"] == 4
     assert report["stage2_pair_source_health"]["status"] == "healthy"
     risk_v2_summary = json.loads(Path(pipeline.risk_v2_eval_summary_path).read_text(encoding="utf-8"))
     assert risk_v2_summary["pair_finetune_applied"] is True
     assert risk_v2_summary["light_pair_finetune_applied"] is True
     assert risk_v2_summary["world_pair_finetune_applied"] is True
     assert risk_v2_summary["world_pair_ft_source_mix"]["stage5_steps"] == 3
+    assert risk_v2_summary["world_pair_ft_source_mix"]["stage4_mix_every_n_steps"] == 4
     assert "stage2_snapshot" in risk_v2_summary
     assert "pair_source_consistency" in risk_v2_summary
     assert risk_v2_summary["after_trace_metrics"] == {"ANCHOR": None, "BOUNDARY": None, "CONSERVATIVE": None, "HOLDOUT": None}
