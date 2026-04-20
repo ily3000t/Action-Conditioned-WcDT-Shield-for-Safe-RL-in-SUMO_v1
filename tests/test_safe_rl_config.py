@@ -280,3 +280,15 @@ def test_stage1_probe_recovery_config_loads():
     assert config.world_model.pair_ft_resolution_min_score_gap == default_config.world_model.pair_ft_resolution_min_score_gap
 
 
+def test_stage1_probe_recovery_gap008_config_loads():
+    default_config = load_safe_rl_config("safe_rl/config/default_safe_rl.yaml")
+    config = load_safe_rl_config("safe_rl/config/advanced/stage1_probe_recovery_gap008.yaml")
+    assert config.stage1_collection.probe_max_steps_per_episode == 6
+    assert config.stage1_collection.probe_pair_boundary_keep_per_risky_step == 2
+    assert config.stage1_collection.probe_pair_min_target_gap == 0.008
+    assert config.world_model.pair_ft_stage4_mix_every_n_steps == default_config.world_model.pair_ft_stage4_mix_every_n_steps
+    assert config.world_model.pair_ft_resolution_loss_weight == default_config.world_model.pair_ft_resolution_loss_weight
+    assert config.world_model.pair_ft_resolution_min_score_gap == default_config.world_model.pair_ft_resolution_min_score_gap
+    assert config.shield.profile == default_config.shield.profile
+
+
