@@ -1258,7 +1258,7 @@ class WorldModelTrainer:
         self.model.eval()
         try:
             for batch in loader:
-                batch_a, batch_b, preferred_a, target_a, target_b, _, hard_negative, _, _ = self._tensorize_pair_batch(batch)
+                batch_a, batch_b, preferred_a, target_a, target_b, _, hard_negative, _, _, _ = self._tensorize_pair_batch(batch)
                 score_a = self.model(batch_a)['risk_score']
                 score_b = self.model(batch_b)['risk_score']
                 pred_pref_a = score_a <= score_b
@@ -1309,7 +1309,7 @@ class WorldModelTrainer:
         self.model.eval()
         try:
             for batch in loader:
-                batch_a, batch_b, _, _, _, _, _, _, _ = self._tensorize_pair_batch(batch)
+                batch_a, batch_b, _, _, _, _, _, _, _, _ = self._tensorize_pair_batch(batch)
                 out_a = self.model(batch_a)
                 out_b = self.model(batch_b)
                 score_a = out_a['risk_score']
