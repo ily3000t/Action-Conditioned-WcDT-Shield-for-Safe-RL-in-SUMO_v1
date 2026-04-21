@@ -236,6 +236,8 @@ def test_risk_model_v2_defaults_enabled():
     assert config.world_model.pair_ft_resolution_loss_weight == 0.02
     assert config.world_model.pair_ft_resolution_min_score_gap == 0.03
     assert config.world_model.pair_ft_resolution_min_logit_gap == 0.14
+    assert config.world_model.pair_ft_stage1_resolution_loss_weight == 0.0
+    assert config.world_model.pair_ft_stage1_resolution_min_score_gap == 0.015
     assert config.world_model.pair_ft_freeze_traj_decoder is True
     assert config.world_model.pair_ft_freeze_backbone == "partial"
 
@@ -267,6 +269,16 @@ def test_stage2_stage4_aux_push_config_loads():
     assert config.world_model.pair_ft_stage4_mix_every_n_steps == 2
     assert config.world_model.pair_ft_resolution_loss_weight == 0.02
     assert config.world_model.pair_ft_resolution_min_score_gap == 0.03
+
+
+def test_stage2_stage1_gate_resolution_config_loads():
+    default_config = load_safe_rl_config("safe_rl/config/default_safe_rl.yaml")
+    config = load_safe_rl_config("safe_rl/config/advanced/stage2_stage1_gate_resolution.yaml")
+    assert config.world_model.pair_ft_stage1_resolution_loss_weight == 0.01
+    assert config.world_model.pair_ft_stage1_resolution_min_score_gap == 0.015
+    assert config.world_model.pair_ft_stage4_mix_every_n_steps == default_config.world_model.pair_ft_stage4_mix_every_n_steps
+    assert config.world_model.pair_ft_resolution_loss_weight == default_config.world_model.pair_ft_resolution_loss_weight
+    assert config.world_model.pair_ft_resolution_min_score_gap == default_config.world_model.pair_ft_resolution_min_score_gap
 
 
 def test_stage1_probe_recovery_config_loads():

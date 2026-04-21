@@ -2378,6 +2378,14 @@ def test_stage2_report_includes_pair_finetune_metadata(monkeypatch):
                         "stage4_aux_resolution_loss": 0.0,
                         "stage4_aux_below_score_margin_count": 0.0,
                         "stage4_aux_below_score_margin_fraction": 0.0,
+                        "stage1_probe_resolution_loss": 0.0,
+                        "stage1_probe_active_pair_count": 0.0,
+                        "stage1_probe_active_pair_fraction": 0.0,
+                        "stage1_probe_score_gap_mean": 0.0,
+                        "stage1_probe_score_gap_p50": 0.0,
+                        "stage1_probe_score_gap_p90": 0.0,
+                        "stage1_probe_below_score_margin_count": 0.0,
+                        "stage1_probe_below_score_margin_fraction": 0.0,
                     },
                     {
                         "epoch": 1.0,
@@ -2390,11 +2398,22 @@ def test_stage2_report_includes_pair_finetune_metadata(monkeypatch):
                         "stage4_aux_resolution_loss": 0.03,
                         "stage4_aux_below_score_margin_count": 1.0,
                         "stage4_aux_below_score_margin_fraction": 0.5,
+                        "stage1_probe_resolution_loss": 0.01,
+                        "stage1_probe_active_pair_count": 3.0,
+                        "stage1_probe_active_pair_fraction": 0.3,
+                        "stage1_probe_score_gap_mean": 0.014,
+                        "stage1_probe_score_gap_p50": 0.013,
+                        "stage1_probe_score_gap_p90": 0.020,
+                        "stage1_probe_below_score_margin_count": 2.0,
+                        "stage1_probe_below_score_margin_fraction": 0.6666667,
                     },
                 ],
                 "resolution_space": "score",
                 "pair_ft_resolution_min_score_gap": 0.03,
                 "ignored_legacy_logit_margin": 0.14,
+                "stage1_resolution_space": "score",
+                "pair_ft_stage1_resolution_min_score_gap": 0.015,
+                "pair_ft_stage1_resolution_loss_weight": 0.01,
                 "world_pair_ft_frozen_modules": ["traj_decoder"],
                 "world_pair_ft_trainable_modules": ["fusion", "risk_score_head"],
                 "stage5_pair_ranking_accuracy_before_after": {"before": 0.55, "after": 0.75},
@@ -2475,14 +2494,25 @@ def test_stage2_report_includes_pair_finetune_metadata(monkeypatch):
     assert "stage4_aux_score_gap_p50" in world_epoch_metrics[0]
     assert "stage4_aux_score_gap_p90" in world_epoch_metrics[0]
     assert "stage4_aux_below_score_margin_fraction" in world_epoch_metrics[0]
+    assert "stage1_probe_resolution_loss" in world_epoch_metrics[0]
+    assert "stage1_probe_active_pair_count" in world_epoch_metrics[0]
+    assert "stage1_probe_score_gap_mean" in world_epoch_metrics[0]
+    assert "stage1_probe_below_score_margin_fraction" in world_epoch_metrics[0]
     assert world_epoch_metrics[0]["stage4_aux_active_pair_count"] == pytest.approx(0.0)
     assert world_epoch_metrics[0]["stage4_aux_logit_gap_mean"] == pytest.approx(0.0)
     assert world_epoch_metrics[0]["stage4_aux_score_gap_mean"] == pytest.approx(0.0)
+    assert world_epoch_metrics[0]["stage1_probe_active_pair_count"] == pytest.approx(0.0)
+    assert world_epoch_metrics[0]["stage1_probe_score_gap_mean"] == pytest.approx(0.0)
     assert world_epoch_metrics[1]["stage4_aux_active_pair_count"] == pytest.approx(2.0)
     assert world_epoch_metrics[1]["stage4_aux_logit_gap_mean"] == pytest.approx(0.11)
     assert world_epoch_metrics[1]["stage4_aux_score_gap_mean"] == pytest.approx(0.022)
+    assert world_epoch_metrics[1]["stage1_probe_active_pair_count"] == pytest.approx(3.0)
+    assert world_epoch_metrics[1]["stage1_probe_score_gap_mean"] == pytest.approx(0.014)
     assert report["pair_finetune_metrics"]["world"]["resolution_space"] == "score"
     assert report["pair_finetune_metrics"]["world"]["ignored_legacy_logit_margin"] == pytest.approx(0.14)
+    assert report["pair_finetune_metrics"]["world"]["stage1_resolution_space"] == "score"
+    assert report["pair_finetune_metrics"]["world"]["pair_ft_stage1_resolution_min_score_gap"] == pytest.approx(0.015)
+    assert report["pair_finetune_metrics"]["world"]["pair_ft_stage1_resolution_loss_weight"] == pytest.approx(0.01)
     assert report["world_pair_ft_best_epoch"] == 1
     assert report["world_pair_ft_restored_best"] is True
     assert report["world_pair_finetune_mode"] == "fallback_all_pairs"
