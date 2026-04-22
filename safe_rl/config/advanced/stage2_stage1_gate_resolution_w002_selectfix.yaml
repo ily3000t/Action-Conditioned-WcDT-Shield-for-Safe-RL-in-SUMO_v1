@@ -1,0 +1,11 @@
+# Stage2-only Stage1 main-gate resolution + selection tie-epsilon diagnostic profile (7C-light).
+# Single-variable diagnostic: keep Stage1-resolution strength at w=0.02 and widen
+# selection tie epsilon so unique-based tie-break can activate when accuracy is near-equal.
+
+world_model:
+  pair_ft_stage1_resolution_loss_weight: 0.02
+  pair_ft_stage1_resolution_min_score_gap: 0.015
+  pair_ft_selection_accuracy_tie_epsilon: 0.01
+
+tensorboard:
+  run_name: "stage2_stage1_gate_resolution_w002_selectfix"

@@ -292,6 +292,20 @@ def test_stage2_stage1_gate_resolution_w002_config_loads():
     assert config.world_model.pair_ft_patience == default_config.world_model.pair_ft_patience
 
 
+def test_stage2_stage1_gate_resolution_w002_selectfix_config_loads():
+    default_config = load_safe_rl_config("safe_rl/config/default_safe_rl.yaml")
+    config = load_safe_rl_config("safe_rl/config/advanced/stage2_stage1_gate_resolution_w002_selectfix.yaml")
+    assert config.world_model.pair_ft_stage1_resolution_loss_weight == 0.02
+    assert config.world_model.pair_ft_stage1_resolution_min_score_gap == 0.015
+    assert config.world_model.pair_ft_selection_accuracy_tie_epsilon == 0.01
+    assert config.world_model.pair_ft_patience == default_config.world_model.pair_ft_patience
+    assert config.world_model.pair_ft_stage4_mix_every_n_steps == default_config.world_model.pair_ft_stage4_mix_every_n_steps
+    assert config.world_model.pair_ft_resolution_loss_weight == default_config.world_model.pair_ft_resolution_loss_weight
+    assert config.world_model.pair_finetune_gate_mode == default_config.world_model.pair_finetune_gate_mode
+    assert config.shield.profile == default_config.shield.profile
+    assert config.shield.risk_threshold == default_config.shield.risk_threshold
+
+
 def test_stage1_probe_recovery_config_loads():
     default_config = load_safe_rl_config("safe_rl/config/default_safe_rl.yaml")
     config = load_safe_rl_config("safe_rl/config/advanced/stage1_probe_recovery.yaml")
