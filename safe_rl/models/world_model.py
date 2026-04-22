@@ -1446,7 +1446,7 @@ class WorldModelTrainer:
             )
             stage4_aux_below_score_margin_count = int(torch.sum((active_resolution_score_gap < min_score_gap).to(torch.int32)).item())
             stage4_aux_below_score_margin_fraction = (
-                float(stage4_aux_below_score_margin_count) / float(active_resolution_count)
+                float(stage4_aux_below_score_margin_count) / float(stage4_active_resolution_count)
                 if stage4_active_resolution_count > 0
                 else 0.0
             )
