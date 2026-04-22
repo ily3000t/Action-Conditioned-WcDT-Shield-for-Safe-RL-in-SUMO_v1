@@ -1,0 +1,9 @@
+# Stage2-only Stage1 main-gate resolution boost profile (7A).
+# Single-variable step: increase Stage1-resolution weight from 0.01 to 0.02.
+
+world_model:
+  pair_ft_stage1_resolution_loss_weight: 0.02
+  pair_ft_stage1_resolution_min_score_gap: 0.015
+
+tensorboard:
+  run_name: "stage2_stage1_gate_resolution_w002"
