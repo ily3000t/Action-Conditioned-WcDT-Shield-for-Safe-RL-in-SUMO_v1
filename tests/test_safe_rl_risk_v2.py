@@ -283,6 +283,178 @@ def test_world_pair_selection_compare_uses_unique_gap_spread_when_accuracy_tied(
     ) == 1
 
 
+def test_world_pair_legacy_selection_prefers_stage1_metrics_when_accuracy_tied():
+    from safe_rl.models.world_model import WorldModelTrainer
+
+    trainer = WorldModelTrainer(
+        config=WorldModelConfig(
+            hidden_dim=64,
+            future_steps=2,
+            multimodal=2,
+            pair_ft_selection_accuracy_tie_epsilon=0.01,
+        ),
+        history_steps=2,
+        device="cpu",
+    )
+    cmp_result, reason = trainer._compare_pair_ft_metrics_for_legacy_selection(
+        current_eval_metrics={
+            "pair_count": 100.0,
+            "pair_ranking_accuracy": 0.700,
+            "unique_score_count": 9.0,
+            "same_state_score_gap": 0.018,
+            "score_spread": 0.012,
+        },
+        best_eval_metrics={
+            "pair_count": 100.0,
+            "pair_ranking_accuracy": 0.701,
+            "unique_score_count": 9.0,
+            "same_state_score_gap": 0.019,
+            "score_spread": 0.013,
+        },
+        current_stage1_probe_metrics={
+            "pair_count": 80.0,
+            "unique_score_count": 10.0,
+            "same_state_score_gap": 0.022,
+            "score_spread": 0.015,
+        },
+        best_stage1_probe_metrics={
+            "pair_count": 80.0,
+            "unique_score_count": 9.0,
+            "same_state_score_gap": 0.023,
+            "score_spread": 0.016,
+        },
+    )
+    assert cmp_result == 1
+    assert reason == "legacy_stage1_probe_unique_higher"
+
+
+def test_world_pair_legacy_selection_prefers_accuracy_when_outside_tie_epsilon():
+    from safe_rl.models.world_model import WorldModelTrainer
+
+    trainer = WorldModelTrainer(
+        config=WorldModelConfig(
+            hidden_dim=64,
+            future_steps=2,
+            multimodal=2,
+            pair_ft_selection_accuracy_tie_epsilon=0.01,
+        ),
+        history_steps=2,
+        device="cpu",
+    )
+    cmp_result, reason = trainer._compare_pair_ft_metrics_for_legacy_selection(
+        current_eval_metrics={
+            "pair_count": 100.0,
+            "pair_ranking_accuracy": 0.72,
+            "unique_score_count": 9.0,
+            "same_state_score_gap": 0.018,
+            "score_spread": 0.012,
+        },
+        best_eval_metrics={
+            "pair_count": 100.0,
+            "pair_ranking_accuracy": 0.70,
+            "unique_score_count": 9.0,
+            "same_state_score_gap": 0.019,
+            "score_spread": 0.013,
+        },
+        current_stage1_probe_metrics={
+            "pair_count": 80.0,
+            "unique_score_count": 8.0,
+            "same_state_score_gap": 0.02,
+            "score_spread": 0.01,
+        },
+        best_stage1_probe_metrics={
+            "pair_count": 80.0,
+            "unique_score_count": 12.0,
+            "same_state_score_gap": 0.04,
+            "score_spread": 0.02,
+        },
+    )
+    assert cmp_result == 1
+    assert reason == "legacy_accuracy_above_tie_epsilon"
+
+
+def test_world_pair_legacy_selection_falls_back_to_eval_when_stage1_missing():
+    from safe_rl.models.world_model import WorldModelTrainer
+
+    trainer = WorldModelTrainer(
+        config=WorldModelConfig(
+            hidden_dim=64,
+            future_steps=2,
+            multimodal=2,
+            pair_ft_selection_accuracy_tie_epsilon=0.01,
+        ),
+        history_steps=2,
+        device="cpu",
+    )
+    cmp_result, reason = trainer._compare_pair_ft_metrics_for_legacy_selection(
+        current_eval_metrics={
+            "pair_count": 100.0,
+            "pair_ranking_accuracy": 0.700,
+            "unique_score_count": 10.0,
+            "same_state_score_gap": 0.02,
+            "score_spread": 0.013,
+        },
+        best_eval_metrics={
+            "pair_count": 100.0,
+            "pair_ranking_accuracy": 0.701,
+            "unique_score_count": 9.0,
+            "same_state_score_gap": 0.02,
+            "score_spread": 0.013,
+        },
+        current_stage1_probe_metrics={"pair_count": 0.0, "unique_score_count": 0.0},
+        best_stage1_probe_metrics={"pair_count": 0.0, "unique_score_count": 0.0},
+    )
+    assert cmp_result == 1
+    assert reason == "legacy_eval_unique_higher"
+
+
+def test_world_pair_legacy_selection_keeps_collapse_floor_priority():
+    from safe_rl.models.world_model import WorldModelTrainer
+
+    trainer = WorldModelTrainer(
+        config=WorldModelConfig(
+            hidden_dim=64,
+            future_steps=2,
+            multimodal=2,
+            pair_ft_selection_accuracy_tie_epsilon=0.01,
+            pair_ft_min_score_spread_floor=0.008,
+            pair_ft_min_same_state_gap_floor=0.008,
+        ),
+        history_steps=2,
+        device="cpu",
+    )
+    cmp_result, reason = trainer._compare_pair_ft_metrics_for_legacy_selection(
+        current_eval_metrics={
+            "pair_count": 100.0,
+            "pair_ranking_accuracy": 0.90,
+            "unique_score_count": 12.0,
+            "same_state_score_gap": 0.002,
+            "score_spread": 0.002,
+        },
+        best_eval_metrics={
+            "pair_count": 100.0,
+            "pair_ranking_accuracy": 0.70,
+            "unique_score_count": 9.0,
+            "same_state_score_gap": 0.02,
+            "score_spread": 0.02,
+        },
+        current_stage1_probe_metrics={
+            "pair_count": 80.0,
+            "unique_score_count": 12.0,
+            "same_state_score_gap": 0.03,
+            "score_spread": 0.02,
+        },
+        best_stage1_probe_metrics={
+            "pair_count": 80.0,
+            "unique_score_count": 9.0,
+            "same_state_score_gap": 0.03,
+            "score_spread": 0.02,
+        },
+    )
+    assert cmp_result == -1
+    assert reason == "legacy_rejected_collapse_floor"
+
+
 def test_world_predictor_does_not_apply_confidence_risk_scaling():
     class _DummyTensorizer:
         def tensorize_inference(self, history_scene, action_id):
@@ -616,6 +788,10 @@ def test_world_pair_ft_source_mix_uses_configured_stage4_mix_frequency():
     report = dict(trainer.last_pair_ft_report or {})
     source_mix = dict(report.get("world_pair_ft_source_mix", {}) or {})
     assert source_mix.get("stage4_mix_every_n_steps") == 2
+    assert report.get("selection_path") == "legacy_tieaware"
+    assert report.get("selection_reason") == "pair_ft_skipped_or_no_pairs"
+    assert "best_epoch_stage1_unique" in report
+    assert "best_epoch_eval_unique" in report
 
 
 def test_world_pair_ft_source_mix_stage4_mix_frequency_is_clamped_to_one():

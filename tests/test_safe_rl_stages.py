@@ -2406,6 +2406,10 @@ def test_stage2_report_includes_pair_finetune_metadata(monkeypatch):
                         "stage1_probe_score_gap_p90": 0.020,
                         "stage1_probe_below_score_margin_count": 2.0,
                         "stage1_probe_below_score_margin_fraction": 0.6666667,
+                        "stage1_probe_eval_pair_ranking_accuracy": 0.68,
+                        "stage1_probe_eval_same_state_score_gap": 0.021,
+                        "stage1_probe_eval_score_spread": 0.016,
+                        "stage1_probe_eval_unique_score_count": 16.0,
                     },
                 ],
                 "resolution_space": "score",
@@ -2429,6 +2433,10 @@ def test_stage2_report_includes_pair_finetune_metadata(monkeypatch):
                 "world_pair_ft_best_epoch": 1,
                 "world_pair_ft_best_metrics": {"pair_ranking_accuracy": 0.75, "same_state_score_gap": 0.05},
                 "world_pair_ft_restored_best": True,
+                "selection_path": "legacy_tieaware",
+                "selection_reason": "legacy_stage1_probe_unique_higher",
+                "best_epoch_stage1_unique": 17.0,
+                "best_epoch_eval_unique": 22.0,
             },
             "world_pair_ft_source_mix": {
                 "stage5_steps": 3,
@@ -2503,11 +2511,19 @@ def test_stage2_report_includes_pair_finetune_metadata(monkeypatch):
     assert world_epoch_metrics[0]["stage4_aux_score_gap_mean"] == pytest.approx(0.0)
     assert world_epoch_metrics[0]["stage1_probe_active_pair_count"] == pytest.approx(0.0)
     assert world_epoch_metrics[0]["stage1_probe_score_gap_mean"] == pytest.approx(0.0)
+    assert any("stage1_probe_eval_pair_ranking_accuracy" in item for item in world_epoch_metrics)
+    assert any("stage1_probe_eval_same_state_score_gap" in item for item in world_epoch_metrics)
+    assert any("stage1_probe_eval_score_spread" in item for item in world_epoch_metrics)
+    assert any("stage1_probe_eval_unique_score_count" in item for item in world_epoch_metrics)
     assert world_epoch_metrics[1]["stage4_aux_active_pair_count"] == pytest.approx(2.0)
     assert world_epoch_metrics[1]["stage4_aux_logit_gap_mean"] == pytest.approx(0.11)
     assert world_epoch_metrics[1]["stage4_aux_score_gap_mean"] == pytest.approx(0.022)
     assert world_epoch_metrics[1]["stage1_probe_active_pair_count"] == pytest.approx(3.0)
     assert world_epoch_metrics[1]["stage1_probe_score_gap_mean"] == pytest.approx(0.014)
+    assert world_epoch_metrics[1]["stage1_probe_eval_pair_ranking_accuracy"] == pytest.approx(0.68)
+    assert world_epoch_metrics[1]["stage1_probe_eval_same_state_score_gap"] == pytest.approx(0.021)
+    assert world_epoch_metrics[1]["stage1_probe_eval_score_spread"] == pytest.approx(0.016)
+    assert world_epoch_metrics[1]["stage1_probe_eval_unique_score_count"] == pytest.approx(16.0)
     assert report["pair_finetune_metrics"]["world"]["resolution_space"] == "score"
     assert report["pair_finetune_metrics"]["world"]["ignored_legacy_logit_margin"] == pytest.approx(0.14)
     assert report["pair_finetune_metrics"]["world"]["stage1_resolution_space"] == "score"
@@ -2515,6 +2531,10 @@ def test_stage2_report_includes_pair_finetune_metadata(monkeypatch):
     assert report["pair_finetune_metrics"]["world"]["pair_ft_stage1_resolution_loss_weight"] == pytest.approx(0.01)
     assert report["world_pair_ft_best_epoch"] == 1
     assert report["world_pair_ft_restored_best"] is True
+    assert report["pair_finetune_metrics"]["world"]["selection_path"] == "legacy_tieaware"
+    assert report["pair_finetune_metrics"]["world"]["selection_reason"] == "legacy_stage1_probe_unique_higher"
+    assert report["pair_finetune_metrics"]["world"]["best_epoch_stage1_unique"] == pytest.approx(17.0)
+    assert report["pair_finetune_metrics"]["world"]["best_epoch_eval_unique"] == pytest.approx(22.0)
     assert report["world_pair_finetune_mode"] == "fallback_all_pairs"
     assert report["stage5_requirement_met"] is True
     assert report["world_pair_gate_degraded"] is False

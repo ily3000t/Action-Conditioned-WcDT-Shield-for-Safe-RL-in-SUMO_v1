@@ -634,6 +634,10 @@ class WorldModelTrainer:
                 'world_pair_ft_best_epoch': -1,
                 'world_pair_ft_best_metrics': dict(before_stage5_metrics),
                 'world_pair_ft_restored_best': False,
+                'selection_path': 'legacy_tieaware',
+                'selection_reason': 'pair_ft_skipped_or_no_pairs',
+                'best_epoch_stage1_unique': float((before_stage1_probe_metrics or {}).get('unique_score_count', 0.0)),
+                'best_epoch_eval_unique': float((before_stage5_metrics or {}).get('unique_score_count', 0.0)),
             }
             return self.last_pair_metrics
 
@@ -677,14 +681,21 @@ class WorldModelTrainer:
         source_mix['phase_b_epochs'] = int(phase_b_epochs)
         best_eval_pairs = stage5_pair_samples or stage1_probe_pair_samples or pair_samples
         initial_metrics = dict(self.evaluate_pairs(best_eval_pairs))
+        initial_stage1_probe_metrics = dict(self.evaluate_pairs(stage1_probe_pair_samples))
         legacy_best_metrics = dict(initial_metrics)
+        legacy_best_stage1_probe_metrics = dict(initial_stage1_probe_metrics)
         legacy_best_epoch = -1
+        legacy_best_reason = 'legacy_initial_metrics'
         legacy_best_state = {name: tensor.detach().cpu().clone() for name, tensor in self.model.state_dict().items()}
         eligible_best_metrics: Optional[Dict[str, float]] = None
+        eligible_best_stage1_probe_metrics: Optional[Dict[str, float]] = None
         eligible_best_epoch = -1
+        eligible_best_reason = 'eligible_not_available'
         eligible_best_state: Optional[Dict[str, torch.Tensor]] = None
         if self._is_epoch_metrics_eligible_for_unique_guard(initial_metrics):
             eligible_best_metrics = dict(initial_metrics)
+            eligible_best_stage1_probe_metrics = dict(initial_stage1_probe_metrics)
+            eligible_best_reason = 'eligible_initial_metrics'
             eligible_best_state = {name: tensor.detach().cpu().clone() for name, tensor in self.model.state_dict().items()}
         patience = max(0, int(getattr(self.config, 'pair_ft_patience', 0) or 0))
         epochs_without_improvement = 0
@@ -917,12 +928,25 @@ class WorldModelTrainer:
                     ),
                 }
                 eval_metrics = self.evaluate_pairs(best_eval_pairs)
+                eval_stage1_probe_metrics = self.evaluate_pairs(stage1_probe_pair_samples)
                 epoch_summary.update(
                     {
                         'eval_pair_ranking_accuracy': float(eval_metrics.get('pair_ranking_accuracy', 0.0)),
                         'eval_same_state_score_gap': float(eval_metrics.get('same_state_score_gap', 0.0)),
                         'eval_score_spread': float(eval_metrics.get('score_spread', 0.0)),
                         'eval_unique_score_count': float(eval_metrics.get('unique_score_count', 0.0)),
+                        'stage1_probe_eval_pair_ranking_accuracy': float(
+                            eval_stage1_probe_metrics.get('pair_ranking_accuracy', 0.0)
+                        ),
+                        'stage1_probe_eval_same_state_score_gap': float(
+                            eval_stage1_probe_metrics.get('same_state_score_gap', 0.0)
+                        ),
+                        'stage1_probe_eval_score_spread': float(
+                            eval_stage1_probe_metrics.get('score_spread', 0.0)
+                        ),
+                        'stage1_probe_eval_unique_score_count': float(
+                            eval_stage1_probe_metrics.get('unique_score_count', 0.0)
+                        ),
                     }
                 )
                 epoch_metrics.append(epoch_summary)
@@ -961,11 +985,39 @@ class WorldModelTrainer:
                     tb_writer.add_scalar('eval/epoch_same_state_score_gap', epoch_summary['eval_same_state_score_gap'], epoch_idx)
                     tb_writer.add_scalar('eval/epoch_score_spread', epoch_summary['eval_score_spread'], epoch_idx)
                     tb_writer.add_scalar('eval/epoch_unique_score_count', epoch_summary['eval_unique_score_count'], epoch_idx)
+                    tb_writer.add_scalar(
+                        'eval/epoch_stage1_probe_eval_pair_ranking_accuracy',
+                        epoch_summary['stage1_probe_eval_pair_ranking_accuracy'],
+                        epoch_idx,
+                    )
+                    tb_writer.add_scalar(
+                        'eval/epoch_stage1_probe_eval_same_state_score_gap',
+                        epoch_summary['stage1_probe_eval_same_state_score_gap'],
+                        epoch_idx,
+                    )
+                    tb_writer.add_scalar(
+                        'eval/epoch_stage1_probe_eval_score_spread',
+                        epoch_summary['stage1_probe_eval_score_spread'],
+                        epoch_idx,
+                    )
+                    tb_writer.add_scalar(
+                        'eval/epoch_stage1_probe_eval_unique_score_count',
+                        epoch_summary['stage1_probe_eval_unique_score_count'],
+                        epoch_idx,
+                    )
 
                 improved_for_patience = False
-                if self._is_better_pair_ft_metrics(eval_metrics, legacy_best_metrics):
+                legacy_cmp, legacy_reason = self._compare_pair_ft_metrics_for_legacy_selection(
+                    current_eval_metrics=eval_metrics,
+                    best_eval_metrics=legacy_best_metrics,
+                    current_stage1_probe_metrics=eval_stage1_probe_metrics,
+                    best_stage1_probe_metrics=legacy_best_stage1_probe_metrics,
+                )
+                if legacy_cmp > 0:
                     legacy_best_metrics = dict(eval_metrics)
+                    legacy_best_stage1_probe_metrics = dict(eval_stage1_probe_metrics)
                     legacy_best_epoch = int(epoch_idx)
+                    legacy_best_reason = str(legacy_reason or 'legacy_tieaware_improved')
                     legacy_best_state = {name: tensor.detach().cpu().clone() for name, tensor in self.model.state_dict().items()}
                     if eligible_best_metrics is None:
                         improved_for_patience = True
@@ -976,7 +1028,9 @@ class WorldModelTrainer:
                         or self._compare_pair_ft_metrics_for_selection(eval_metrics, eligible_best_metrics) > 0
                     ):
                         eligible_best_metrics = dict(eval_metrics)
+                        eligible_best_stage1_probe_metrics = dict(eval_stage1_probe_metrics)
                         eligible_best_epoch = int(epoch_idx)
+                        eligible_best_reason = 'eligible_tieaware_improved'
                         eligible_best_state = {
                             name: tensor.detach().cpu().clone()
                             for name, tensor in self.model.state_dict().items()
@@ -993,11 +1047,19 @@ class WorldModelTrainer:
         if eligible_best_state is not None and eligible_best_metrics is not None:
             selected_best_state = eligible_best_state
             selected_best_metrics = eligible_best_metrics
+            selected_best_stage1_probe_metrics = dict(
+                eligible_best_stage1_probe_metrics or self._empty_pair_metrics()
+            )
             selected_best_epoch = int(eligible_best_epoch)
+            selection_path = 'eligible'
+            selection_reason = str(eligible_best_reason or 'eligible_selected')
         else:
             selected_best_state = legacy_best_state
             selected_best_metrics = legacy_best_metrics
+            selected_best_stage1_probe_metrics = dict(legacy_best_stage1_probe_metrics)
             selected_best_epoch = int(legacy_best_epoch)
+            selection_path = 'legacy_tieaware'
+            selection_reason = str(legacy_best_reason or 'legacy_tieaware_selected')
 
         self.model.load_state_dict(selected_best_state)
         self._restore_grad_state(grad_state)
@@ -1081,6 +1143,12 @@ class WorldModelTrainer:
             'world_pair_ft_best_epoch': int(selected_best_epoch),
             'world_pair_ft_best_metrics': dict(selected_best_metrics),
             'world_pair_ft_restored_best': True,
+            'selection_path': str(selection_path),
+            'selection_reason': str(selection_reason),
+            'best_epoch_stage1_unique': float(
+                (selected_best_stage1_probe_metrics or {}).get('unique_score_count', 0.0)
+            ),
+            'best_epoch_eval_unique': float((selected_best_metrics or {}).get('unique_score_count', 0.0)),
         }
         if tb_writer is not None:
             tb_writer.add_scalar('summary/before_pair_ranking_accuracy', float(before_pair_metrics.get('pair_ranking_accuracy', 0.0)), 0)
@@ -1170,6 +1238,82 @@ class WorldModelTrainer:
         if current_spread < best_spread - 1e-9:
             return -1
         return 0
+
+    def _compare_pair_ft_metrics_for_legacy_selection(
+        self,
+        current_eval_metrics: Dict[str, float],
+        best_eval_metrics: Dict[str, float],
+        current_stage1_probe_metrics: Dict[str, float],
+        best_stage1_probe_metrics: Dict[str, float],
+    ) -> Tuple[int, str]:
+        min_spread_floor = float(getattr(self.config, 'pair_ft_min_score_spread_floor', 0.0) or 0.0)
+        min_gap_floor = float(getattr(self.config, 'pair_ft_min_same_state_gap_floor', 0.0) or 0.0)
+        current_spread = float((current_eval_metrics or {}).get('score_spread', 0.0))
+        best_spread = float((best_eval_metrics or {}).get('score_spread', 0.0))
+        current_gap = float((current_eval_metrics or {}).get('same_state_score_gap', 0.0))
+        best_gap = float((best_eval_metrics or {}).get('same_state_score_gap', 0.0))
+        current_collapsed = (current_spread < min_spread_floor) or (current_gap < min_gap_floor)
+        best_collapsed = (best_spread < min_spread_floor) or (best_gap < min_gap_floor)
+        if current_collapsed and not best_collapsed:
+            return -1, 'legacy_rejected_collapse_floor'
+        if not current_collapsed and best_collapsed:
+            return 1, 'legacy_noncollapsed_over_collapsed'
+
+        tie_epsilon = float(getattr(self.config, 'pair_ft_selection_accuracy_tie_epsilon', 1e-4) or 1e-4)
+        current_acc = float((current_eval_metrics or {}).get('pair_ranking_accuracy', 0.0))
+        best_acc = float((best_eval_metrics or {}).get('pair_ranking_accuracy', 0.0))
+        if current_acc > best_acc + tie_epsilon:
+            return 1, 'legacy_accuracy_above_tie_epsilon'
+        if current_acc < best_acc - tie_epsilon:
+            return -1, 'legacy_accuracy_below_tie_epsilon'
+
+        stage1_current_available = self._metrics_have_pairs(current_stage1_probe_metrics)
+        stage1_best_available = self._metrics_have_pairs(best_stage1_probe_metrics)
+        if stage1_current_available and stage1_best_available:
+            tie_cmp, tie_reason = self._compare_unique_gap_spread_metrics(
+                current_metrics=current_stage1_probe_metrics,
+                best_metrics=best_stage1_probe_metrics,
+            )
+            if tie_cmp != 0:
+                return tie_cmp, f'legacy_stage1_probe_{tie_reason}'
+
+        tie_cmp, tie_reason = self._compare_unique_gap_spread_metrics(
+            current_metrics=current_eval_metrics,
+            best_metrics=best_eval_metrics,
+        )
+        if tie_cmp != 0:
+            return tie_cmp, f'legacy_eval_{tie_reason}'
+        return 0, 'legacy_tie_no_change'
+
+    def _metrics_have_pairs(self, metrics: Optional[Dict[str, float]]) -> bool:
+        return float((metrics or {}).get('pair_count', 0.0)) > 0.0
+
+    def _compare_unique_gap_spread_metrics(
+        self,
+        current_metrics: Dict[str, float],
+        best_metrics: Dict[str, float],
+    ) -> Tuple[int, str]:
+        current_unique = float((current_metrics or {}).get('unique_score_count', 0.0))
+        best_unique = float((best_metrics or {}).get('unique_score_count', 0.0))
+        if current_unique > best_unique + 1e-9:
+            return 1, 'unique_higher'
+        if current_unique < best_unique - 1e-9:
+            return -1, 'unique_lower'
+
+        current_gap = float((current_metrics or {}).get('same_state_score_gap', 0.0))
+        best_gap = float((best_metrics or {}).get('same_state_score_gap', 0.0))
+        if current_gap > best_gap + 1e-9:
+            return 1, 'same_state_gap_higher'
+        if current_gap < best_gap - 1e-9:
+            return -1, 'same_state_gap_lower'
+
+        current_spread = float((current_metrics or {}).get('score_spread', 0.0))
+        best_spread = float((best_metrics or {}).get('score_spread', 0.0))
+        if current_spread > best_spread + 1e-9:
+            return 1, 'score_spread_higher'
+        if current_spread < best_spread - 1e-9:
+            return -1, 'score_spread_lower'
+        return 0, 'metrics_equal'
 
     def _spread_eligible_pair_count(self, pair_samples: Sequence[RiskPairSample]) -> int:
         count = 0
