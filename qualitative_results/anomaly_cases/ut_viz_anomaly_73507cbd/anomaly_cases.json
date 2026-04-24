@@ -1,0 +1,52 @@
+{
+  "run_id": "ut_viz_anomaly_73507cbd",
+  "trace_dir": "safe_rl_output\\test_artifacts\\viz_anomaly_run_70a1c059\\ut_viz_anomaly_73507cbd\\reports\\stage5_trace_capture_default",
+  "rules_path": "safe_rl\\visualization\\anomaly_rules.default.yaml",
+  "generated_at": "2026-04-24T05:05:19.588130+00:00",
+  "total_pairs_seen": 2,
+  "selected_count": 1,
+  "selection_mode": "rule_match",
+  "rule_hit_counts": {
+    "heading_anomaly": 1,
+    "high_blocked_low_replacement": 1,
+    "high_near_risk": 1,
+    "low_task_reward": 1,
+    "negative_vx_anomaly": 1
+  },
+  "cases": [
+    {
+      "pair_file": "safe_rl_output\\test_artifacts\\viz_anomaly_run_70a1c059\\ut_viz_anomaly_73507cbd\\reports\\stage5_trace_capture_default\\pair_00_seed_42.json",
+      "pair_index": 0,
+      "seed": 42,
+      "distilled_unavailable": true,
+      "matched_rules": [
+        "high_blocked_low_replacement",
+        "high_near_risk",
+        "low_task_reward",
+        "heading_anomaly",
+        "negative_vx_anomaly"
+      ],
+      "metrics": {
+        "step_count": 90,
+        "shield_blocked_steps": 90,
+        "replacement_count": 0,
+        "replacement_rate": 0.0,
+        "near_risk_step_rate": 1.0,
+        "min_ttc": 1.2,
+        "min_distance": 2.6,
+        "mean_task_reward_baseline": 0.2,
+        "mean_task_reward_shielded": 0.11999999999999998,
+        "mean_task_reward_delta": -0.08000000000000003,
+        "mean_penalized_reward_baseline": 0.2,
+        "mean_penalized_reward_shielded": 0.11999999999999998,
+        "mean_penalized_reward_delta": -0.08000000000000003,
+        "heading_abs_deg_max": 90.0,
+        "heading_abnormal_consecutive_steps": 90,
+        "heading_jump_count": 0,
+        "negative_vx_consecutive_steps": 90
+      },
+      "score": 585.6,
+      "rank": 1
+    }
+  ]
+}

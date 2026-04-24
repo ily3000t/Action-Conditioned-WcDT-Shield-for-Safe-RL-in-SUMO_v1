@@ -1,0 +1,20 @@
+{
+  "run_id": "ut_viz_export_021b79ae",
+  "trace_dir": "safe_rl_output\\test_artifacts\\viz_export_run_275aa08c\\ut_viz_export_021b79ae\\reports\\stage5_trace_capture_default",
+  "generated_at": "2026-04-24T05:05:19.670667+00:00",
+  "requested_top_k": 1,
+  "candidate_pair_count": 1,
+  "selected_pair_count": 1,
+  "exported_count": 1,
+  "failed_count": 0,
+  "exported": [
+    {
+      "pair_file": "safe_rl_output\\test_artifacts\\viz_export_run_275aa08c\\ut_viz_export_021b79ae\\reports\\stage5_trace_capture_default\\pair_00_seed_42.json",
+      "pair_index": 0,
+      "seed": 42,
+      "gif_path": "qualitative_results\\stage5_replays\\ut_viz_export_021b79ae\\pair_000_seed_42.gif",
+      "distilled_unavailable": true
+    }
+  ],
+  "failed": []
+}

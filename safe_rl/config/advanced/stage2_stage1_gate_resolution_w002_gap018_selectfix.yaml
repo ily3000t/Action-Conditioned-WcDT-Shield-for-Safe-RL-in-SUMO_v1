@@ -1,0 +1,11 @@
+# Stage2-only Stage1 main-gate resolution (7A3, single-variable on min score gap).
+# Baseline anchor remains: w=0.02 + select-fix.
+# Only change vs w002_selectfix: stage1 min score gap 0.015 -> 0.018.
+
+world_model:
+  pair_ft_stage1_resolution_loss_weight: 0.02
+  pair_ft_stage1_resolution_min_score_gap: 0.018
+  pair_ft_selection_accuracy_tie_epsilon: 0.01
+
+tensorboard:
+  run_name: "stage2_stage1_gate_resolution_w002_gap018_selectfix"

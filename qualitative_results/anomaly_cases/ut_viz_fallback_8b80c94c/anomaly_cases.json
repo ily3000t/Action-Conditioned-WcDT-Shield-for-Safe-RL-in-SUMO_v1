@@ -1,0 +1,44 @@
+{
+  "run_id": "ut_viz_fallback_8b80c94c",
+  "trace_dir": "safe_rl_output\\test_artifacts\\viz_fallback_run_a74a1af1\\ut_viz_fallback_8b80c94c\\reports\\stage5_trace_capture_default",
+  "rules_path": "safe_rl\\visualization\\anomaly_rules.default.yaml",
+  "generated_at": "2026-04-24T05:05:19.675669+00:00",
+  "total_pairs_seen": 1,
+  "selected_count": 1,
+  "selection_mode": "fallback_top_signal",
+  "rule_hit_counts": {
+    "fallback_top_signal": 1
+  },
+  "cases": [
+    {
+      "pair_file": "safe_rl_output\\test_artifacts\\viz_fallback_run_a74a1af1\\ut_viz_fallback_8b80c94c\\reports\\stage5_trace_capture_default\\pair_00_seed_42.json",
+      "pair_index": 0,
+      "seed": 42,
+      "distilled_unavailable": false,
+      "matched_rules": [
+        "fallback_top_signal"
+      ],
+      "metrics": {
+        "step_count": 1,
+        "shield_blocked_steps": 0,
+        "replacement_count": 0,
+        "replacement_rate": 0.0,
+        "near_risk_step_rate": 0.0,
+        "min_ttc": 8.0,
+        "min_distance": 15.0,
+        "mean_task_reward_baseline": 0.2,
+        "mean_task_reward_shielded": 0.2,
+        "mean_task_reward_delta": 0.0,
+        "mean_penalized_reward_baseline": 0.2,
+        "mean_penalized_reward_shielded": 0.19,
+        "mean_penalized_reward_delta": -0.010000000000000009,
+        "heading_abs_deg_max": 90.0,
+        "heading_abnormal_consecutive_steps": 1,
+        "heading_jump_count": 0,
+        "negative_vx_consecutive_steps": 1
+      },
+      "score": 1.200000000000001,
+      "rank": 1
+    }
+  ]
+}
