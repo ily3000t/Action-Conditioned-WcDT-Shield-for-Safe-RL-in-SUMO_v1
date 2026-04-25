@@ -107,6 +107,10 @@ class WorldModelConfig:
     pair_ft_resolution_min_logit_gap: float = 0.14
     pair_ft_stage1_resolution_loss_weight: float = 0.0
     pair_ft_stage1_resolution_min_score_gap: float = 0.015
+    pair_ft_stage1_resolution_mode: str = "fixed"
+    pair_ft_stage1_resolution_alpha: float = 0.2
+    pair_ft_stage1_resolution_max_score_gap: float = 0.05
+    pair_ft_stage1_resolution_apply_trusted_only: bool = True
     min_spread_eligible_pairs_for_gate_source: int = 128
     stage4_aux_min_high_gap_pairs: int = 128
     stage4_aux_unique_floor: int = 12

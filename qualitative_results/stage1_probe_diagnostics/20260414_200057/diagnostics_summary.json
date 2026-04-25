@@ -1,0 +1,125 @@
+{
+  "run_id": "20260414_200057",
+  "baseline_run_id": "",
+  "generated_at": "2026-04-25T02:23:17.695259+00:00",
+  "config_path": "safe_rl/config/default_safe_rl.yaml",
+  "device": "cpu",
+  "batch_size": 256,
+  "max_pairs": null,
+  "gap_bins": [
+    {
+      "low": 0.008,
+      "high": 0.012,
+      "label": "gap_0.008_0.012"
+    },
+    {
+      "low": 0.012,
+      "high": 0.02,
+      "label": "gap_0.012_0.020"
+    },
+    {
+      "low": 0.02,
+      "high": "inf",
+      "label": "gap_0.020_inf"
+    }
+  ],
+  "current": {
+    "record_count": 809,
+    "summary": {
+      "overall": {
+        "count": 809,
+        "target_gap_p50": 0.19696800410747528,
+        "target_gap_p90": 0.3058725893497467,
+        "predicted_gap_p50": 0.013598069548606873,
+        "predicted_gap_p90": 0.02531750500202179,
+        "predicted_gap_mean": 0.015509392134845257,
+        "compression_mean": 0.1748393177986145,
+        "unique_score_count": 9,
+        "score_hist_bin_occupancy": 1,
+        "score_hist_bins_total": 20
+      },
+      "trusted_for_spread": {
+        "count": 611,
+        "target_gap_p50": 0.22987903654575348,
+        "target_gap_p90": 0.3223918378353119,
+        "predicted_gap_p50": 0.013698622584342957,
+        "predicted_gap_p90": 0.025317519903182983,
+        "predicted_gap_mean": 0.01606544852256775,
+        "compression_mean": 0.2105935662984848,
+        "unique_score_count": 9,
+        "score_hist_bin_occupancy": 1,
+        "score_hist_bins_total": 20
+      },
+      "by_gap_bin": {
+        "gap_0.008_0.012": {
+          "count": 48,
+          "target_gap_p50": 0.008645353838801384,
+          "target_gap_p90": 0.010760842822492123,
+          "predicted_gap_p50": 0.012313097715377808,
+          "predicted_gap_p90": 0.021809209138154984,
+          "predicted_gap_mean": 0.01183133665472269,
+          "compression_mean": -0.0025974621530622244,
+          "unique_score_count": 9,
+          "score_hist_bin_occupancy": 1,
+          "score_hist_bins_total": 20
+        },
+        "gap_0.012_0.020": {
+          "count": 3,
+          "target_gap_p50": 0.01265315804630518,
+          "target_gap_p90": 0.01265315804630518,
+          "predicted_gap_p50": 0.013598054647445679,
+          "predicted_gap_p90": 0.02289317175745964,
+          "predicted_gap_mean": 0.012971858493983746,
+          "compression_mean": -0.00031870012753643095,
+          "unique_score_count": 4,
+          "score_hist_bin_occupancy": 1,
+          "score_hist_bins_total": 20
+        },
+        "gap_0.020_inf": {
+          "count": 717,
+          "target_gap_p50": 0.202822744846344,
+          "target_gap_p90": 0.31123748421669006,
+          "predicted_gap_p50": 0.013698622584342957,
+          "predicted_gap_p90": 0.025317519903182983,
+          "predicted_gap_mean": 0.01601679064333439,
+          "compression_mean": 0.19771212339401245,
+          "unique_score_count": 9,
+          "score_hist_bin_occupancy": 1,
+          "score_hist_bins_total": 20
+        }
+      }
+    },
+    "stage2_snapshot": {
+      "selection_path": "legacy_tieaware",
+      "selection_reason": "legacy_stage1_probe_unique_higher",
+      "best_epoch_stage1_unique": 10.0,
+      "best_epoch_eval_unique": 10.0,
+      "stage1_probe_unique_after": 10.0,
+      "world_unique_score_count": 10.0,
+      "model_quality_status": "critical",
+      "model_quality_metric_source": "stage1_probe",
+      "final_epoch_stage1_probe_below_score_margin_fraction": 0.6973039215686274
+    },
+    "plots": {
+      "target_gap_hist_overall": "E:\\wcdt_all\\WcDT\\qualitative_results\\stage1_probe_diagnostics\\20260414_200057\\current_target_gap_hist_overall.png",
+      "target_vs_pred_gap_overall": "E:\\wcdt_all\\WcDT\\qualitative_results\\stage1_probe_diagnostics\\20260414_200057\\current_target_vs_pred_gap_overall.png",
+      "risk_midpoint_vs_pred_gap_overall": "E:\\wcdt_all\\WcDT\\qualitative_results\\stage1_probe_diagnostics\\20260414_200057\\current_risk_midpoint_vs_pred_gap_overall.png",
+      "risk_score_hist_overall": "E:\\wcdt_all\\WcDT\\qualitative_results\\stage1_probe_diagnostics\\20260414_200057\\current_risk_score_hist_overall.png",
+      "target_gap_hist_gap_0.008_0.012": "E:\\wcdt_all\\WcDT\\qualitative_results\\stage1_probe_diagnostics\\20260414_200057\\current_target_gap_hist_gap_0.008_0.012.png",
+      "target_vs_pred_gap_gap_0.008_0.012": "E:\\wcdt_all\\WcDT\\qualitative_results\\stage1_probe_diagnostics\\20260414_200057\\current_target_vs_pred_gap_gap_0.008_0.012.png",
+      "risk_midpoint_vs_pred_gap_gap_0.008_0.012": "E:\\wcdt_all\\WcDT\\qualitative_results\\stage1_probe_diagnostics\\20260414_200057\\current_risk_midpoint_vs_pred_gap_gap_0.008_0.012.png",
+      "risk_score_hist_gap_0.008_0.012": "E:\\wcdt_all\\WcDT\\qualitative_results\\stage1_probe_diagnostics\\20260414_200057\\current_risk_score_hist_gap_0.008_0.012.png",
+      "target_gap_hist_gap_0.012_0.020": "E:\\wcdt_all\\WcDT\\qualitative_results\\stage1_probe_diagnostics\\20260414_200057\\current_target_gap_hist_gap_0.012_0.020.png",
+      "target_vs_pred_gap_gap_0.012_0.020": "E:\\wcdt_all\\WcDT\\qualitative_results\\stage1_probe_diagnostics\\20260414_200057\\current_target_vs_pred_gap_gap_0.012_0.020.png",
+      "risk_midpoint_vs_pred_gap_gap_0.012_0.020": "E:\\wcdt_all\\WcDT\\qualitative_results\\stage1_probe_diagnostics\\20260414_200057\\current_risk_midpoint_vs_pred_gap_gap_0.012_0.020.png",
+      "risk_score_hist_gap_0.012_0.020": "E:\\wcdt_all\\WcDT\\qualitative_results\\stage1_probe_diagnostics\\20260414_200057\\current_risk_score_hist_gap_0.012_0.020.png",
+      "target_gap_hist_gap_0.020_inf": "E:\\wcdt_all\\WcDT\\qualitative_results\\stage1_probe_diagnostics\\20260414_200057\\current_target_gap_hist_gap_0.020_inf.png",
+      "target_vs_pred_gap_gap_0.020_inf": "E:\\wcdt_all\\WcDT\\qualitative_results\\stage1_probe_diagnostics\\20260414_200057\\current_target_vs_pred_gap_gap_0.020_inf.png",
+      "risk_midpoint_vs_pred_gap_gap_0.020_inf": "E:\\wcdt_all\\WcDT\\qualitative_results\\stage1_probe_diagnostics\\20260414_200057\\current_risk_midpoint_vs_pred_gap_gap_0.020_inf.png",
+      "risk_score_hist_gap_0.020_inf": "E:\\wcdt_all\\WcDT\\qualitative_results\\stage1_probe_diagnostics\\20260414_200057\\current_risk_score_hist_gap_0.020_inf.png"
+    }
+  },
+  "baseline": {},
+  "comparison_delta": {},
+  "comparison_plots": {}
+}

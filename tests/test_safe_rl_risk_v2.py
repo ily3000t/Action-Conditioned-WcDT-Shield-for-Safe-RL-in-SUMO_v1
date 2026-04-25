@@ -661,6 +661,7 @@ def test_world_stage1_resolution_loss_only_applies_to_stage1_probe_pairs():
             multimodal=2,
             pair_ft_stage1_resolution_min_score_gap=0.015,
             pair_ft_stage1_resolution_loss_weight=0.01,
+            pair_ft_stage1_resolution_apply_trusted_only=False,
         ),
         history_steps=2,
         device="cpu",
@@ -731,12 +732,18 @@ def test_world_stage1_resolution_loss_only_applies_to_stage1_probe_pairs():
     assert float(resolution_on.item()) > 0.0
     assert diag_on["stage1_probe_active_pair_count"] == 1
     assert diag_on["stage1_resolution_space"] == "score"
+    assert diag_on["stage1_resolution_mode"] == "fixed"
     assert diag_on["pair_ft_stage1_resolution_min_score_gap"] == pytest.approx(0.015, abs=1e-6)
     assert diag_on["stage1_probe_score_gap_mean"] == pytest.approx(0.012497, abs=1e-4)
     assert diag_on["stage1_probe_score_gap_p50"] == pytest.approx(diag_on["stage1_probe_score_gap_mean"], abs=1e-9)
     assert diag_on["stage1_probe_score_gap_p90"] == pytest.approx(diag_on["stage1_probe_score_gap_mean"], abs=1e-9)
+    assert diag_on["stage1_probe_margin_mean"] == pytest.approx(0.015, abs=1e-6)
+    assert diag_on["stage1_probe_margin_p50"] == pytest.approx(0.015, abs=1e-6)
+    assert diag_on["stage1_probe_margin_p90"] == pytest.approx(0.015, abs=1e-6)
+    assert diag_on["stage1_probe_pred_gap_to_margin_ratio_mean"] == pytest.approx(0.012497 / 0.015, abs=1e-3)
     assert diag_on["stage1_probe_below_score_margin_count"] == 1
     assert diag_on["stage1_probe_below_score_margin_fraction"] == pytest.approx(1.0, abs=1e-6)
+    assert diag_on["stage1_probe_below_adaptive_margin_fraction"] == pytest.approx(1.0, abs=1e-6)
     assert float(diag_on["stage1_probe_resolution_loss"]) > 0.0
     assert diag_on["stage4_aux_active_pair_count"] == 0
     assert float(diag_on["stage4_aux_resolution_loss"]) == pytest.approx(0.0, abs=1e-6)
@@ -750,6 +757,103 @@ def test_world_stage1_resolution_loss_only_applies_to_stage1_probe_pairs():
     assert diag_disabled["stage1_probe_active_pair_count"] == 0
     assert diag_disabled["stage1_probe_score_gap_mean"] == pytest.approx(0.0, abs=1e-6)
     assert diag_disabled["stage1_probe_below_score_margin_fraction"] == pytest.approx(0.0, abs=1e-6)
+    assert diag_disabled["stage1_probe_below_adaptive_margin_fraction"] == pytest.approx(0.0, abs=1e-6)
+
+
+def test_world_stage1_adaptive_resolution_margin_respects_clip_and_trusted_gate():
+    from safe_rl.models.world_model import WorldModelTrainer
+
+    trainer = WorldModelTrainer(
+        config=WorldModelConfig(
+            hidden_dim=64,
+            future_steps=2,
+            multimodal=2,
+            pair_ft_stage1_resolution_loss_weight=0.01,
+            pair_ft_stage1_resolution_min_score_gap=0.018,
+            pair_ft_stage1_resolution_mode="adaptive",
+            pair_ft_stage1_resolution_alpha=0.2,
+            pair_ft_stage1_resolution_max_score_gap=0.05,
+            pair_ft_stage1_resolution_apply_trusted_only=True,
+        ),
+        history_steps=2,
+        device="cpu",
+    )
+
+    class _AdaptiveModel(torch.nn.Module):
+        def forward(self, batch):
+            actions = batch["candidate_action"].to(torch.float32)
+            logits = torch.where(actions == 4.0, torch.full_like(actions, 0.00), torch.full_like(actions, 0.05))
+            probs = torch.sigmoid(logits)
+            bs = int(actions.shape[0])
+            return {
+                "traj": torch.zeros((bs, 1, 1, 1, 5), dtype=torch.float32),
+                "confidence": torch.zeros((bs, 1, 2), dtype=torch.float32),
+                "risk_type_logits": torch.zeros((bs, 3), dtype=torch.float32),
+                "risk_score_logit": logits,
+                "risk_score": probs,
+                "uncertainty": torch.zeros((bs,), dtype=torch.float32),
+            }
+
+    trainer.model = _AdaptiveModel().to(trainer.device)
+    trusted_low_gap = RiskPairSample(
+        history_scene=_history_scene()[:2],
+        action_a=4,
+        action_b=3,
+        preferred_action=4,
+        source="stage1_probe_same_state",
+        weight=1.0,
+        meta={
+            "target_risk_a": 0.30,
+            "target_risk_b": 0.50,
+            "target_gap": 0.01,
+            "trusted_for_spread": True,
+        },
+    )
+    trusted_high_gap = RiskPairSample(
+        history_scene=_history_scene()[:2],
+        action_a=4,
+        action_b=3,
+        preferred_action=4,
+        source="stage1_probe_same_state",
+        weight=1.0,
+        meta={
+            "target_risk_a": 0.30,
+            "target_risk_b": 0.95,
+            "target_gap": 0.40,
+            "trusted_for_spread": True,
+        },
+    )
+    untrusted_pair = RiskPairSample(
+        history_scene=_history_scene()[:2],
+        action_a=4,
+        action_b=3,
+        preferred_action=4,
+        source="stage1_probe_same_state",
+        weight=1.0,
+        meta={
+            "target_risk_a": 0.30,
+            "target_risk_b": 0.95,
+            "target_gap": 0.40,
+            "trusted_for_spread": False,
+        },
+    )
+
+    _, _, resolution_loss, diag = trainer._compute_pair_losses(
+        [trusted_low_gap, trusted_high_gap, untrusted_pair],
+        enable_resolution=False,
+        enable_stage1_resolution=True,
+    )
+    assert float(resolution_loss.item()) > 0.0
+    assert diag["stage1_resolution_mode"] == "adaptive"
+    assert diag["pair_ft_stage1_resolution_alpha"] == pytest.approx(0.2, abs=1e-6)
+    assert diag["pair_ft_stage1_resolution_max_score_gap"] == pytest.approx(0.05, abs=1e-6)
+    assert diag["pair_ft_stage1_resolution_apply_trusted_only"] is True
+    assert diag["stage1_probe_active_pair_count"] == 2
+    assert diag["stage1_probe_margin_mean"] == pytest.approx((0.018 + 0.05) / 2.0, abs=1e-4)
+    assert diag["stage1_probe_margin_p50"] == pytest.approx((0.018 + 0.05) / 2.0, abs=1e-4)
+    assert diag["stage1_probe_margin_p90"] == pytest.approx(0.0468, abs=1e-4)
+    assert diag["stage1_probe_below_adaptive_margin_count"] == 2
+    assert diag["stage1_probe_below_adaptive_margin_fraction"] == pytest.approx(1.0, abs=1e-6)
 
 
 def test_world_evaluate_pairs_restores_train_mode():
