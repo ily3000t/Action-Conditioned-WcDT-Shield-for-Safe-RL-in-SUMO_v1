@@ -2452,12 +2452,24 @@ def test_stage2_report_includes_pair_finetune_metadata(monkeypatch):
                 "selection_reason": "legacy_stage1_probe_unique_higher",
                 "best_epoch_stage1_unique": 17.0,
                 "best_epoch_eval_unique": 22.0,
+                "stage1_tail_enabled": True,
+                "stage1_tail_applied": True,
+                "stage1_tail_epochs_configured": 2,
+                "stage1_tail_epochs_executed": 1,
+                "stage1_tail_pair_count": 12,
+                "world_pair_ft_final_state_source": "selected_best_plus_stage1_tail",
+                "stage1_tail_stage1_probe_unique_before_after": {"before": 15.0, "after": 17.0},
+                "stage1_tail_stage1_probe_score_spread_before_after": {"before": 0.013, "after": 0.016},
+                "stage1_tail_stage1_probe_same_state_gap_before_after": {"before": 0.018, "after": 0.021},
+                "stage1_tail_stage1_probe_pair_ranking_accuracy_before_after": {"before": 0.66, "after": 0.68},
             },
             "world_pair_ft_source_mix": {
                 "stage5_steps": 3,
                 "stage4_steps": 1,
+                "stage1_tail_steps": 2,
                 "stage5_pairs_seen": 3,
                 "stage4_pairs_seen": 1,
+                "stage1_tail_pairs_seen": 2,
                 "stage4_mix_every_n_steps": 4,
                 "stage5_pair_seen_counts": {"p0": 2, "p1": 1},
                 "stage5_pair_cap": 8,
@@ -2491,6 +2503,8 @@ def test_stage2_report_includes_pair_finetune_metadata(monkeypatch):
     assert report["world_pair_ft_trainable_modules"] == ["fusion", "risk_score_head"]
     assert report["world_pair_ft_source_mix"]["stage5_steps"] == 3
     assert report["world_pair_ft_source_mix"]["stage4_steps"] == 1
+    assert report["world_pair_ft_source_mix"]["stage1_tail_steps"] == 2
+    assert report["world_pair_ft_source_mix"]["stage1_tail_pairs_seen"] == 2
     assert report["world_pair_ft_source_mix"]["stage4_mix_every_n_steps"] == 4
     assert report["stage2_pair_source_health"]["status"] == "healthy"
     risk_v2_summary = json.loads(Path(pipeline.risk_v2_eval_summary_path).read_text(encoding="utf-8"))
@@ -2564,6 +2578,16 @@ def test_stage2_report_includes_pair_finetune_metadata(monkeypatch):
     assert report["pair_finetune_metrics"]["world"]["selection_reason"] == "legacy_stage1_probe_unique_higher"
     assert report["pair_finetune_metrics"]["world"]["best_epoch_stage1_unique"] == pytest.approx(17.0)
     assert report["pair_finetune_metrics"]["world"]["best_epoch_eval_unique"] == pytest.approx(22.0)
+    assert report["pair_finetune_metrics"]["world"]["stage1_tail_enabled"] is True
+    assert report["pair_finetune_metrics"]["world"]["stage1_tail_applied"] is True
+    assert report["pair_finetune_metrics"]["world"]["stage1_tail_epochs_configured"] == 2
+    assert report["pair_finetune_metrics"]["world"]["stage1_tail_epochs_executed"] == 1
+    assert report["pair_finetune_metrics"]["world"]["stage1_tail_pair_count"] == 12
+    assert report["pair_finetune_metrics"]["world"]["world_pair_ft_final_state_source"] == "selected_best_plus_stage1_tail"
+    assert report["pair_finetune_metrics"]["world"]["stage1_tail_stage1_probe_unique_before_after"]["after"] == pytest.approx(17.0)
+    assert report["pair_finetune_metrics"]["world"]["stage1_tail_stage1_probe_score_spread_before_after"]["after"] == pytest.approx(0.016)
+    assert report["pair_finetune_metrics"]["world"]["stage1_tail_stage1_probe_same_state_gap_before_after"]["after"] == pytest.approx(0.021)
+    assert report["pair_finetune_metrics"]["world"]["stage1_tail_stage1_probe_pair_ranking_accuracy_before_after"]["after"] == pytest.approx(0.68)
     assert report["world_pair_finetune_mode"] == "fallback_all_pairs"
     assert report["stage5_requirement_met"] is True
     assert report["world_pair_gate_degraded"] is False

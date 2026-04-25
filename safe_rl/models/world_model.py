@@ -509,6 +509,17 @@ class WorldModelTrainer:
                 if str(sample.source) in ('stage4_buffer', 'stage4_candidate_rank')
             ]
         )
+        stage1_tail_apply_trusted_only = bool(
+            getattr(self.config, 'pair_ft_stage1_tail_apply_trusted_only', True)
+        )
+        stage1_tail_epochs = max(
+            0,
+            int(getattr(self.config, 'pair_ft_stage1_tail_epochs', 0) or 0),
+        )
+        stage1_tail_pair_samples = self._filter_stage1_tail_pairs(
+            stage1_probe_pair_samples,
+            trusted_only=stage1_tail_apply_trusted_only,
+        )
         pair_count = int(len(pair_samples))
         replay_sample_count = int(len(replay_samples))
         eval_replay_samples = self._select_pair_ft_eval_samples(replay_samples)
@@ -546,12 +557,15 @@ class WorldModelTrainer:
             'stage5_steps': 0,
             'stage1_probe_steps': 0,
             'stage4_steps': 0,
+            'stage1_tail_steps': 0,
             'stage5_pairs_seen': 0,
             'stage1_probe_pairs_seen': 0,
             'stage4_pairs_seen': 0,
+            'stage1_tail_pairs_seen': 0,
             'stage5_pair_count': int(len(stage5_pair_samples)),
             'stage1_probe_pair_count': int(len(stage1_probe_pair_samples)),
             'stage4_pair_count': int(len(stage4_pair_samples)),
+            'stage1_tail_pair_count': int(len(stage1_tail_pair_samples)),
             'stage4_mix_every_n_steps': int(stage4_mix_every_n_steps),
             'stage5_pair_cap': int(getattr(self.config, 'stage5_pair_max_seen_per_epoch', 0) or 0),
             'stage5_pair_seen_counts': {pair_id: 0 for pair_id in stage5_pair_ids},
@@ -653,6 +667,32 @@ class WorldModelTrainer:
                 'selection_reason': 'pair_ft_skipped_or_no_pairs',
                 'best_epoch_stage1_unique': float((before_stage1_probe_metrics or {}).get('unique_score_count', 0.0)),
                 'best_epoch_eval_unique': float((before_stage5_metrics or {}).get('unique_score_count', 0.0)),
+                'stage1_tail_enabled': bool(stage1_tail_epochs > 0),
+                'stage1_tail_applied': False,
+                'stage1_tail_epochs_configured': int(stage1_tail_epochs),
+                'stage1_tail_epochs_executed': 0,
+                'stage1_tail_pair_count': int(len(stage1_tail_pair_samples)),
+                'world_pair_ft_final_state_source': 'selected_best',
+                'stage1_tail_stage1_probe_unique_before_after': self._metric_before_after(
+                    before_stage1_probe_metrics,
+                    before_stage1_probe_metrics,
+                    'unique_score_count',
+                ),
+                'stage1_tail_stage1_probe_score_spread_before_after': self._metric_before_after(
+                    before_stage1_probe_metrics,
+                    before_stage1_probe_metrics,
+                    'score_spread',
+                ),
+                'stage1_tail_stage1_probe_same_state_gap_before_after': self._metric_before_after(
+                    before_stage1_probe_metrics,
+                    before_stage1_probe_metrics,
+                    'same_state_score_gap',
+                ),
+                'stage1_tail_stage1_probe_pair_ranking_accuracy_before_after': self._metric_before_after(
+                    before_stage1_probe_metrics,
+                    before_stage1_probe_metrics,
+                    'pair_ranking_accuracy',
+                ),
             }
             return self.last_pair_metrics
 
@@ -698,6 +738,11 @@ class WorldModelTrainer:
             "[WorldModel PairFT] compatibility note: pair_ft_resolution_min_logit_gap is loaded "
             "for backward compatibility but ignored because resolution_space=score."
         )
+        print(
+            f"[WorldModel PairFT] stage1_tail: enabled={bool(stage1_tail_epochs > 0)}, "
+            f"epochs={int(stage1_tail_epochs)}, pair_count={int(len(stage1_tail_pair_samples))}, "
+            f"trusted_only={bool(stage1_tail_apply_trusted_only)}"
+        )
         replay_loader = self._build_replay_loader(replay_samples)
         replay_iter = iter(replay_loader) if replay_loader is not None else None
         stage4_loader = self._build_pair_loader(stage4_pair_samples)
@@ -710,6 +755,11 @@ class WorldModelTrainer:
         epoch_metrics: List[Dict[str, float]] = []
         stage5_batch_size = max(1, min(int(self.config.batch_size), max(1, len(stage5_pair_samples)))) if stage5_pair_samples else 0
         stage1_probe_batch_size = max(1, min(int(self.config.batch_size), max(1, len(stage1_probe_pair_samples)))) if stage1_probe_pair_samples else 0
+        stage1_tail_batch_size = (
+            max(1, min(int(self.config.batch_size), max(1, len(stage1_tail_pair_samples))))
+            if stage1_tail_pair_samples
+            else 0
+        )
         total_epochs = max(1, int(self.config.pair_finetune_epochs))
         phase_a_epochs = min(total_epochs, 1 if (stage5_pair_samples or stage1_probe_pair_samples) else 0)
         phase_b_epochs = max(0, total_epochs - phase_a_epochs)
@@ -1151,6 +1201,202 @@ class WorldModelTrainer:
             selection_reason = str(legacy_best_reason or 'legacy_tieaware_selected')
 
         self.model.load_state_dict(selected_best_state)
+        stage1_tail_enabled = bool(stage1_tail_epochs > 0)
+        stage1_tail_applied = False
+        stage1_tail_epochs_executed = 0
+        stage1_tail_stage1_probe_metrics_before = self.evaluate_pairs(stage1_probe_pair_samples)
+        if stage1_tail_enabled and stage1_tail_pair_samples and stage1_tail_batch_size > 0:
+            tail_optimizer = torch.optim.Adam(
+                [parameter for parameter in self.model.parameters() if parameter.requires_grad],
+                lr=self.config.learning_rate,
+            )
+            self.model.train()
+            tail_epoch_steps_target = max(
+                1,
+                int(np.ceil(len(stage1_tail_pair_samples) / float(stage1_tail_batch_size))),
+            )
+            for tail_epoch_idx in range(int(stage1_tail_epochs)):
+                phase_name = 'phase_c_stage1_tail'
+                epoch_total = 0.0
+                epoch_ranking = 0.0
+                epoch_resolution = 0.0
+                epoch_stage1_resolution = 0.0
+                epoch_steps = 0
+                epoch_stage1_probe_active_pairs = 0
+                epoch_stage1_probe_score_gap_values: List[float] = []
+                epoch_stage1_probe_margin_values: List[float] = []
+                epoch_stage1_probe_pred_gap_to_margin_ratios: List[float] = []
+                epoch_stage1_probe_below_score_margin_count = 0
+                epoch_stage1_probe_below_adaptive_margin_count = 0
+                epoch_stage1_probe_pairs_seen = 0
+
+                for _ in range(tail_epoch_steps_target):
+                    stage1_tail_batch = self._sample_pair_batch_with_replacement(
+                        stage1_tail_pair_samples,
+                        stage1_tail_batch_size,
+                    )
+                    if not stage1_tail_batch:
+                        continue
+                    stage1_ranking_loss, _, stage1_resolution_loss, stage1_diag = self._compute_pair_losses(
+                        stage1_tail_batch,
+                        enable_resolution=False,
+                        enable_stage1_resolution=True,
+                    )
+                    total_loss = (
+                        float(self.config.ranking_loss_weight) * stage1_ranking_loss
+                        + float(getattr(self.config, 'pair_ft_stage1_resolution_loss_weight', 0.0) or 0.0)
+                        * stage1_resolution_loss
+                    )
+                    tail_optimizer.zero_grad()
+                    total_loss.backward()
+                    tail_optimizer.step()
+
+                    source_mix['stage1_tail_steps'] += 1
+                    source_mix['stage1_tail_pairs_seen'] += len(stage1_tail_batch)
+                    epoch_stage1_probe_pairs_seen += int(len(stage1_tail_batch))
+
+                    stage1_active_count = int(stage1_diag.get('stage1_probe_active_pair_count', 0))
+                    epoch_stage1_probe_active_pairs += stage1_active_count
+                    epoch_stage1_probe_score_gap_values.extend(
+                        float(value)
+                        for value in list(stage1_diag.get('stage1_probe_score_gaps', []) or [])
+                    )
+                    epoch_stage1_probe_margin_values.extend(
+                        float(value)
+                        for value in list(stage1_diag.get('stage1_probe_margins', []) or [])
+                    )
+                    epoch_stage1_probe_pred_gap_to_margin_ratios.extend(
+                        float(value)
+                        for value in list(stage1_diag.get('stage1_probe_pred_gap_to_margin_ratios', []) or [])
+                    )
+                    epoch_stage1_probe_below_score_margin_count += int(
+                        stage1_diag.get('stage1_probe_below_score_margin_count', 0)
+                    )
+                    epoch_stage1_probe_below_adaptive_margin_count += int(
+                        stage1_diag.get('stage1_probe_below_adaptive_margin_count', 0)
+                    )
+
+                    step_total = float(total_loss.item())
+                    step_ranking = float(stage1_ranking_loss.item())
+                    step_resolution = float(stage1_resolution_loss.item())
+                    epoch_total += step_total
+                    epoch_ranking += step_ranking
+                    epoch_resolution += step_resolution
+                    epoch_stage1_resolution += step_resolution
+                    epoch_steps += 1
+
+                    if tb_writer is not None:
+                        tb_writer.add_scalar('loss/step_total', step_total, global_step)
+                        tb_writer.add_scalar('loss/step_pointwise', 0.0, global_step)
+                        tb_writer.add_scalar('loss/step_ranking', step_ranking, global_step)
+                        tb_writer.add_scalar('loss/step_spread', 0.0, global_step)
+                        tb_writer.add_scalar('loss/step_resolution', step_resolution, global_step)
+                    global_step += 1
+
+                if epoch_steps > 0:
+                    stage1_tail_applied = True
+                    stage1_tail_epochs_executed += 1
+                    epoch_summary = {
+                        'epoch': float(total_epochs + tail_epoch_idx),
+                        'phase': phase_name,
+                        'loss_total': epoch_total / epoch_steps,
+                        'loss_pointwise': 0.0,
+                        'loss_ranking': epoch_ranking / epoch_steps,
+                        'loss_spread': 0.0,
+                        'loss_resolution': epoch_resolution / epoch_steps,
+                        'stage4_aux_resolution_loss': 0.0,
+                        'stage4_aux_active_pair_count': 0.0,
+                        'stage4_aux_active_pair_fraction': 0.0,
+                        'stage4_aux_logit_gap_mean': 0.0,
+                        'stage4_aux_score_gap_mean': 0.0,
+                        'stage4_aux_score_gap_p50': 0.0,
+                        'stage4_aux_score_gap_p90': 0.0,
+                        'stage4_aux_below_score_margin_count': 0.0,
+                        'stage4_aux_below_score_margin_fraction': 0.0,
+                        'stage4_aux_below_margin_count': 0.0,
+                        'stage4_aux_below_margin_fraction': 0.0,
+                        'stage1_probe_resolution_loss': epoch_stage1_resolution / epoch_steps,
+                        'stage1_probe_active_pair_count': float(epoch_stage1_probe_active_pairs),
+                        'stage1_probe_active_pair_fraction': (
+                            float(epoch_stage1_probe_active_pairs) / float(epoch_stage1_probe_pairs_seen)
+                            if epoch_stage1_probe_pairs_seen > 0
+                            else 0.0
+                        ),
+                        'stage1_probe_score_gap_mean': (
+                            float(np.mean(epoch_stage1_probe_score_gap_values))
+                            if epoch_stage1_probe_score_gap_values
+                            else 0.0
+                        ),
+                        'stage1_probe_score_gap_p50': (
+                            float(np.quantile(epoch_stage1_probe_score_gap_values, 0.50))
+                            if epoch_stage1_probe_score_gap_values
+                            else 0.0
+                        ),
+                        'stage1_probe_score_gap_p90': (
+                            float(np.quantile(epoch_stage1_probe_score_gap_values, 0.90))
+                            if epoch_stage1_probe_score_gap_values
+                            else 0.0
+                        ),
+                        'stage1_probe_margin_mean': (
+                            float(np.mean(epoch_stage1_probe_margin_values))
+                            if epoch_stage1_probe_margin_values
+                            else 0.0
+                        ),
+                        'stage1_probe_margin_p50': (
+                            float(np.quantile(epoch_stage1_probe_margin_values, 0.50))
+                            if epoch_stage1_probe_margin_values
+                            else 0.0
+                        ),
+                        'stage1_probe_margin_p90': (
+                            float(np.quantile(epoch_stage1_probe_margin_values, 0.90))
+                            if epoch_stage1_probe_margin_values
+                            else 0.0
+                        ),
+                        'stage1_probe_pred_gap_to_margin_ratio_mean': (
+                            float(np.mean(epoch_stage1_probe_pred_gap_to_margin_ratios))
+                            if epoch_stage1_probe_pred_gap_to_margin_ratios
+                            else 0.0
+                        ),
+                        'stage1_probe_below_score_margin_count': float(epoch_stage1_probe_below_score_margin_count),
+                        'stage1_probe_below_score_margin_fraction': (
+                            float(epoch_stage1_probe_below_score_margin_count) / float(epoch_stage1_probe_active_pairs)
+                            if epoch_stage1_probe_active_pairs > 0
+                            else 0.0
+                        ),
+                        'stage1_probe_below_adaptive_margin_fraction': (
+                            float(epoch_stage1_probe_below_adaptive_margin_count)
+                            / float(epoch_stage1_probe_active_pairs)
+                            if epoch_stage1_probe_active_pairs > 0
+                            else 0.0
+                        ),
+                    }
+                    eval_metrics = self.evaluate_pairs(best_eval_pairs)
+                    eval_stage1_probe_metrics = self.evaluate_pairs(stage1_probe_pair_samples)
+                    epoch_summary.update(
+                        {
+                            'eval_pair_ranking_accuracy': float(eval_metrics.get('pair_ranking_accuracy', 0.0)),
+                            'eval_same_state_score_gap': float(eval_metrics.get('same_state_score_gap', 0.0)),
+                            'eval_score_spread': float(eval_metrics.get('score_spread', 0.0)),
+                            'eval_unique_score_count': float(eval_metrics.get('unique_score_count', 0.0)),
+                            'stage1_probe_eval_pair_ranking_accuracy': float(
+                                eval_stage1_probe_metrics.get('pair_ranking_accuracy', 0.0)
+                            ),
+                            'stage1_probe_eval_same_state_score_gap': float(
+                                eval_stage1_probe_metrics.get('same_state_score_gap', 0.0)
+                            ),
+                            'stage1_probe_eval_score_spread': float(
+                                eval_stage1_probe_metrics.get('score_spread', 0.0)
+                            ),
+                            'stage1_probe_eval_unique_score_count': float(
+                                eval_stage1_probe_metrics.get('unique_score_count', 0.0)
+                            ),
+                        }
+                    )
+                    epoch_metrics.append(epoch_summary)
+
+            self.model.eval()
+        stage1_tail_stage1_probe_metrics_after = self.evaluate_pairs(stage1_probe_pair_samples)
+
         self._restore_grad_state(grad_state)
         self.model.eval()
         after_pair_metrics = self.evaluate_pairs(pair_samples)
@@ -1239,6 +1485,34 @@ class WorldModelTrainer:
                 (selected_best_stage1_probe_metrics or {}).get('unique_score_count', 0.0)
             ),
             'best_epoch_eval_unique': float((selected_best_metrics or {}).get('unique_score_count', 0.0)),
+            'stage1_tail_enabled': bool(stage1_tail_enabled),
+            'stage1_tail_applied': bool(stage1_tail_applied),
+            'stage1_tail_epochs_configured': int(stage1_tail_epochs),
+            'stage1_tail_epochs_executed': int(stage1_tail_epochs_executed),
+            'stage1_tail_pair_count': int(len(stage1_tail_pair_samples)),
+            'world_pair_ft_final_state_source': (
+                'selected_best_plus_stage1_tail' if stage1_tail_applied else 'selected_best'
+            ),
+            'stage1_tail_stage1_probe_unique_before_after': self._metric_before_after(
+                stage1_tail_stage1_probe_metrics_before,
+                stage1_tail_stage1_probe_metrics_after,
+                'unique_score_count',
+            ),
+            'stage1_tail_stage1_probe_score_spread_before_after': self._metric_before_after(
+                stage1_tail_stage1_probe_metrics_before,
+                stage1_tail_stage1_probe_metrics_after,
+                'score_spread',
+            ),
+            'stage1_tail_stage1_probe_same_state_gap_before_after': self._metric_before_after(
+                stage1_tail_stage1_probe_metrics_before,
+                stage1_tail_stage1_probe_metrics_after,
+                'same_state_score_gap',
+            ),
+            'stage1_tail_stage1_probe_pair_ranking_accuracy_before_after': self._metric_before_after(
+                stage1_tail_stage1_probe_metrics_before,
+                stage1_tail_stage1_probe_metrics_after,
+                'pair_ranking_accuracy',
+            ),
         }
         if tb_writer is not None:
             tb_writer.add_scalar('summary/before_pair_ranking_accuracy', float(before_pair_metrics.get('pair_ranking_accuracy', 0.0)), 0)
@@ -1283,6 +1557,20 @@ class WorldModelTrainer:
                 continue
             if aux_gap >= threshold:
                 selected.append(sample)
+        return selected
+
+    def _filter_stage1_tail_pairs(
+        self,
+        pair_samples: Sequence[RiskPairSample],
+        trusted_only: bool = True,
+    ) -> List[RiskPairSample]:
+        selected: List[RiskPairSample] = []
+        for sample in pair_samples:
+            if str(sample.source) != 'stage1_probe_same_state':
+                continue
+            if trusted_only and not bool((sample.meta or {}).get('trusted_for_spread', False)):
+                continue
+            selected.append(sample)
         return selected
 
     def _is_epoch_metrics_eligible_for_unique_guard(self, metrics: Dict[str, float]) -> bool:

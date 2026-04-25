@@ -1,0 +1,16 @@
+# Stage2-only Stage1 tail calibration (v10, A-only).
+# Keep gate semantics unchanged; append Stage1-only trusted tail phase.
+
+world_model:
+  pair_ft_stage1_resolution_loss_weight: 0.02
+  pair_ft_stage1_resolution_mode: "adaptive"
+  pair_ft_stage1_resolution_min_score_gap: 0.018
+  pair_ft_stage1_resolution_alpha: 0.2
+  pair_ft_stage1_resolution_max_score_gap: 0.05
+  pair_ft_stage1_resolution_apply_trusted_only: true
+  pair_ft_stage1_tail_epochs: 2
+  pair_ft_stage1_tail_apply_trusted_only: true
+  pair_ft_selection_accuracy_tie_epsilon: 0.01
+
+tensorboard:
+  run_name: "stage2_stage1_gate_tail_calibration"

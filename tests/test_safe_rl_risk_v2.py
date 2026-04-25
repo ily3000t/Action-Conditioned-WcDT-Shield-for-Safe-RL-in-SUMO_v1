@@ -856,6 +856,115 @@ def test_world_stage1_adaptive_resolution_margin_respects_clip_and_trusted_gate(
     assert diag["stage1_probe_below_adaptive_margin_fraction"] == pytest.approx(1.0, abs=1e-6)
 
 
+def test_world_stage1_tail_phase_applies_when_trusted_pairs_available():
+    from safe_rl.models.world_model import WorldModelTrainer
+
+    trainer = WorldModelTrainer(
+        config=WorldModelConfig(
+            hidden_dim=64,
+            future_steps=2,
+            multimodal=2,
+            pair_finetune=True,
+            pair_finetune_epochs=1,
+            batch_size=1,
+            pair_ft_stage1_resolution_loss_weight=0.02,
+            pair_ft_stage1_resolution_min_score_gap=0.018,
+            pair_ft_stage1_resolution_mode="adaptive",
+            pair_ft_stage1_resolution_alpha=0.2,
+            pair_ft_stage1_resolution_max_score_gap=0.05,
+            pair_ft_stage1_resolution_apply_trusted_only=True,
+            pair_ft_stage1_tail_epochs=1,
+            pair_ft_stage1_tail_apply_trusted_only=True,
+        ),
+        history_steps=2,
+        device="cpu",
+    )
+
+    stage1_trusted_pair = RiskPairSample(
+        history_scene=_history_scene()[:2],
+        action_a=4,
+        action_b=3,
+        preferred_action=4,
+        source="stage1_probe_same_state",
+        weight=1.0,
+        meta={
+            "target_risk_a": 0.30,
+            "target_risk_b": 0.80,
+            "target_gap": 0.50,
+            "trusted_for_spread": True,
+        },
+    )
+
+    _ = trainer.fine_tune_pairs(pair_samples=[stage1_trusted_pair], replay_samples=[])
+    report = dict(trainer.last_pair_ft_report or {})
+    source_mix = dict(report.get("world_pair_ft_source_mix", {}) or {})
+    assert report.get("stage1_tail_enabled") is True
+    assert report.get("stage1_tail_applied") is True
+    assert report.get("stage1_tail_epochs_configured") == 1
+    assert report.get("stage1_tail_epochs_executed") == 1
+    assert report.get("stage1_tail_pair_count") == 1
+    assert report.get("world_pair_ft_final_state_source") == "selected_best_plus_stage1_tail"
+    assert source_mix.get("stage1_tail_steps", 0) > 0
+    assert source_mix.get("stage1_tail_pairs_seen", 0) > 0
+    assert "stage1_tail_stage1_probe_unique_before_after" in report
+    assert "stage1_tail_stage1_probe_score_spread_before_after" in report
+    assert "stage1_tail_stage1_probe_same_state_gap_before_after" in report
+    assert "stage1_tail_stage1_probe_pair_ranking_accuracy_before_after" in report
+    assert any(item.get("phase") == "phase_c_stage1_tail" for item in report.get("epoch_metrics", []))
+
+
+def test_world_stage1_tail_phase_skips_when_no_trusted_pairs():
+    from safe_rl.models.world_model import WorldModelTrainer
+
+    trainer = WorldModelTrainer(
+        config=WorldModelConfig(
+            hidden_dim=64,
+            future_steps=2,
+            multimodal=2,
+            pair_finetune=True,
+            pair_finetune_epochs=1,
+            batch_size=1,
+            pair_ft_stage1_resolution_loss_weight=0.02,
+            pair_ft_stage1_resolution_min_score_gap=0.018,
+            pair_ft_stage1_resolution_mode="adaptive",
+            pair_ft_stage1_resolution_alpha=0.2,
+            pair_ft_stage1_resolution_max_score_gap=0.05,
+            pair_ft_stage1_resolution_apply_trusted_only=True,
+            pair_ft_stage1_tail_epochs=2,
+            pair_ft_stage1_tail_apply_trusted_only=True,
+        ),
+        history_steps=2,
+        device="cpu",
+    )
+
+    stage1_untrusted_pair = RiskPairSample(
+        history_scene=_history_scene()[:2],
+        action_a=4,
+        action_b=3,
+        preferred_action=4,
+        source="stage1_probe_same_state",
+        weight=1.0,
+        meta={
+            "target_risk_a": 0.30,
+            "target_risk_b": 0.80,
+            "target_gap": 0.50,
+            "trusted_for_spread": False,
+        },
+    )
+
+    _ = trainer.fine_tune_pairs(pair_samples=[stage1_untrusted_pair], replay_samples=[])
+    report = dict(trainer.last_pair_ft_report or {})
+    source_mix = dict(report.get("world_pair_ft_source_mix", {}) or {})
+    assert report.get("stage1_tail_enabled") is True
+    assert report.get("stage1_tail_applied") is False
+    assert report.get("stage1_tail_epochs_configured") == 2
+    assert report.get("stage1_tail_epochs_executed") == 0
+    assert report.get("stage1_tail_pair_count") == 0
+    assert report.get("world_pair_ft_final_state_source") == "selected_best"
+    assert source_mix.get("stage1_tail_steps") == 0
+    assert source_mix.get("stage1_tail_pairs_seen") == 0
+
+
 def test_world_evaluate_pairs_restores_train_mode():
     from safe_rl.models.world_model import WorldModelTrainer
 
