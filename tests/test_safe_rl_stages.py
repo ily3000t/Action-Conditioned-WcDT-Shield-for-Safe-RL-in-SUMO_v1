@@ -2457,6 +2457,17 @@ def test_stage2_report_includes_pair_finetune_metadata(monkeypatch):
                 "stage1_tail_epochs_configured": 2,
                 "stage1_tail_epochs_executed": 1,
                 "stage1_tail_pair_count": 12,
+                "stage1_tail_internal_best_epoch": 6,
+                "stage1_tail_internal_best_reason": "stage1_unique_higher",
+                "stage1_tail_internal_best_stage1_probe_unique": 17.0,
+                "stage1_tail_accepted": True,
+                "stage1_tail_acceptance_reason": "accepted_unique_gain_and_non_degradation",
+                "stage1_tail_acceptance_thresholds": {
+                    "enabled": True,
+                    "acc_tolerance": 0.01,
+                    "spread_tolerance": 0.001,
+                    "gap_tolerance": 0.001,
+                },
                 "world_pair_ft_final_state_source": "selected_best_plus_stage1_tail",
                 "stage1_tail_stage1_probe_unique_before_after": {"before": 15.0, "after": 17.0},
                 "stage1_tail_stage1_probe_score_spread_before_after": {"before": 0.013, "after": 0.016},
@@ -2583,6 +2594,15 @@ def test_stage2_report_includes_pair_finetune_metadata(monkeypatch):
     assert report["pair_finetune_metrics"]["world"]["stage1_tail_epochs_configured"] == 2
     assert report["pair_finetune_metrics"]["world"]["stage1_tail_epochs_executed"] == 1
     assert report["pair_finetune_metrics"]["world"]["stage1_tail_pair_count"] == 12
+    assert report["pair_finetune_metrics"]["world"]["stage1_tail_internal_best_epoch"] == 6
+    assert report["pair_finetune_metrics"]["world"]["stage1_tail_internal_best_reason"] == "stage1_unique_higher"
+    assert report["pair_finetune_metrics"]["world"]["stage1_tail_internal_best_stage1_probe_unique"] == pytest.approx(17.0)
+    assert report["pair_finetune_metrics"]["world"]["stage1_tail_accepted"] is True
+    assert report["pair_finetune_metrics"]["world"]["stage1_tail_acceptance_reason"] == "accepted_unique_gain_and_non_degradation"
+    assert report["pair_finetune_metrics"]["world"]["stage1_tail_acceptance_thresholds"]["enabled"] is True
+    assert report["pair_finetune_metrics"]["world"]["stage1_tail_acceptance_thresholds"]["acc_tolerance"] == pytest.approx(0.01)
+    assert report["pair_finetune_metrics"]["world"]["stage1_tail_acceptance_thresholds"]["spread_tolerance"] == pytest.approx(0.001)
+    assert report["pair_finetune_metrics"]["world"]["stage1_tail_acceptance_thresholds"]["gap_tolerance"] == pytest.approx(0.001)
     assert report["pair_finetune_metrics"]["world"]["world_pair_ft_final_state_source"] == "selected_best_plus_stage1_tail"
     assert report["pair_finetune_metrics"]["world"]["stage1_tail_stage1_probe_unique_before_after"]["after"] == pytest.approx(17.0)
     assert report["pair_finetune_metrics"]["world"]["stage1_tail_stage1_probe_score_spread_before_after"]["after"] == pytest.approx(0.016)

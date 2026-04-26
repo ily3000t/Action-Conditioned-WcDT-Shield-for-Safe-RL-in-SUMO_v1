@@ -244,6 +244,10 @@ def test_risk_model_v2_defaults_enabled():
     assert config.world_model.pair_ft_stage1_resolution_apply_trusted_only is True
     assert config.world_model.pair_ft_stage1_tail_epochs == 0
     assert config.world_model.pair_ft_stage1_tail_apply_trusted_only is True
+    assert config.world_model.pair_ft_stage1_tail_acceptance_enabled is True
+    assert config.world_model.pair_ft_stage1_tail_acceptance_acc_tolerance == 0.01
+    assert config.world_model.pair_ft_stage1_tail_acceptance_spread_tolerance == 0.001
+    assert config.world_model.pair_ft_stage1_tail_acceptance_gap_tolerance == 0.001
     assert config.world_model.pair_ft_freeze_traj_decoder is True
     assert config.world_model.pair_ft_freeze_backbone == "partial"
 
@@ -369,6 +373,10 @@ def test_stage2_stage1_gate_tail_calibration_config_loads():
     assert config.world_model.pair_ft_stage1_resolution_apply_trusted_only is True
     assert config.world_model.pair_ft_stage1_tail_epochs == 2
     assert config.world_model.pair_ft_stage1_tail_apply_trusted_only is True
+    assert config.world_model.pair_ft_stage1_tail_acceptance_enabled is True
+    assert config.world_model.pair_ft_stage1_tail_acceptance_acc_tolerance == 0.01
+    assert config.world_model.pair_ft_stage1_tail_acceptance_spread_tolerance == 0.001
+    assert config.world_model.pair_ft_stage1_tail_acceptance_gap_tolerance == 0.001
     assert config.world_model.pair_ft_selection_accuracy_tie_epsilon == 0.01
     assert config.world_model.pair_ft_patience == default_config.world_model.pair_ft_patience
     assert config.world_model.pair_ft_stage4_mix_every_n_steps == default_config.world_model.pair_ft_stage4_mix_every_n_steps

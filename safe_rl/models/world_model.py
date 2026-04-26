@@ -520,6 +520,18 @@ class WorldModelTrainer:
             stage1_probe_pair_samples,
             trusted_only=stage1_tail_apply_trusted_only,
         )
+        stage1_tail_acceptance_enabled = bool(
+            getattr(self.config, 'pair_ft_stage1_tail_acceptance_enabled', True)
+        )
+        stage1_tail_acceptance_acc_tolerance = float(
+            getattr(self.config, 'pair_ft_stage1_tail_acceptance_acc_tolerance', 0.01) or 0.01
+        )
+        stage1_tail_acceptance_spread_tolerance = float(
+            getattr(self.config, 'pair_ft_stage1_tail_acceptance_spread_tolerance', 0.001) or 0.001
+        )
+        stage1_tail_acceptance_gap_tolerance = float(
+            getattr(self.config, 'pair_ft_stage1_tail_acceptance_gap_tolerance', 0.001) or 0.001
+        )
         pair_count = int(len(pair_samples))
         replay_sample_count = int(len(replay_samples))
         eval_replay_samples = self._select_pair_ft_eval_samples(replay_samples)
@@ -672,6 +684,19 @@ class WorldModelTrainer:
                 'stage1_tail_epochs_configured': int(stage1_tail_epochs),
                 'stage1_tail_epochs_executed': 0,
                 'stage1_tail_pair_count': int(len(stage1_tail_pair_samples)),
+                'stage1_tail_internal_best_epoch': -1,
+                'stage1_tail_internal_best_reason': 'tail_not_applied',
+                'stage1_tail_internal_best_stage1_probe_unique': float(
+                    (before_stage1_probe_metrics or {}).get('unique_score_count', 0.0)
+                ),
+                'stage1_tail_accepted': False,
+                'stage1_tail_acceptance_reason': 'tail_not_applied',
+                'stage1_tail_acceptance_thresholds': {
+                    'enabled': bool(stage1_tail_acceptance_enabled),
+                    'acc_tolerance': float(stage1_tail_acceptance_acc_tolerance),
+                    'spread_tolerance': float(stage1_tail_acceptance_spread_tolerance),
+                    'gap_tolerance': float(stage1_tail_acceptance_gap_tolerance),
+                },
                 'world_pair_ft_final_state_source': 'selected_best',
                 'stage1_tail_stage1_probe_unique_before_after': self._metric_before_after(
                     before_stage1_probe_metrics,
@@ -1204,7 +1229,22 @@ class WorldModelTrainer:
         stage1_tail_enabled = bool(stage1_tail_epochs > 0)
         stage1_tail_applied = False
         stage1_tail_epochs_executed = 0
+        stage1_tail_internal_best_epoch = -1
+        stage1_tail_internal_best_reason = 'tail_not_applied'
+        stage1_tail_internal_best_stage1_probe_unique = float(
+            (selected_best_stage1_probe_metrics or {}).get('unique_score_count', 0.0)
+        )
+        stage1_tail_accepted = False
+        stage1_tail_acceptance_reason = 'tail_not_applied'
         stage1_tail_stage1_probe_metrics_before = self.evaluate_pairs(stage1_probe_pair_samples)
+        stage1_tail_eval_metrics_before = self.evaluate_pairs(best_eval_pairs)
+        stage1_tail_stage1_probe_metrics_after = dict(stage1_tail_stage1_probe_metrics_before)
+        stage1_tail_eval_metrics_after = dict(stage1_tail_eval_metrics_before)
+        min_spread_floor = float(getattr(self.config, 'pair_ft_min_score_spread_floor', 0.0) or 0.0)
+        min_gap_floor = float(getattr(self.config, 'pair_ft_min_same_state_gap_floor', 0.0) or 0.0)
+        tail_internal_best_state: Optional[Dict[str, torch.Tensor]] = None
+        tail_internal_best_stage1_probe_metrics: Optional[Dict[str, float]] = None
+        tail_internal_best_eval_metrics: Optional[Dict[str, float]] = None
         if stage1_tail_enabled and stage1_tail_pair_samples and stage1_tail_batch_size > 0:
             tail_optimizer = torch.optim.Adam(
                 [parameter for parameter in self.model.parameters() if parameter.requires_grad],
@@ -1387,15 +1427,85 @@ class WorldModelTrainer:
                             'stage1_probe_eval_score_spread': float(
                                 eval_stage1_probe_metrics.get('score_spread', 0.0)
                             ),
-                            'stage1_probe_eval_unique_score_count': float(
+                        'stage1_probe_eval_unique_score_count': float(
                                 eval_stage1_probe_metrics.get('unique_score_count', 0.0)
                             ),
                         }
                     )
+                    floor_passed, floor_reason = self._stage1_tail_passes_floor(
+                        candidate_stage1_probe_metrics=eval_stage1_probe_metrics,
+                        pre_tail_stage1_probe_metrics=stage1_tail_stage1_probe_metrics_before,
+                        min_spread_floor=min_spread_floor,
+                        min_gap_floor=min_gap_floor,
+                        acc_tolerance=stage1_tail_acceptance_acc_tolerance,
+                        spread_tolerance=stage1_tail_acceptance_spread_tolerance,
+                        gap_tolerance=stage1_tail_acceptance_gap_tolerance,
+                    )
+                    epoch_summary['stage1_tail_floor_passed'] = bool(floor_passed)
+                    epoch_summary['stage1_tail_floor_reason'] = str(floor_reason)
+                    epoch_summary['stage1_tail_is_internal_best'] = False
+                    epoch_summary['stage1_tail_internal_best_reason'] = ''
+                    if floor_passed:
+                        should_update_best = False
+                        best_update_reason = 'tail_first_floor_pass'
+                        if tail_internal_best_stage1_probe_metrics is None:
+                            should_update_best = True
+                        else:
+                            best_cmp, best_update_reason = self._compare_stage1_tail_metrics(
+                                current_stage1_probe_metrics=eval_stage1_probe_metrics,
+                                best_stage1_probe_metrics=tail_internal_best_stage1_probe_metrics,
+                            )
+                            should_update_best = best_cmp > 0
+                        if should_update_best:
+                            tail_internal_best_state = {
+                                name: tensor.detach().cpu().clone()
+                                for name, tensor in self.model.state_dict().items()
+                            }
+                            tail_internal_best_stage1_probe_metrics = dict(eval_stage1_probe_metrics)
+                            tail_internal_best_eval_metrics = dict(eval_metrics)
+                            stage1_tail_internal_best_epoch = int(total_epochs + tail_epoch_idx)
+                            stage1_tail_internal_best_reason = str(best_update_reason)
+                            stage1_tail_internal_best_stage1_probe_unique = float(
+                                eval_stage1_probe_metrics.get('unique_score_count', 0.0)
+                            )
+                            epoch_summary['stage1_tail_is_internal_best'] = True
+                            epoch_summary['stage1_tail_internal_best_reason'] = str(best_update_reason)
+                    elif tail_internal_best_state is None:
+                        stage1_tail_internal_best_reason = str(floor_reason)
                     epoch_metrics.append(epoch_summary)
 
             self.model.eval()
-        stage1_tail_stage1_probe_metrics_after = self.evaluate_pairs(stage1_probe_pair_samples)
+        if stage1_tail_applied and tail_internal_best_state is not None:
+            self.model.load_state_dict(tail_internal_best_state)
+            stage1_tail_stage1_probe_metrics_after = dict(
+                tail_internal_best_stage1_probe_metrics or self.evaluate_pairs(stage1_probe_pair_samples)
+            )
+            stage1_tail_eval_metrics_after = dict(
+                tail_internal_best_eval_metrics or self.evaluate_pairs(best_eval_pairs)
+            )
+            stage1_tail_accepted, stage1_tail_acceptance_reason = self._evaluate_stage1_tail_acceptance(
+                pre_tail_stage1_probe_metrics=stage1_tail_stage1_probe_metrics_before,
+                pre_tail_eval_metrics=stage1_tail_eval_metrics_before,
+                candidate_stage1_probe_metrics=stage1_tail_stage1_probe_metrics_after,
+                candidate_eval_metrics=stage1_tail_eval_metrics_after,
+                acceptance_enabled=stage1_tail_acceptance_enabled,
+                acc_tolerance=stage1_tail_acceptance_acc_tolerance,
+                spread_tolerance=stage1_tail_acceptance_spread_tolerance,
+                gap_tolerance=stage1_tail_acceptance_gap_tolerance,
+                min_spread_floor=min_spread_floor,
+                min_gap_floor=min_gap_floor,
+            )
+            if not stage1_tail_accepted:
+                self.model.load_state_dict(selected_best_state)
+                stage1_tail_stage1_probe_metrics_after = dict(stage1_tail_stage1_probe_metrics_before)
+                stage1_tail_eval_metrics_after = dict(stage1_tail_eval_metrics_before)
+        elif stage1_tail_applied:
+            self.model.load_state_dict(selected_best_state)
+            stage1_tail_internal_best_reason = 'tail_no_internal_best'
+            stage1_tail_acceptance_reason = 'tail_no_internal_best'
+            stage1_tail_stage1_probe_metrics_after = dict(stage1_tail_stage1_probe_metrics_before)
+            stage1_tail_eval_metrics_after = dict(stage1_tail_eval_metrics_before)
+            stage1_tail_accepted = False
 
         self._restore_grad_state(grad_state)
         self.model.eval()
@@ -1490,8 +1600,19 @@ class WorldModelTrainer:
             'stage1_tail_epochs_configured': int(stage1_tail_epochs),
             'stage1_tail_epochs_executed': int(stage1_tail_epochs_executed),
             'stage1_tail_pair_count': int(len(stage1_tail_pair_samples)),
+            'stage1_tail_internal_best_epoch': int(stage1_tail_internal_best_epoch),
+            'stage1_tail_internal_best_reason': str(stage1_tail_internal_best_reason),
+            'stage1_tail_internal_best_stage1_probe_unique': float(stage1_tail_internal_best_stage1_probe_unique),
+            'stage1_tail_accepted': bool(stage1_tail_accepted),
+            'stage1_tail_acceptance_reason': str(stage1_tail_acceptance_reason),
+            'stage1_tail_acceptance_thresholds': {
+                'enabled': bool(stage1_tail_acceptance_enabled),
+                'acc_tolerance': float(stage1_tail_acceptance_acc_tolerance),
+                'spread_tolerance': float(stage1_tail_acceptance_spread_tolerance),
+                'gap_tolerance': float(stage1_tail_acceptance_gap_tolerance),
+            },
             'world_pair_ft_final_state_source': (
-                'selected_best_plus_stage1_tail' if stage1_tail_applied else 'selected_best'
+                'selected_best_plus_stage1_tail' if stage1_tail_accepted else 'selected_best'
             ),
             'stage1_tail_stage1_probe_unique_before_after': self._metric_before_after(
                 stage1_tail_stage1_probe_metrics_before,
@@ -1692,6 +1813,95 @@ class WorldModelTrainer:
         if current_spread < best_spread - 1e-9:
             return -1, 'score_spread_lower'
         return 0, 'metrics_equal'
+
+    def _compare_stage1_tail_metrics(
+        self,
+        current_stage1_probe_metrics: Dict[str, float],
+        best_stage1_probe_metrics: Dict[str, float],
+    ) -> Tuple[int, str]:
+        tie_cmp, tie_reason = self._compare_unique_gap_spread_metrics(
+            current_metrics=current_stage1_probe_metrics,
+            best_metrics=best_stage1_probe_metrics,
+        )
+        if tie_cmp != 0:
+            return tie_cmp, f'stage1_{tie_reason}'
+
+        current_acc = float((current_stage1_probe_metrics or {}).get('pair_ranking_accuracy', 0.0))
+        best_acc = float((best_stage1_probe_metrics or {}).get('pair_ranking_accuracy', 0.0))
+        if current_acc > best_acc + 1e-9:
+            return 1, 'stage1_pair_ranking_accuracy_higher'
+        if current_acc < best_acc - 1e-9:
+            return -1, 'stage1_pair_ranking_accuracy_lower'
+        return 0, 'stage1_metrics_equal'
+
+    def _stage1_tail_passes_floor(
+        self,
+        candidate_stage1_probe_metrics: Dict[str, float],
+        pre_tail_stage1_probe_metrics: Dict[str, float],
+        min_spread_floor: float,
+        min_gap_floor: float,
+        acc_tolerance: float,
+        spread_tolerance: float,
+        gap_tolerance: float,
+    ) -> Tuple[bool, str]:
+        pre_acc = float((pre_tail_stage1_probe_metrics or {}).get('pair_ranking_accuracy', 0.0))
+        pre_gap = float((pre_tail_stage1_probe_metrics or {}).get('same_state_score_gap', 0.0))
+        pre_spread = float((pre_tail_stage1_probe_metrics or {}).get('score_spread', 0.0))
+        candidate_acc = float((candidate_stage1_probe_metrics or {}).get('pair_ranking_accuracy', 0.0))
+        candidate_gap = float((candidate_stage1_probe_metrics or {}).get('same_state_score_gap', 0.0))
+        candidate_spread = float((candidate_stage1_probe_metrics or {}).get('score_spread', 0.0))
+
+        min_acc_allowed = pre_acc - float(acc_tolerance)
+        min_gap_allowed = max(float(min_gap_floor), pre_gap - float(gap_tolerance))
+        min_spread_allowed = max(float(min_spread_floor), pre_spread - float(spread_tolerance))
+
+        if candidate_acc < min_acc_allowed:
+            return False, 'floor_stage1_acc_below_pre_tail_tolerance'
+        if candidate_gap < min_gap_allowed:
+            return False, 'floor_stage1_gap_below_pre_tail_tolerance'
+        if candidate_spread < min_spread_allowed:
+            return False, 'floor_stage1_spread_below_pre_tail_tolerance'
+        return True, 'floor_pass'
+
+    def _evaluate_stage1_tail_acceptance(
+        self,
+        pre_tail_stage1_probe_metrics: Dict[str, float],
+        pre_tail_eval_metrics: Dict[str, float],
+        candidate_stage1_probe_metrics: Dict[str, float],
+        candidate_eval_metrics: Dict[str, float],
+        acceptance_enabled: bool,
+        acc_tolerance: float,
+        spread_tolerance: float,
+        gap_tolerance: float,
+        min_spread_floor: float,
+        min_gap_floor: float,
+    ) -> Tuple[bool, str]:
+        if not bool(acceptance_enabled):
+            return True, 'acceptance_disabled'
+
+        pre_stage1_unique = float((pre_tail_stage1_probe_metrics or {}).get('unique_score_count', 0.0))
+        pre_eval_unique = float((pre_tail_eval_metrics or {}).get('unique_score_count', 0.0))
+        candidate_stage1_unique = float((candidate_stage1_probe_metrics or {}).get('unique_score_count', 0.0))
+        candidate_eval_unique = float((candidate_eval_metrics or {}).get('unique_score_count', 0.0))
+        has_unique_gain = (
+            candidate_stage1_unique > pre_stage1_unique + 1e-9
+            or candidate_eval_unique > pre_eval_unique + 1e-9
+        )
+        if not has_unique_gain:
+            return False, 'rejected_no_unique_gain'
+
+        floor_passed, floor_reason = self._stage1_tail_passes_floor(
+            candidate_stage1_probe_metrics=candidate_stage1_probe_metrics,
+            pre_tail_stage1_probe_metrics=pre_tail_stage1_probe_metrics,
+            min_spread_floor=min_spread_floor,
+            min_gap_floor=min_gap_floor,
+            acc_tolerance=acc_tolerance,
+            spread_tolerance=spread_tolerance,
+            gap_tolerance=gap_tolerance,
+        )
+        if not floor_passed:
+            return False, f'rejected_{floor_reason}'
+        return True, 'accepted_unique_gain_and_non_degradation'
 
     def _spread_eligible_pair_count(self, pair_samples: Sequence[RiskPairSample]) -> int:
         count = 0

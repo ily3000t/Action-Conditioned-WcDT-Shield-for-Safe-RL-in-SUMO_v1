@@ -10,6 +10,10 @@ world_model:
   pair_ft_stage1_resolution_apply_trusted_only: true
   pair_ft_stage1_tail_epochs: 2
   pair_ft_stage1_tail_apply_trusted_only: true
+  pair_ft_stage1_tail_acceptance_enabled: true
+  pair_ft_stage1_tail_acceptance_acc_tolerance: 0.01
+  pair_ft_stage1_tail_acceptance_spread_tolerance: 0.001
+  pair_ft_stage1_tail_acceptance_gap_tolerance: 0.001
   pair_ft_selection_accuracy_tie_epsilon: 0.01
 
 tensorboard:

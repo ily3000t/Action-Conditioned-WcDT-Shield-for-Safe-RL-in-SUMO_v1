@@ -875,6 +875,7 @@ def test_world_stage1_tail_phase_applies_when_trusted_pairs_available():
             pair_ft_stage1_resolution_apply_trusted_only=True,
             pair_ft_stage1_tail_epochs=1,
             pair_ft_stage1_tail_apply_trusted_only=True,
+            pair_ft_stage1_tail_acceptance_enabled=False,
         ),
         history_steps=2,
         device="cpu",
@@ -903,6 +904,8 @@ def test_world_stage1_tail_phase_applies_when_trusted_pairs_available():
     assert report.get("stage1_tail_epochs_configured") == 1
     assert report.get("stage1_tail_epochs_executed") == 1
     assert report.get("stage1_tail_pair_count") == 1
+    assert report.get("stage1_tail_accepted") is True
+    assert report.get("stage1_tail_acceptance_reason") == "acceptance_disabled"
     assert report.get("world_pair_ft_final_state_source") == "selected_best_plus_stage1_tail"
     assert source_mix.get("stage1_tail_steps", 0) > 0
     assert source_mix.get("stage1_tail_pairs_seen", 0) > 0
@@ -960,9 +963,93 @@ def test_world_stage1_tail_phase_skips_when_no_trusted_pairs():
     assert report.get("stage1_tail_epochs_configured") == 2
     assert report.get("stage1_tail_epochs_executed") == 0
     assert report.get("stage1_tail_pair_count") == 0
+    assert report.get("stage1_tail_accepted") is False
+    assert report.get("stage1_tail_acceptance_reason") == "tail_not_applied"
     assert report.get("world_pair_ft_final_state_source") == "selected_best"
     assert source_mix.get("stage1_tail_steps") == 0
     assert source_mix.get("stage1_tail_pairs_seen") == 0
+
+
+def test_world_stage1_tail_compare_prioritizes_unique_gap_spread_over_accuracy():
+    from safe_rl.models.world_model import WorldModelTrainer
+
+    trainer = WorldModelTrainer(config=WorldModelConfig(hidden_dim=64, future_steps=2, multimodal=2), history_steps=2, device="cpu")
+    cmp_value, reason = trainer._compare_stage1_tail_metrics(
+        current_stage1_probe_metrics={
+            "unique_score_count": 10.0,
+            "same_state_score_gap": 0.012,
+            "score_spread": 0.011,
+            "pair_ranking_accuracy": 0.60,
+        },
+        best_stage1_probe_metrics={
+            "unique_score_count": 9.0,
+            "same_state_score_gap": 0.030,
+            "score_spread": 0.030,
+            "pair_ranking_accuracy": 0.95,
+        },
+    )
+    assert cmp_value > 0
+    assert reason == "stage1_unique_higher"
+
+
+def test_world_stage1_tail_acceptance_rejects_when_no_unique_gain():
+    from safe_rl.models.world_model import WorldModelTrainer
+
+    trainer = WorldModelTrainer(config=WorldModelConfig(hidden_dim=64, future_steps=2, multimodal=2), history_steps=2, device="cpu")
+    accepted, reason = trainer._evaluate_stage1_tail_acceptance(
+        pre_tail_stage1_probe_metrics={
+            "unique_score_count": 9.0,
+            "pair_ranking_accuracy": 0.70,
+            "same_state_score_gap": 0.020,
+            "score_spread": 0.020,
+        },
+        pre_tail_eval_metrics={"unique_score_count": 10.0},
+        candidate_stage1_probe_metrics={
+            "unique_score_count": 9.0,
+            "pair_ranking_accuracy": 0.75,
+            "same_state_score_gap": 0.025,
+            "score_spread": 0.023,
+        },
+        candidate_eval_metrics={"unique_score_count": 10.0},
+        acceptance_enabled=True,
+        acc_tolerance=0.01,
+        spread_tolerance=0.001,
+        gap_tolerance=0.001,
+        min_spread_floor=0.008,
+        min_gap_floor=0.008,
+    )
+    assert accepted is False
+    assert reason == "rejected_no_unique_gain"
+
+
+def test_world_stage1_tail_acceptance_accepts_unique_gain_within_tolerance():
+    from safe_rl.models.world_model import WorldModelTrainer
+
+    trainer = WorldModelTrainer(config=WorldModelConfig(hidden_dim=64, future_steps=2, multimodal=2), history_steps=2, device="cpu")
+    accepted, reason = trainer._evaluate_stage1_tail_acceptance(
+        pre_tail_stage1_probe_metrics={
+            "unique_score_count": 9.0,
+            "pair_ranking_accuracy": 0.70,
+            "same_state_score_gap": 0.020,
+            "score_spread": 0.020,
+        },
+        pre_tail_eval_metrics={"unique_score_count": 10.0},
+        candidate_stage1_probe_metrics={
+            "unique_score_count": 10.0,
+            "pair_ranking_accuracy": 0.695,
+            "same_state_score_gap": 0.0195,
+            "score_spread": 0.0195,
+        },
+        candidate_eval_metrics={"unique_score_count": 10.0},
+        acceptance_enabled=True,
+        acc_tolerance=0.01,
+        spread_tolerance=0.001,
+        gap_tolerance=0.001,
+        min_spread_floor=0.008,
+        min_gap_floor=0.008,
+    )
+    assert accepted is True
+    assert reason == "accepted_unique_gain_and_non_degradation"
 
 
 def test_world_evaluate_pairs_restores_train_mode():
