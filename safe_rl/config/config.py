@@ -118,6 +118,8 @@ class WorldModelConfig:
     pair_ft_stage1_tail_acceptance_spread_tolerance: float = 0.001
     pair_ft_stage1_tail_acceptance_gap_tolerance: float = 0.001
     pair_ft_stage1_tail_sampling_mode: str = "with_replacement"
+    pair_ft_stage1_tail_ranking_loss_weight: Optional[float] = None
+    pair_ft_stage1_tail_resolution_loss_weight: Optional[float] = None
     min_spread_eligible_pairs_for_gate_source: int = 128
     stage4_aux_min_high_gap_pairs: int = 128
     stage4_aux_unique_floor: int = 12

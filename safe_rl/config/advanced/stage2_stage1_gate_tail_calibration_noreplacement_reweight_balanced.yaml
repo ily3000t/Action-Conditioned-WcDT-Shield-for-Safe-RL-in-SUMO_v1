@@ -1,0 +1,23 @@
+# Stage2-only Stage1 tail calibration (v11B balanced reweight).
+# Keep v11A settings and apply tail-only balanced reweight.
+
+world_model:
+  pair_ft_stage1_resolution_loss_weight: 0.02
+  pair_ft_stage1_resolution_mode: "adaptive"
+  pair_ft_stage1_resolution_min_score_gap: 0.018
+  pair_ft_stage1_resolution_alpha: 0.2
+  pair_ft_stage1_resolution_max_score_gap: 0.05
+  pair_ft_stage1_resolution_apply_trusted_only: true
+  pair_ft_stage1_tail_epochs: 2
+  pair_ft_stage1_tail_apply_trusted_only: true
+  pair_ft_stage1_tail_acceptance_enabled: true
+  pair_ft_stage1_tail_acceptance_acc_tolerance: 0.01
+  pair_ft_stage1_tail_acceptance_spread_tolerance: 0.001
+  pair_ft_stage1_tail_acceptance_gap_tolerance: 0.001
+  pair_ft_stage1_tail_sampling_mode: "without_replacement"
+  pair_ft_stage1_tail_ranking_loss_weight: 0.25
+  pair_ft_stage1_tail_resolution_loss_weight: 0.025
+  pair_ft_selection_accuracy_tie_epsilon: 0.01
+
+tensorboard:
+  run_name: "stage2_stage1_gate_tail_calibration_noreplacement_reweight_balanced"

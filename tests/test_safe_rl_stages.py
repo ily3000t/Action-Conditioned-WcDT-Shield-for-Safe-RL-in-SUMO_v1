@@ -2469,6 +2469,13 @@ def test_stage2_report_includes_pair_finetune_metadata(monkeypatch):
                     "gap_tolerance": 0.001,
                 },
                 "stage1_tail_sampling_mode_effective": "without_replacement",
+                "stage1_tail_ranking_loss_weight_effective": 0.25,
+                "stage1_tail_resolution_loss_weight_effective": 0.025,
+                "stage1_tail_ranking_loss": 0.041,
+                "stage1_tail_resolution_loss": 0.012,
+                "stage1_tail_floor_reject_reasons": {
+                    "floor_stage1_acc_below_pre_tail_tolerance": 1,
+                },
                 "world_pair_ft_final_state_source": "selected_best_plus_stage1_tail",
                 "stage1_tail_stage1_probe_unique_before_after": {"before": 15.0, "after": 17.0},
                 "stage1_tail_stage1_probe_score_spread_before_after": {"before": 0.013, "after": 0.016},
@@ -2483,6 +2490,8 @@ def test_stage2_report_includes_pair_finetune_metadata(monkeypatch):
                 "stage4_pairs_seen": 1,
                 "stage1_tail_pairs_seen": 2,
                 "stage1_tail_sampling_mode_effective": "without_replacement",
+                "stage1_tail_ranking_loss_weight_effective": 0.25,
+                "stage1_tail_resolution_loss_weight_effective": 0.025,
                 "stage4_mix_every_n_steps": 4,
                 "stage5_pair_seen_counts": {"p0": 2, "p1": 1},
                 "stage5_pair_cap": 8,
@@ -2519,6 +2528,8 @@ def test_stage2_report_includes_pair_finetune_metadata(monkeypatch):
     assert report["world_pair_ft_source_mix"]["stage1_tail_steps"] == 2
     assert report["world_pair_ft_source_mix"]["stage1_tail_pairs_seen"] == 2
     assert report["world_pair_ft_source_mix"]["stage1_tail_sampling_mode_effective"] == "without_replacement"
+    assert report["world_pair_ft_source_mix"]["stage1_tail_ranking_loss_weight_effective"] == pytest.approx(0.25)
+    assert report["world_pair_ft_source_mix"]["stage1_tail_resolution_loss_weight_effective"] == pytest.approx(0.025)
     assert report["world_pair_ft_source_mix"]["stage4_mix_every_n_steps"] == 4
     assert report["stage2_pair_source_health"]["status"] == "healthy"
     risk_v2_summary = json.loads(Path(pipeline.risk_v2_eval_summary_path).read_text(encoding="utf-8"))
@@ -2598,6 +2609,13 @@ def test_stage2_report_includes_pair_finetune_metadata(monkeypatch):
     assert report["pair_finetune_metrics"]["world"]["stage1_tail_epochs_executed"] == 1
     assert report["pair_finetune_metrics"]["world"]["stage1_tail_pair_count"] == 12
     assert report["pair_finetune_metrics"]["world"]["stage1_tail_sampling_mode_effective"] == "without_replacement"
+    assert report["pair_finetune_metrics"]["world"]["stage1_tail_ranking_loss_weight_effective"] == pytest.approx(0.25)
+    assert report["pair_finetune_metrics"]["world"]["stage1_tail_resolution_loss_weight_effective"] == pytest.approx(0.025)
+    assert report["pair_finetune_metrics"]["world"]["stage1_tail_ranking_loss"] == pytest.approx(0.041)
+    assert report["pair_finetune_metrics"]["world"]["stage1_tail_resolution_loss"] == pytest.approx(0.012)
+    assert report["pair_finetune_metrics"]["world"]["stage1_tail_floor_reject_reasons"] == {
+        "floor_stage1_acc_below_pre_tail_tolerance": 1
+    }
     assert report["pair_finetune_metrics"]["world"]["stage1_tail_internal_best_epoch"] == 6
     assert report["pair_finetune_metrics"]["world"]["stage1_tail_internal_best_reason"] == "stage1_unique_higher"
     assert report["pair_finetune_metrics"]["world"]["stage1_tail_internal_best_stage1_probe_unique"] == pytest.approx(17.0)

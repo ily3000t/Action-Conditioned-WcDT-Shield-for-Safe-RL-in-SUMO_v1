@@ -538,6 +538,30 @@ class WorldModelTrainer:
         ).strip().lower()
         if stage1_tail_sampling_mode not in {'with_replacement', 'without_replacement'}:
             stage1_tail_sampling_mode = 'with_replacement'
+        tail_ranking_loss_weight_cfg = getattr(
+            self.config,
+            'pair_ft_stage1_tail_ranking_loss_weight',
+            None,
+        )
+        if tail_ranking_loss_weight_cfg is not None:
+            tail_ranking_loss_weight_cfg = float(tail_ranking_loss_weight_cfg)
+        tail_resolution_loss_weight_cfg = getattr(
+            self.config,
+            'pair_ft_stage1_tail_resolution_loss_weight',
+            None,
+        )
+        if tail_resolution_loss_weight_cfg is not None:
+            tail_resolution_loss_weight_cfg = float(tail_resolution_loss_weight_cfg)
+        tail_ranking_loss_weight_effective = float(
+            tail_ranking_loss_weight_cfg
+            if tail_ranking_loss_weight_cfg is not None
+            else float(self.config.ranking_loss_weight)
+        )
+        tail_resolution_loss_weight_effective = float(
+            tail_resolution_loss_weight_cfg
+            if tail_resolution_loss_weight_cfg is not None
+            else float(getattr(self.config, 'pair_ft_stage1_resolution_loss_weight', 0.0) or 0.0)
+        )
         pair_count = int(len(pair_samples))
         replay_sample_count = int(len(replay_samples))
         eval_replay_samples = self._select_pair_ft_eval_samples(replay_samples)
@@ -585,6 +609,8 @@ class WorldModelTrainer:
             'stage4_pair_count': int(len(stage4_pair_samples)),
             'stage1_tail_pair_count': int(len(stage1_tail_pair_samples)),
             'stage1_tail_sampling_mode_effective': str(stage1_tail_sampling_mode),
+            'stage1_tail_ranking_loss_weight_effective': float(tail_ranking_loss_weight_effective),
+            'stage1_tail_resolution_loss_weight_effective': float(tail_resolution_loss_weight_effective),
             'stage4_mix_every_n_steps': int(stage4_mix_every_n_steps),
             'stage5_pair_cap': int(getattr(self.config, 'stage5_pair_max_seen_per_epoch', 0) or 0),
             'stage5_pair_seen_counts': {pair_id: 0 for pair_id in stage5_pair_ids},
@@ -632,6 +658,11 @@ class WorldModelTrainer:
                 'pair_ft_stage1_resolution_apply_trusted_only': bool(
                     getattr(self.config, 'pair_ft_stage1_resolution_apply_trusted_only', True)
                 ),
+                'stage1_tail_ranking_loss_weight_effective': float(tail_ranking_loss_weight_effective),
+                'stage1_tail_resolution_loss_weight_effective': float(tail_resolution_loss_weight_effective),
+                'stage1_tail_ranking_loss': 0.0,
+                'stage1_tail_resolution_loss': 0.0,
+                'stage1_tail_floor_reject_reasons': {},
                 'pair_ft_selection_accuracy_tie_epsilon_effective': float(
                     getattr(self.config, 'pair_ft_selection_accuracy_tie_epsilon', 1e-4) or 1e-4
                 ),
@@ -743,6 +774,16 @@ class WorldModelTrainer:
         stage1_resolution_loss_weight = float(
             getattr(self.config, 'pair_ft_stage1_resolution_loss_weight', 0.0) or 0.0
         )
+        tail_ranking_loss_weight_effective = float(
+            tail_ranking_loss_weight_cfg
+            if tail_ranking_loss_weight_cfg is not None
+            else float(self.config.ranking_loss_weight)
+        )
+        tail_resolution_loss_weight_effective = float(
+            tail_resolution_loss_weight_cfg
+            if tail_resolution_loss_weight_cfg is not None
+            else float(stage1_resolution_loss_weight)
+        )
         stage1_resolution_mode = str(getattr(self.config, 'pair_ft_stage1_resolution_mode', 'fixed') or 'fixed').strip().lower()
         if stage1_resolution_mode not in {'fixed', 'adaptive'}:
             stage1_resolution_mode = 'fixed'
@@ -775,7 +816,9 @@ class WorldModelTrainer:
             f"[WorldModel PairFT] stage1_tail: enabled={bool(stage1_tail_epochs > 0)}, "
             f"epochs={int(stage1_tail_epochs)}, pair_count={int(len(stage1_tail_pair_samples))}, "
             f"trusted_only={bool(stage1_tail_apply_trusted_only)}, "
-            f"sampling_mode={str(stage1_tail_sampling_mode)}"
+            f"sampling_mode={str(stage1_tail_sampling_mode)}, "
+            f"ranking_weight={tail_ranking_loss_weight_effective:.4f}, "
+            f"resolution_weight={tail_resolution_loss_weight_effective:.4f}"
         )
         replay_loader = self._build_replay_loader(replay_samples)
         replay_iter = iter(replay_loader) if replay_loader is not None else None
@@ -1249,6 +1292,10 @@ class WorldModelTrainer:
         stage1_tail_eval_metrics_before = self.evaluate_pairs(best_eval_pairs)
         stage1_tail_stage1_probe_metrics_after = dict(stage1_tail_stage1_probe_metrics_before)
         stage1_tail_eval_metrics_after = dict(stage1_tail_eval_metrics_before)
+        stage1_tail_ranking_loss_total = 0.0
+        stage1_tail_resolution_loss_total = 0.0
+        stage1_tail_loss_steps = 0
+        stage1_tail_floor_reject_reasons: Dict[str, int] = {}
         min_spread_floor = float(getattr(self.config, 'pair_ft_min_score_spread_floor', 0.0) or 0.0)
         min_gap_floor = float(getattr(self.config, 'pair_ft_min_same_state_gap_floor', 0.0) or 0.0)
         tail_internal_best_state: Optional[Dict[str, torch.Tensor]] = None
@@ -1303,9 +1350,8 @@ class WorldModelTrainer:
                         enable_stage1_resolution=True,
                     )
                     total_loss = (
-                        float(self.config.ranking_loss_weight) * stage1_ranking_loss
-                        + float(getattr(self.config, 'pair_ft_stage1_resolution_loss_weight', 0.0) or 0.0)
-                        * stage1_resolution_loss
+                        float(tail_ranking_loss_weight_effective) * stage1_ranking_loss
+                        + float(tail_resolution_loss_weight_effective) * stage1_resolution_loss
                     )
                     tail_optimizer.zero_grad()
                     total_loss.backward()
@@ -1339,6 +1385,9 @@ class WorldModelTrainer:
                     step_total = float(total_loss.item())
                     step_ranking = float(stage1_ranking_loss.item())
                     step_resolution = float(stage1_resolution_loss.item())
+                    stage1_tail_ranking_loss_total += step_ranking
+                    stage1_tail_resolution_loss_total += step_resolution
+                    stage1_tail_loss_steps += 1
                     epoch_total += step_total
                     epoch_ranking += step_ranking
                     epoch_resolution += step_resolution
@@ -1491,7 +1540,11 @@ class WorldModelTrainer:
                             )
                             epoch_summary['stage1_tail_is_internal_best'] = True
                             epoch_summary['stage1_tail_internal_best_reason'] = str(best_update_reason)
-                    elif tail_internal_best_state is None:
+                    else:
+                        stage1_tail_floor_reject_reasons[str(floor_reason)] = (
+                            int(stage1_tail_floor_reject_reasons.get(str(floor_reason), 0)) + 1
+                        )
+                    if (not floor_passed) and tail_internal_best_state is None:
                         stage1_tail_internal_best_reason = str(floor_reason)
                     epoch_metrics.append(epoch_summary)
 
@@ -1562,6 +1615,19 @@ class WorldModelTrainer:
             'pair_ft_stage1_resolution_alpha': float(stage1_resolution_alpha),
             'pair_ft_stage1_resolution_max_score_gap': float(stage1_resolution_max_score_gap),
             'pair_ft_stage1_resolution_apply_trusted_only': bool(stage1_resolution_apply_trusted_only),
+            'stage1_tail_ranking_loss_weight_effective': float(tail_ranking_loss_weight_effective),
+            'stage1_tail_resolution_loss_weight_effective': float(tail_resolution_loss_weight_effective),
+            'stage1_tail_ranking_loss': (
+                float(stage1_tail_ranking_loss_total) / float(stage1_tail_loss_steps)
+                if stage1_tail_loss_steps > 0
+                else 0.0
+            ),
+            'stage1_tail_resolution_loss': (
+                float(stage1_tail_resolution_loss_total) / float(stage1_tail_loss_steps)
+                if stage1_tail_loss_steps > 0
+                else 0.0
+            ),
+            'stage1_tail_floor_reject_reasons': dict(stage1_tail_floor_reject_reasons),
             'pair_ft_selection_accuracy_tie_epsilon_effective': float(selection_accuracy_tie_epsilon),
             'stage1_tail_sampling_mode_effective': str(stage1_tail_sampling_mode),
             'world_pair_ft_frozen_modules': frozen_modules,
