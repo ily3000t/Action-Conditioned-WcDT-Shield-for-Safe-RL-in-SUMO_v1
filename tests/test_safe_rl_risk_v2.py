@@ -906,6 +906,7 @@ def test_world_stage1_tail_phase_applies_when_trusted_pairs_available():
     assert report.get("stage1_tail_pair_count") == 1
     assert report.get("stage1_tail_accepted") is True
     assert report.get("stage1_tail_acceptance_reason") == "acceptance_disabled"
+    assert report.get("stage1_tail_sampling_mode_effective") == "with_replacement"
     assert report.get("world_pair_ft_final_state_source") == "selected_best_plus_stage1_tail"
     assert source_mix.get("stage1_tail_steps", 0) > 0
     assert source_mix.get("stage1_tail_pairs_seen", 0) > 0
@@ -965,6 +966,7 @@ def test_world_stage1_tail_phase_skips_when_no_trusted_pairs():
     assert report.get("stage1_tail_pair_count") == 0
     assert report.get("stage1_tail_accepted") is False
     assert report.get("stage1_tail_acceptance_reason") == "tail_not_applied"
+    assert report.get("stage1_tail_sampling_mode_effective") == "with_replacement"
     assert report.get("world_pair_ft_final_state_source") == "selected_best"
     assert source_mix.get("stage1_tail_steps") == 0
     assert source_mix.get("stage1_tail_pairs_seen") == 0
@@ -1050,6 +1052,46 @@ def test_world_stage1_tail_acceptance_accepts_unique_gain_within_tolerance():
     )
     assert accepted is True
     assert reason == "accepted_unique_gain_and_non_degradation"
+
+
+def test_world_tail_without_replacement_batches_have_no_duplicates_per_epoch():
+    from safe_rl.models.world_model import WorldModelTrainer
+
+    trainer = WorldModelTrainer(config=WorldModelConfig(hidden_dim=64, future_steps=2, multimodal=2), history_steps=2, device="cpu")
+    samples = [
+        RiskPairSample(
+            history_scene=_history_scene()[:2],
+            action_a=4,
+            action_b=3,
+            preferred_action=4,
+            source="stage1_probe_same_state",
+            weight=1.0,
+            meta={"target_risk_a": 0.1, "target_risk_b": 0.8, "trusted_for_spread": True},
+        )
+        for _ in range(5)
+    ]
+    batches = trainer._build_pair_batches_without_replacement(samples, batch_size=2)
+    flattened = [id(sample) for batch in batches for sample in batch]
+    assert len(flattened) == len(samples)
+    assert len(flattened) == len(set(flattened))
+
+
+def test_world_tail_with_replacement_sampler_preserves_existing_behavior():
+    from safe_rl.models.world_model import WorldModelTrainer
+
+    trainer = WorldModelTrainer(config=WorldModelConfig(hidden_dim=64, future_steps=2, multimodal=2), history_steps=2, device="cpu")
+    sample = RiskPairSample(
+        history_scene=_history_scene()[:2],
+        action_a=4,
+        action_b=3,
+        preferred_action=4,
+        source="stage1_probe_same_state",
+        weight=1.0,
+        meta={"target_risk_a": 0.1, "target_risk_b": 0.8, "trusted_for_spread": True},
+    )
+    batch = trainer._sample_pair_batch_with_replacement([sample], batch_size=3)
+    assert len(batch) == 3
+    assert all(item is sample for item in batch)
 
 
 def test_world_evaluate_pairs_restores_train_mode():

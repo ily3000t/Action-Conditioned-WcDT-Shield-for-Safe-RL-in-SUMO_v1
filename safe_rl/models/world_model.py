@@ -532,6 +532,12 @@ class WorldModelTrainer:
         stage1_tail_acceptance_gap_tolerance = float(
             getattr(self.config, 'pair_ft_stage1_tail_acceptance_gap_tolerance', 0.001) or 0.001
         )
+        stage1_tail_sampling_mode = str(
+            getattr(self.config, 'pair_ft_stage1_tail_sampling_mode', 'with_replacement')
+            or 'with_replacement'
+        ).strip().lower()
+        if stage1_tail_sampling_mode not in {'with_replacement', 'without_replacement'}:
+            stage1_tail_sampling_mode = 'with_replacement'
         pair_count = int(len(pair_samples))
         replay_sample_count = int(len(replay_samples))
         eval_replay_samples = self._select_pair_ft_eval_samples(replay_samples)
@@ -578,6 +584,7 @@ class WorldModelTrainer:
             'stage1_probe_pair_count': int(len(stage1_probe_pair_samples)),
             'stage4_pair_count': int(len(stage4_pair_samples)),
             'stage1_tail_pair_count': int(len(stage1_tail_pair_samples)),
+            'stage1_tail_sampling_mode_effective': str(stage1_tail_sampling_mode),
             'stage4_mix_every_n_steps': int(stage4_mix_every_n_steps),
             'stage5_pair_cap': int(getattr(self.config, 'stage5_pair_max_seen_per_epoch', 0) or 0),
             'stage5_pair_seen_counts': {pair_id: 0 for pair_id in stage5_pair_ids},
@@ -628,6 +635,7 @@ class WorldModelTrainer:
                 'pair_ft_selection_accuracy_tie_epsilon_effective': float(
                     getattr(self.config, 'pair_ft_selection_accuracy_tie_epsilon', 1e-4) or 1e-4
                 ),
+                'stage1_tail_sampling_mode_effective': str(stage1_tail_sampling_mode),
                 'world_pair_ft_frozen_modules': [],
                 'world_pair_ft_trainable_modules': [],
                 'world_pair_ft_source_mix': dict(source_mix),
@@ -766,7 +774,8 @@ class WorldModelTrainer:
         print(
             f"[WorldModel PairFT] stage1_tail: enabled={bool(stage1_tail_epochs > 0)}, "
             f"epochs={int(stage1_tail_epochs)}, pair_count={int(len(stage1_tail_pair_samples))}, "
-            f"trusted_only={bool(stage1_tail_apply_trusted_only)}"
+            f"trusted_only={bool(stage1_tail_apply_trusted_only)}, "
+            f"sampling_mode={str(stage1_tail_sampling_mode)}"
         )
         replay_loader = self._build_replay_loader(replay_samples)
         replay_iter = iter(replay_loader) if replay_loader is not None else None
@@ -1269,12 +1278,23 @@ class WorldModelTrainer:
                 epoch_stage1_probe_below_score_margin_count = 0
                 epoch_stage1_probe_below_adaptive_margin_count = 0
                 epoch_stage1_probe_pairs_seen = 0
-
-                for _ in range(tail_epoch_steps_target):
-                    stage1_tail_batch = self._sample_pair_batch_with_replacement(
+                epoch_tail_batches_without_replacement: List[List[RiskPairSample]] = []
+                if stage1_tail_sampling_mode == 'without_replacement':
+                    epoch_tail_batches_without_replacement = self._build_pair_batches_without_replacement(
                         stage1_tail_pair_samples,
                         stage1_tail_batch_size,
                     )
+
+                for _ in range(tail_epoch_steps_target):
+                    if stage1_tail_sampling_mode == 'without_replacement':
+                        if not epoch_tail_batches_without_replacement:
+                            continue
+                        stage1_tail_batch = epoch_tail_batches_without_replacement.pop(0)
+                    else:
+                        stage1_tail_batch = self._sample_pair_batch_with_replacement(
+                            stage1_tail_pair_samples,
+                            stage1_tail_batch_size,
+                        )
                     if not stage1_tail_batch:
                         continue
                     stage1_ranking_loss, _, stage1_resolution_loss, stage1_diag = self._compute_pair_losses(
@@ -1409,6 +1429,7 @@ class WorldModelTrainer:
                             if epoch_stage1_probe_active_pairs > 0
                             else 0.0
                         ),
+                        'stage1_tail_sampling_mode_effective': str(stage1_tail_sampling_mode),
                     }
                     eval_metrics = self.evaluate_pairs(best_eval_pairs)
                     eval_stage1_probe_metrics = self.evaluate_pairs(stage1_probe_pair_samples)
@@ -1542,6 +1563,7 @@ class WorldModelTrainer:
             'pair_ft_stage1_resolution_max_score_gap': float(stage1_resolution_max_score_gap),
             'pair_ft_stage1_resolution_apply_trusted_only': bool(stage1_resolution_apply_trusted_only),
             'pair_ft_selection_accuracy_tie_epsilon_effective': float(selection_accuracy_tie_epsilon),
+            'stage1_tail_sampling_mode_effective': str(stage1_tail_sampling_mode),
             'world_pair_ft_frozen_modules': frozen_modules,
             'world_pair_ft_trainable_modules': trainable_modules,
             'world_pair_ft_source_mix': dict(source_mix),
@@ -2395,6 +2417,21 @@ class WorldModelTrainer:
         if not samples:
             return []
         return [self.rng.choice(samples) for _ in range(max(1, batch_size))]
+
+    def _build_pair_batches_without_replacement(
+        self,
+        pair_samples: Sequence[RiskPairSample],
+        batch_size: int,
+    ) -> List[List[RiskPairSample]]:
+        samples = list(pair_samples or [])
+        if not samples:
+            return []
+        self.rng.shuffle(samples)
+        effective_batch = max(1, int(batch_size))
+        return [
+            samples[start:start + effective_batch]
+            for start in range(0, len(samples), effective_batch)
+        ]
 
     def _pair_ft_epoch_steps(self, stage5_pair_samples: Sequence[RiskPairSample], stage4_loader, stage5_batch_size: int) -> int:
         if stage4_loader is not None:
