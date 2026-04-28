@@ -562,6 +562,27 @@ class WorldModelTrainer:
             if tail_resolution_loss_weight_cfg is not None
             else float(getattr(self.config, 'pair_ft_stage1_resolution_loss_weight', 0.0) or 0.0)
         )
+        stage1_tail_anticollapse_weight_effective = float(
+            getattr(self.config, 'pair_ft_stage1_tail_anticollapse_weight', 0.0) or 0.0
+        )
+        stage1_tail_score_range_floor_effective = float(
+            getattr(self.config, 'pair_ft_stage1_tail_score_range_floor', 0.02) or 0.02
+        )
+        stage1_tail_score_range_quantile_low_effective = float(
+            getattr(self.config, 'pair_ft_stage1_tail_score_range_quantile_low', 0.10) or 0.10
+        )
+        stage1_tail_score_range_quantile_high_effective = float(
+            getattr(self.config, 'pair_ft_stage1_tail_score_range_quantile_high', 0.90) or 0.90
+        )
+        stage1_tail_score_range_quantile_low_effective = float(
+            min(1.0, max(0.0, stage1_tail_score_range_quantile_low_effective))
+        )
+        stage1_tail_score_range_quantile_high_effective = float(
+            min(1.0, max(0.0, stage1_tail_score_range_quantile_high_effective))
+        )
+        if stage1_tail_score_range_quantile_high_effective <= stage1_tail_score_range_quantile_low_effective:
+            stage1_tail_score_range_quantile_low_effective = 0.10
+            stage1_tail_score_range_quantile_high_effective = 0.90
         pair_count = int(len(pair_samples))
         replay_sample_count = int(len(replay_samples))
         eval_replay_samples = self._select_pair_ft_eval_samples(replay_samples)
@@ -611,6 +632,12 @@ class WorldModelTrainer:
             'stage1_tail_sampling_mode_effective': str(stage1_tail_sampling_mode),
             'stage1_tail_ranking_loss_weight_effective': float(tail_ranking_loss_weight_effective),
             'stage1_tail_resolution_loss_weight_effective': float(tail_resolution_loss_weight_effective),
+            'stage1_tail_anticollapse_weight_effective': float(stage1_tail_anticollapse_weight_effective),
+            'stage1_tail_score_range_floor_effective': float(stage1_tail_score_range_floor_effective),
+            'stage1_tail_score_range_quantiles_effective': {
+                'low': float(stage1_tail_score_range_quantile_low_effective),
+                'high': float(stage1_tail_score_range_quantile_high_effective),
+            },
             'stage4_mix_every_n_steps': int(stage4_mix_every_n_steps),
             'stage5_pair_cap': int(getattr(self.config, 'stage5_pair_max_seen_per_epoch', 0) or 0),
             'stage5_pair_seen_counts': {pair_id: 0 for pair_id in stage5_pair_ids},
@@ -660,8 +687,16 @@ class WorldModelTrainer:
                 ),
                 'stage1_tail_ranking_loss_weight_effective': float(tail_ranking_loss_weight_effective),
                 'stage1_tail_resolution_loss_weight_effective': float(tail_resolution_loss_weight_effective),
+                'stage1_tail_anticollapse_weight_effective': float(stage1_tail_anticollapse_weight_effective),
+                'stage1_tail_score_range_floor_effective': float(stage1_tail_score_range_floor_effective),
+                'stage1_tail_score_range_quantiles_effective': {
+                    'low': float(stage1_tail_score_range_quantile_low_effective),
+                    'high': float(stage1_tail_score_range_quantile_high_effective),
+                },
                 'stage1_tail_ranking_loss': 0.0,
                 'stage1_tail_resolution_loss': 0.0,
+                'stage1_tail_anticollapse_loss': 0.0,
+                'stage1_tail_score_range_q10_q90': {'q10': 0.0, 'q90': 0.0, 'range': 0.0},
                 'stage1_tail_floor_reject_reasons': {},
                 'pair_ft_selection_accuracy_tie_epsilon_effective': float(
                     getattr(self.config, 'pair_ft_selection_accuracy_tie_epsilon', 1e-4) or 1e-4
@@ -818,7 +853,10 @@ class WorldModelTrainer:
             f"trusted_only={bool(stage1_tail_apply_trusted_only)}, "
             f"sampling_mode={str(stage1_tail_sampling_mode)}, "
             f"ranking_weight={tail_ranking_loss_weight_effective:.4f}, "
-            f"resolution_weight={tail_resolution_loss_weight_effective:.4f}"
+            f"resolution_weight={tail_resolution_loss_weight_effective:.4f}, "
+            f"anticollapse_weight={stage1_tail_anticollapse_weight_effective:.4f}, "
+            f"range_floor={stage1_tail_score_range_floor_effective:.4f}, "
+            f"range_q=({stage1_tail_score_range_quantile_low_effective:.2f},{stage1_tail_score_range_quantile_high_effective:.2f})"
         )
         replay_loader = self._build_replay_loader(replay_samples)
         replay_iter = iter(replay_loader) if replay_loader is not None else None
@@ -1294,6 +1332,10 @@ class WorldModelTrainer:
         stage1_tail_eval_metrics_after = dict(stage1_tail_eval_metrics_before)
         stage1_tail_ranking_loss_total = 0.0
         stage1_tail_resolution_loss_total = 0.0
+        stage1_tail_anticollapse_loss_total = 0.0
+        stage1_tail_score_range_q10_sum = 0.0
+        stage1_tail_score_range_q90_sum = 0.0
+        stage1_tail_score_range_sum = 0.0
         stage1_tail_loss_steps = 0
         stage1_tail_floor_reject_reasons: Dict[str, int] = {}
         min_spread_floor = float(getattr(self.config, 'pair_ft_min_score_spread_floor', 0.0) or 0.0)
@@ -1316,6 +1358,7 @@ class WorldModelTrainer:
                 epoch_total = 0.0
                 epoch_ranking = 0.0
                 epoch_resolution = 0.0
+                epoch_anticollapse = 0.0
                 epoch_stage1_resolution = 0.0
                 epoch_steps = 0
                 epoch_stage1_probe_active_pairs = 0
@@ -1325,6 +1368,9 @@ class WorldModelTrainer:
                 epoch_stage1_probe_below_score_margin_count = 0
                 epoch_stage1_probe_below_adaptive_margin_count = 0
                 epoch_stage1_probe_pairs_seen = 0
+                epoch_stage1_tail_score_range_q10_sum = 0.0
+                epoch_stage1_tail_score_range_q90_sum = 0.0
+                epoch_stage1_tail_score_range_sum = 0.0
                 epoch_tail_batches_without_replacement: List[List[RiskPairSample]] = []
                 if stage1_tail_sampling_mode == 'without_replacement':
                     epoch_tail_batches_without_replacement = self._build_pair_batches_without_replacement(
@@ -1348,10 +1394,16 @@ class WorldModelTrainer:
                         stage1_tail_batch,
                         enable_resolution=False,
                         enable_stage1_resolution=True,
+                        enable_stage1_tail_anticollapse=True,
+                        stage1_tail_score_range_floor=stage1_tail_score_range_floor_effective,
+                        stage1_tail_score_range_quantile_low=stage1_tail_score_range_quantile_low_effective,
+                        stage1_tail_score_range_quantile_high=stage1_tail_score_range_quantile_high_effective,
                     )
+                    stage1_tail_anticollapse_loss = stage1_diag.get('stage1_tail_anticollapse_loss_tensor', self._zero_loss())
                     total_loss = (
                         float(tail_ranking_loss_weight_effective) * stage1_ranking_loss
                         + float(tail_resolution_loss_weight_effective) * stage1_resolution_loss
+                        + float(stage1_tail_anticollapse_weight_effective) * stage1_tail_anticollapse_loss
                     )
                     tail_optimizer.zero_grad()
                     total_loss.backward()
@@ -1381,16 +1433,22 @@ class WorldModelTrainer:
                     epoch_stage1_probe_below_adaptive_margin_count += int(
                         stage1_diag.get('stage1_probe_below_adaptive_margin_count', 0)
                     )
+                    epoch_stage1_tail_score_range_q10_sum += float(stage1_diag.get('stage1_tail_score_range_q10', 0.0))
+                    epoch_stage1_tail_score_range_q90_sum += float(stage1_diag.get('stage1_tail_score_range_q90', 0.0))
+                    epoch_stage1_tail_score_range_sum += float(stage1_diag.get('stage1_tail_score_range', 0.0))
 
                     step_total = float(total_loss.item())
                     step_ranking = float(stage1_ranking_loss.item())
                     step_resolution = float(stage1_resolution_loss.item())
+                    step_anticollapse = float(stage1_tail_anticollapse_loss.detach().item())
                     stage1_tail_ranking_loss_total += step_ranking
                     stage1_tail_resolution_loss_total += step_resolution
+                    stage1_tail_anticollapse_loss_total += step_anticollapse
                     stage1_tail_loss_steps += 1
                     epoch_total += step_total
                     epoch_ranking += step_ranking
                     epoch_resolution += step_resolution
+                    epoch_anticollapse += step_anticollapse
                     epoch_stage1_resolution += step_resolution
                     epoch_steps += 1
 
@@ -1400,6 +1458,7 @@ class WorldModelTrainer:
                         tb_writer.add_scalar('loss/step_ranking', step_ranking, global_step)
                         tb_writer.add_scalar('loss/step_spread', 0.0, global_step)
                         tb_writer.add_scalar('loss/step_resolution', step_resolution, global_step)
+                        tb_writer.add_scalar('loss/step_tail_anticollapse', step_anticollapse, global_step)
                     global_step += 1
 
                 if epoch_steps > 0:
@@ -1413,6 +1472,10 @@ class WorldModelTrainer:
                         'loss_ranking': epoch_ranking / epoch_steps,
                         'loss_spread': 0.0,
                         'loss_resolution': epoch_resolution / epoch_steps,
+                        'stage1_tail_anticollapse_loss': epoch_anticollapse / epoch_steps,
+                        'stage1_tail_score_range_q10': epoch_stage1_tail_score_range_q10_sum / epoch_steps,
+                        'stage1_tail_score_range_q90': epoch_stage1_tail_score_range_q90_sum / epoch_steps,
+                        'stage1_tail_score_range': epoch_stage1_tail_score_range_sum / epoch_steps,
                         'stage4_aux_resolution_loss': 0.0,
                         'stage4_aux_active_pair_count': 0.0,
                         'stage4_aux_active_pair_fraction': 0.0,
@@ -1617,6 +1680,12 @@ class WorldModelTrainer:
             'pair_ft_stage1_resolution_apply_trusted_only': bool(stage1_resolution_apply_trusted_only),
             'stage1_tail_ranking_loss_weight_effective': float(tail_ranking_loss_weight_effective),
             'stage1_tail_resolution_loss_weight_effective': float(tail_resolution_loss_weight_effective),
+            'stage1_tail_anticollapse_weight_effective': float(stage1_tail_anticollapse_weight_effective),
+            'stage1_tail_score_range_floor_effective': float(stage1_tail_score_range_floor_effective),
+            'stage1_tail_score_range_quantiles_effective': {
+                'low': float(stage1_tail_score_range_quantile_low_effective),
+                'high': float(stage1_tail_score_range_quantile_high_effective),
+            },
             'stage1_tail_ranking_loss': (
                 float(stage1_tail_ranking_loss_total) / float(stage1_tail_loss_steps)
                 if stage1_tail_loss_steps > 0
@@ -1627,6 +1696,28 @@ class WorldModelTrainer:
                 if stage1_tail_loss_steps > 0
                 else 0.0
             ),
+            'stage1_tail_anticollapse_loss': (
+                float(stage1_tail_anticollapse_loss_total) / float(stage1_tail_loss_steps)
+                if stage1_tail_loss_steps > 0
+                else 0.0
+            ),
+            'stage1_tail_score_range_q10_q90': {
+                'q10': (
+                    float(stage1_tail_score_range_q10_sum) / float(stage1_tail_loss_steps)
+                    if stage1_tail_loss_steps > 0
+                    else 0.0
+                ),
+                'q90': (
+                    float(stage1_tail_score_range_q90_sum) / float(stage1_tail_loss_steps)
+                    if stage1_tail_loss_steps > 0
+                    else 0.0
+                ),
+                'range': (
+                    float(stage1_tail_score_range_sum) / float(stage1_tail_loss_steps)
+                    if stage1_tail_loss_steps > 0
+                    else 0.0
+                ),
+            },
             'stage1_tail_floor_reject_reasons': dict(stage1_tail_floor_reject_reasons),
             'pair_ft_selection_accuracy_tie_epsilon_effective': float(selection_accuracy_tie_epsilon),
             'stage1_tail_sampling_mode_effective': str(stage1_tail_sampling_mode),
@@ -2183,6 +2274,10 @@ class WorldModelTrainer:
         batch: Sequence[RiskPairSample],
         enable_resolution: bool = False,
         enable_stage1_resolution: bool = False,
+        enable_stage1_tail_anticollapse: bool = False,
+        stage1_tail_score_range_floor: float = 0.02,
+        stage1_tail_score_range_quantile_low: float = 0.10,
+        stage1_tail_score_range_quantile_high: float = 0.90,
     ):
         (
             batch_a,
@@ -2357,6 +2452,30 @@ class WorldModelTrainer:
             stage1_probe_below_score_margin_fraction = 0.0
             stage1_probe_below_adaptive_margin_count = 0
             stage1_probe_below_adaptive_margin_fraction = 0.0
+        stage1_tail_q10 = 0.0
+        stage1_tail_q90 = 0.0
+        stage1_tail_score_range = 0.0
+        if enable_stage1_tail_anticollapse and stage1_active_resolution_count > 0:
+            active_score_a = score_a[stage1_active_resolution_mask]
+            active_score_b = score_b[stage1_active_resolution_mask]
+            active_scores = torch.cat([active_score_a, active_score_b], dim=0)
+            if active_scores.numel() > 0:
+                q_low = torch.quantile(active_scores, stage1_tail_score_range_quantile_low)
+                q_high = torch.quantile(active_scores, stage1_tail_score_range_quantile_high)
+                score_range = q_high - q_low
+                range_floor_tensor = torch.tensor(
+                    stage1_tail_score_range_floor,
+                    dtype=score_range.dtype,
+                    device=score_range.device,
+                )
+                stage1_tail_anticollapse_loss = torch.relu(range_floor_tensor - score_range)
+                stage1_tail_q10 = float(q_low.detach().item())
+                stage1_tail_q90 = float(q_high.detach().item())
+                stage1_tail_score_range = float(score_range.detach().item())
+            else:
+                stage1_tail_anticollapse_loss = self._zero_loss()
+        else:
+            stage1_tail_anticollapse_loss = self._zero_loss()
         resolution_loss = stage4_resolution_loss + stage1_resolution_loss
         diagnostics = {
             'stage4_aux_active_pair_count': int(stage4_active_resolution_count),
@@ -2401,6 +2520,14 @@ class WorldModelTrainer:
             'pair_ft_stage1_resolution_max_score_gap': float(stage1_resolution_max_score_gap),
             'pair_ft_stage1_resolution_apply_trusted_only': bool(stage1_resolution_apply_trusted_only),
             'pair_ft_stage1_resolution_min_score_gap': float(stage1_min_score_gap),
+            'stage1_tail_anticollapse_loss': float(stage1_tail_anticollapse_loss.detach().item()),
+            'stage1_tail_score_range_q10': float(stage1_tail_q10),
+            'stage1_tail_score_range_q90': float(stage1_tail_q90),
+            'stage1_tail_score_range': float(stage1_tail_score_range),
+            'stage1_tail_score_range_floor': float(stage1_tail_score_range_floor),
+            'stage1_tail_score_range_quantile_low': float(stage1_tail_score_range_quantile_low),
+            'stage1_tail_score_range_quantile_high': float(stage1_tail_score_range_quantile_high),
+            'stage1_tail_anticollapse_loss_tensor': stage1_tail_anticollapse_loss,
         }
         return ranking_loss, spread_loss, resolution_loss, diagnostics
 

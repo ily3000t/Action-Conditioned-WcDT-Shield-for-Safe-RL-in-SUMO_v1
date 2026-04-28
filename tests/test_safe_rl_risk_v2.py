@@ -909,14 +909,20 @@ def test_world_stage1_tail_phase_applies_when_trusted_pairs_available():
     assert report.get("stage1_tail_sampling_mode_effective") == "with_replacement"
     assert report.get("stage1_tail_ranking_loss_weight_effective") == pytest.approx(0.3, abs=1e-6)
     assert report.get("stage1_tail_resolution_loss_weight_effective") == pytest.approx(0.02, abs=1e-6)
+    assert report.get("stage1_tail_anticollapse_weight_effective") == pytest.approx(0.0, abs=1e-6)
+    assert report.get("stage1_tail_score_range_floor_effective") == pytest.approx(0.02, abs=1e-6)
+    assert report.get("stage1_tail_score_range_quantiles_effective") == {"low": 0.1, "high": 0.9}
     assert report.get("stage1_tail_ranking_loss", 0.0) >= 0.0
     assert report.get("stage1_tail_resolution_loss", 0.0) >= 0.0
+    assert report.get("stage1_tail_anticollapse_loss") == pytest.approx(0.0, abs=1e-9)
+    assert report.get("stage1_tail_score_range_q10_q90") == {"q10": 0.0, "q90": 0.0, "range": 0.0}
     assert isinstance(report.get("stage1_tail_floor_reject_reasons"), dict)
     assert report.get("world_pair_ft_final_state_source") == "selected_best_plus_stage1_tail"
     assert source_mix.get("stage1_tail_steps", 0) > 0
     assert source_mix.get("stage1_tail_pairs_seen", 0) > 0
     assert source_mix.get("stage1_tail_ranking_loss_weight_effective") == pytest.approx(0.3, abs=1e-6)
     assert source_mix.get("stage1_tail_resolution_loss_weight_effective") == pytest.approx(0.02, abs=1e-6)
+    assert source_mix.get("stage1_tail_anticollapse_weight_effective") == pytest.approx(0.0, abs=1e-6)
     assert "stage1_tail_stage1_probe_unique_before_after" in report
     assert "stage1_tail_stage1_probe_score_spread_before_after" in report
     assert "stage1_tail_stage1_probe_same_state_gap_before_after" in report
@@ -976,14 +982,20 @@ def test_world_stage1_tail_phase_skips_when_no_trusted_pairs():
     assert report.get("stage1_tail_sampling_mode_effective") == "with_replacement"
     assert report.get("stage1_tail_ranking_loss_weight_effective") == pytest.approx(0.3, abs=1e-6)
     assert report.get("stage1_tail_resolution_loss_weight_effective") == pytest.approx(0.02, abs=1e-6)
+    assert report.get("stage1_tail_anticollapse_weight_effective") == pytest.approx(0.0, abs=1e-6)
+    assert report.get("stage1_tail_score_range_floor_effective") == pytest.approx(0.02, abs=1e-6)
+    assert report.get("stage1_tail_score_range_quantiles_effective") == {"low": 0.1, "high": 0.9}
     assert report.get("stage1_tail_ranking_loss") == pytest.approx(0.0, abs=1e-9)
     assert report.get("stage1_tail_resolution_loss") == pytest.approx(0.0, abs=1e-9)
+    assert report.get("stage1_tail_anticollapse_loss") == pytest.approx(0.0, abs=1e-9)
+    assert report.get("stage1_tail_score_range_q10_q90") == {"q10": 0.0, "q90": 0.0, "range": 0.0}
     assert report.get("stage1_tail_floor_reject_reasons") == {}
     assert report.get("world_pair_ft_final_state_source") == "selected_best"
     assert source_mix.get("stage1_tail_steps") == 0
     assert source_mix.get("stage1_tail_pairs_seen") == 0
     assert source_mix.get("stage1_tail_ranking_loss_weight_effective") == pytest.approx(0.3, abs=1e-6)
     assert source_mix.get("stage1_tail_resolution_loss_weight_effective") == pytest.approx(0.02, abs=1e-6)
+    assert source_mix.get("stage1_tail_anticollapse_weight_effective") == pytest.approx(0.0, abs=1e-6)
 
 
 def test_world_stage1_tail_uses_override_tail_loss_weights():
@@ -1090,6 +1102,91 @@ def test_world_stage1_tail_floor_reject_reasons_are_aggregated(monkeypatch):
     assert report.get("stage1_tail_applied") is True
     assert report.get("stage1_tail_internal_best_epoch") == -1
     assert reasons.get("floor_stage1_acc_below_pre_tail_tolerance", 0) >= 1
+
+
+def test_world_stage1_tail_anticollapse_loss_positive_when_range_below_floor():
+    from safe_rl.models.world_model import WorldModelTrainer
+
+    trainer = WorldModelTrainer(
+        config=WorldModelConfig(
+            hidden_dim=64,
+            future_steps=2,
+            multimodal=2,
+            pair_ft_stage1_resolution_mode="fixed",
+            pair_ft_stage1_resolution_min_score_gap=0.015,
+            pair_ft_stage1_resolution_apply_trusted_only=True,
+        ),
+        history_steps=2,
+        device="cpu",
+    )
+    pair = RiskPairSample(
+        history_scene=_history_scene()[:2],
+        action_a=4,
+        action_b=3,
+        preferred_action=4,
+        source="stage1_probe_same_state",
+        weight=1.0,
+        meta={
+            "target_risk_a": 0.30,
+            "target_risk_b": 0.31,
+            "target_gap": 0.01,
+            "trusted_for_spread": True,
+        },
+    )
+    _, _, _, diag = trainer._compute_pair_losses(
+        [pair],
+        enable_resolution=False,
+        enable_stage1_resolution=True,
+        enable_stage1_tail_anticollapse=True,
+        stage1_tail_score_range_floor=0.5,
+        stage1_tail_score_range_quantile_low=0.1,
+        stage1_tail_score_range_quantile_high=0.9,
+    )
+    assert diag["stage1_probe_active_pair_count"] == 1
+    assert diag["stage1_tail_anticollapse_loss"] > 0.0
+    assert diag["stage1_tail_score_range_q90"] >= diag["stage1_tail_score_range_q10"]
+
+
+def test_world_stage1_tail_anticollapse_loss_zero_when_no_active_pairs():
+    from safe_rl.models.world_model import WorldModelTrainer
+
+    trainer = WorldModelTrainer(
+        config=WorldModelConfig(
+            hidden_dim=64,
+            future_steps=2,
+            multimodal=2,
+            pair_ft_stage1_resolution_mode="fixed",
+            pair_ft_stage1_resolution_min_score_gap=0.015,
+            pair_ft_stage1_resolution_apply_trusted_only=True,
+        ),
+        history_steps=2,
+        device="cpu",
+    )
+    pair = RiskPairSample(
+        history_scene=_history_scene()[:2],
+        action_a=4,
+        action_b=3,
+        preferred_action=4,
+        source="stage1_probe_same_state",
+        weight=1.0,
+        meta={
+            "target_risk_a": 0.30,
+            "target_risk_b": 0.31,
+            "target_gap": 0.01,
+            "trusted_for_spread": False,
+        },
+    )
+    _, _, _, diag = trainer._compute_pair_losses(
+        [pair],
+        enable_resolution=False,
+        enable_stage1_resolution=True,
+        enable_stage1_tail_anticollapse=True,
+        stage1_tail_score_range_floor=0.5,
+        stage1_tail_score_range_quantile_low=0.1,
+        stage1_tail_score_range_quantile_high=0.9,
+    )
+    assert diag["stage1_probe_active_pair_count"] == 0
+    assert diag["stage1_tail_anticollapse_loss"] == pytest.approx(0.0, abs=1e-9)
 
 
 def test_world_stage1_tail_compare_prioritizes_unique_gap_spread_over_accuracy():

@@ -251,6 +251,10 @@ def test_risk_model_v2_defaults_enabled():
     assert config.world_model.pair_ft_stage1_tail_sampling_mode == "with_replacement"
     assert config.world_model.pair_ft_stage1_tail_ranking_loss_weight is None
     assert config.world_model.pair_ft_stage1_tail_resolution_loss_weight is None
+    assert config.world_model.pair_ft_stage1_tail_anticollapse_weight == 0.0
+    assert config.world_model.pair_ft_stage1_tail_score_range_floor == 0.02
+    assert config.world_model.pair_ft_stage1_tail_score_range_quantile_low == 0.10
+    assert config.world_model.pair_ft_stage1_tail_score_range_quantile_high == 0.90
     assert config.world_model.pair_ft_freeze_traj_decoder is True
     assert config.world_model.pair_ft_freeze_backbone == "partial"
 
@@ -439,6 +443,39 @@ def test_stage2_stage1_gate_tail_calibration_noreplacement_reweight_balanced_con
     assert config.world_model.pair_ft_stage1_tail_sampling_mode == "without_replacement"
     assert config.world_model.pair_ft_stage1_tail_ranking_loss_weight == pytest.approx(0.25)
     assert config.world_model.pair_ft_stage1_tail_resolution_loss_weight == pytest.approx(0.025)
+    assert config.world_model.pair_ft_selection_accuracy_tie_epsilon == 0.01
+    assert config.world_model.pair_ft_patience == default_config.world_model.pair_ft_patience
+    assert config.world_model.pair_ft_stage4_mix_every_n_steps == default_config.world_model.pair_ft_stage4_mix_every_n_steps
+    assert config.world_model.pair_ft_resolution_loss_weight == default_config.world_model.pair_ft_resolution_loss_weight
+    assert config.world_model.pair_finetune_gate_mode == default_config.world_model.pair_finetune_gate_mode
+    assert config.shield.profile == default_config.shield.profile
+    assert config.shield.risk_threshold == default_config.shield.risk_threshold
+
+
+def test_stage2_stage1_gate_tail_calibration_noreplacement_anticollapse_config_loads():
+    default_config = load_safe_rl_config("safe_rl/config/default_safe_rl.yaml")
+    config = load_safe_rl_config(
+        "safe_rl/config/advanced/stage2_stage1_gate_tail_calibration_noreplacement_anticollapse.yaml"
+    )
+    assert config.world_model.pair_ft_stage1_resolution_loss_weight == 0.02
+    assert config.world_model.pair_ft_stage1_resolution_mode == "adaptive"
+    assert config.world_model.pair_ft_stage1_resolution_min_score_gap == 0.018
+    assert config.world_model.pair_ft_stage1_resolution_alpha == 0.2
+    assert config.world_model.pair_ft_stage1_resolution_max_score_gap == 0.05
+    assert config.world_model.pair_ft_stage1_resolution_apply_trusted_only is True
+    assert config.world_model.pair_ft_stage1_tail_epochs == 2
+    assert config.world_model.pair_ft_stage1_tail_apply_trusted_only is True
+    assert config.world_model.pair_ft_stage1_tail_acceptance_enabled is True
+    assert config.world_model.pair_ft_stage1_tail_acceptance_acc_tolerance == 0.01
+    assert config.world_model.pair_ft_stage1_tail_acceptance_spread_tolerance == 0.001
+    assert config.world_model.pair_ft_stage1_tail_acceptance_gap_tolerance == 0.001
+    assert config.world_model.pair_ft_stage1_tail_sampling_mode == "without_replacement"
+    assert config.world_model.pair_ft_stage1_tail_ranking_loss_weight is None
+    assert config.world_model.pair_ft_stage1_tail_resolution_loss_weight == pytest.approx(0.025)
+    assert config.world_model.pair_ft_stage1_tail_anticollapse_weight == pytest.approx(0.005)
+    assert config.world_model.pair_ft_stage1_tail_score_range_floor == pytest.approx(0.02)
+    assert config.world_model.pair_ft_stage1_tail_score_range_quantile_low == pytest.approx(0.10)
+    assert config.world_model.pair_ft_stage1_tail_score_range_quantile_high == pytest.approx(0.90)
     assert config.world_model.pair_ft_selection_accuracy_tie_epsilon == 0.01
     assert config.world_model.pair_ft_patience == default_config.world_model.pair_ft_patience
     assert config.world_model.pair_ft_stage4_mix_every_n_steps == default_config.world_model.pair_ft_stage4_mix_every_n_steps

@@ -120,6 +120,10 @@ class WorldModelConfig:
     pair_ft_stage1_tail_sampling_mode: str = "with_replacement"
     pair_ft_stage1_tail_ranking_loss_weight: Optional[float] = None
     pair_ft_stage1_tail_resolution_loss_weight: Optional[float] = None
+    pair_ft_stage1_tail_anticollapse_weight: float = 0.0
+    pair_ft_stage1_tail_score_range_floor: float = 0.02
+    pair_ft_stage1_tail_score_range_quantile_low: float = 0.10
+    pair_ft_stage1_tail_score_range_quantile_high: float = 0.90
     min_spread_eligible_pairs_for_gate_source: int = 128
     stage4_aux_min_high_gap_pairs: int = 128
     stage4_aux_unique_floor: int = 12

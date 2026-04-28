@@ -2391,6 +2391,10 @@ def test_stage2_report_includes_pair_finetune_metadata(monkeypatch):
                         "stage1_probe_below_score_margin_count": 0.0,
                         "stage1_probe_below_score_margin_fraction": 0.0,
                         "stage1_probe_below_adaptive_margin_fraction": 0.0,
+                        "stage1_tail_anticollapse_loss": 0.0,
+                        "stage1_tail_score_range_q10": 0.0,
+                        "stage1_tail_score_range_q90": 0.0,
+                        "stage1_tail_score_range": 0.0,
                     },
                     {
                         "epoch": 1.0,
@@ -2420,6 +2424,10 @@ def test_stage2_report_includes_pair_finetune_metadata(monkeypatch):
                         "stage1_probe_eval_same_state_score_gap": 0.021,
                         "stage1_probe_eval_score_spread": 0.016,
                         "stage1_probe_eval_unique_score_count": 16.0,
+                        "stage1_tail_anticollapse_loss": 0.004,
+                        "stage1_tail_score_range_q10": 0.31,
+                        "stage1_tail_score_range_q90": 0.34,
+                        "stage1_tail_score_range": 0.03,
                     },
                 ],
                 "resolution_space": "score",
@@ -2433,6 +2441,9 @@ def test_stage2_report_includes_pair_finetune_metadata(monkeypatch):
                 "pair_ft_stage1_resolution_max_score_gap": 0.05,
                 "pair_ft_stage1_resolution_apply_trusted_only": True,
                 "pair_ft_selection_accuracy_tie_epsilon_effective": 0.01,
+                "stage1_tail_anticollapse_weight_effective": 0.005,
+                "stage1_tail_score_range_floor_effective": 0.02,
+                "stage1_tail_score_range_quantiles_effective": {"low": 0.1, "high": 0.9},
                 "world_pair_ft_frozen_modules": ["traj_decoder"],
                 "world_pair_ft_trainable_modules": ["fusion", "risk_score_head"],
                 "stage5_pair_ranking_accuracy_before_after": {"before": 0.55, "after": 0.75},
@@ -2471,8 +2482,13 @@ def test_stage2_report_includes_pair_finetune_metadata(monkeypatch):
                 "stage1_tail_sampling_mode_effective": "without_replacement",
                 "stage1_tail_ranking_loss_weight_effective": 0.25,
                 "stage1_tail_resolution_loss_weight_effective": 0.025,
+                "stage1_tail_anticollapse_weight_effective": 0.005,
+                "stage1_tail_score_range_floor_effective": 0.02,
+                "stage1_tail_score_range_quantiles_effective": {"low": 0.1, "high": 0.9},
                 "stage1_tail_ranking_loss": 0.041,
                 "stage1_tail_resolution_loss": 0.012,
+                "stage1_tail_anticollapse_loss": 0.004,
+                "stage1_tail_score_range_q10_q90": {"q10": 0.31, "q90": 0.34, "range": 0.03},
                 "stage1_tail_floor_reject_reasons": {
                     "floor_stage1_acc_below_pre_tail_tolerance": 1,
                 },
@@ -2492,6 +2508,9 @@ def test_stage2_report_includes_pair_finetune_metadata(monkeypatch):
                 "stage1_tail_sampling_mode_effective": "without_replacement",
                 "stage1_tail_ranking_loss_weight_effective": 0.25,
                 "stage1_tail_resolution_loss_weight_effective": 0.025,
+                "stage1_tail_anticollapse_weight_effective": 0.005,
+                "stage1_tail_score_range_floor_effective": 0.02,
+                "stage1_tail_score_range_quantiles_effective": {"low": 0.1, "high": 0.9},
                 "stage4_mix_every_n_steps": 4,
                 "stage5_pair_seen_counts": {"p0": 2, "p1": 1},
                 "stage5_pair_cap": 8,
@@ -2530,6 +2549,9 @@ def test_stage2_report_includes_pair_finetune_metadata(monkeypatch):
     assert report["world_pair_ft_source_mix"]["stage1_tail_sampling_mode_effective"] == "without_replacement"
     assert report["world_pair_ft_source_mix"]["stage1_tail_ranking_loss_weight_effective"] == pytest.approx(0.25)
     assert report["world_pair_ft_source_mix"]["stage1_tail_resolution_loss_weight_effective"] == pytest.approx(0.025)
+    assert report["world_pair_ft_source_mix"]["stage1_tail_anticollapse_weight_effective"] == pytest.approx(0.005)
+    assert report["world_pair_ft_source_mix"]["stage1_tail_score_range_floor_effective"] == pytest.approx(0.02)
+    assert report["world_pair_ft_source_mix"]["stage1_tail_score_range_quantiles_effective"] == {"low": 0.1, "high": 0.9}
     assert report["world_pair_ft_source_mix"]["stage4_mix_every_n_steps"] == 4
     assert report["stage2_pair_source_health"]["status"] == "healthy"
     risk_v2_summary = json.loads(Path(pipeline.risk_v2_eval_summary_path).read_text(encoding="utf-8"))
@@ -2565,6 +2587,10 @@ def test_stage2_report_includes_pair_finetune_metadata(monkeypatch):
     assert "stage1_probe_margin_p90" in world_epoch_metrics[0]
     assert "stage1_probe_pred_gap_to_margin_ratio_mean" in world_epoch_metrics[0]
     assert "stage1_probe_below_adaptive_margin_fraction" in world_epoch_metrics[0]
+    assert "stage1_tail_anticollapse_loss" in world_epoch_metrics[0]
+    assert "stage1_tail_score_range_q10" in world_epoch_metrics[0]
+    assert "stage1_tail_score_range_q90" in world_epoch_metrics[0]
+    assert "stage1_tail_score_range" in world_epoch_metrics[0]
     assert world_epoch_metrics[0]["stage4_aux_active_pair_count"] == pytest.approx(0.0)
     assert world_epoch_metrics[0]["stage4_aux_logit_gap_mean"] == pytest.approx(0.0)
     assert world_epoch_metrics[0]["stage4_aux_score_gap_mean"] == pytest.approx(0.0)
@@ -2587,6 +2613,10 @@ def test_stage2_report_includes_pair_finetune_metadata(monkeypatch):
     assert world_epoch_metrics[1]["stage1_probe_eval_same_state_score_gap"] == pytest.approx(0.021)
     assert world_epoch_metrics[1]["stage1_probe_eval_score_spread"] == pytest.approx(0.016)
     assert world_epoch_metrics[1]["stage1_probe_eval_unique_score_count"] == pytest.approx(16.0)
+    assert world_epoch_metrics[1]["stage1_tail_anticollapse_loss"] == pytest.approx(0.004)
+    assert world_epoch_metrics[1]["stage1_tail_score_range_q10"] == pytest.approx(0.31)
+    assert world_epoch_metrics[1]["stage1_tail_score_range_q90"] == pytest.approx(0.34)
+    assert world_epoch_metrics[1]["stage1_tail_score_range"] == pytest.approx(0.03)
     assert report["pair_finetune_metrics"]["world"]["resolution_space"] == "score"
     assert report["pair_finetune_metrics"]["world"]["ignored_legacy_logit_margin"] == pytest.approx(0.14)
     assert report["pair_finetune_metrics"]["world"]["stage1_resolution_space"] == "score"
@@ -2597,6 +2627,9 @@ def test_stage2_report_includes_pair_finetune_metadata(monkeypatch):
     assert report["pair_finetune_metrics"]["world"]["pair_ft_stage1_resolution_max_score_gap"] == pytest.approx(0.05)
     assert report["pair_finetune_metrics"]["world"]["pair_ft_stage1_resolution_apply_trusted_only"] is True
     assert report["pair_finetune_metrics"]["world"]["pair_ft_selection_accuracy_tie_epsilon_effective"] == pytest.approx(0.01)
+    assert report["pair_finetune_metrics"]["world"]["stage1_tail_anticollapse_weight_effective"] == pytest.approx(0.005)
+    assert report["pair_finetune_metrics"]["world"]["stage1_tail_score_range_floor_effective"] == pytest.approx(0.02)
+    assert report["pair_finetune_metrics"]["world"]["stage1_tail_score_range_quantiles_effective"] == {"low": 0.1, "high": 0.9}
     assert report["world_pair_ft_best_epoch"] == 1
     assert report["world_pair_ft_restored_best"] is True
     assert report["pair_finetune_metrics"]["world"]["selection_path"] == "legacy_tieaware"
@@ -2611,8 +2644,17 @@ def test_stage2_report_includes_pair_finetune_metadata(monkeypatch):
     assert report["pair_finetune_metrics"]["world"]["stage1_tail_sampling_mode_effective"] == "without_replacement"
     assert report["pair_finetune_metrics"]["world"]["stage1_tail_ranking_loss_weight_effective"] == pytest.approx(0.25)
     assert report["pair_finetune_metrics"]["world"]["stage1_tail_resolution_loss_weight_effective"] == pytest.approx(0.025)
+    assert report["pair_finetune_metrics"]["world"]["stage1_tail_anticollapse_weight_effective"] == pytest.approx(0.005)
+    assert report["pair_finetune_metrics"]["world"]["stage1_tail_score_range_floor_effective"] == pytest.approx(0.02)
+    assert report["pair_finetune_metrics"]["world"]["stage1_tail_score_range_quantiles_effective"] == {"low": 0.1, "high": 0.9}
     assert report["pair_finetune_metrics"]["world"]["stage1_tail_ranking_loss"] == pytest.approx(0.041)
     assert report["pair_finetune_metrics"]["world"]["stage1_tail_resolution_loss"] == pytest.approx(0.012)
+    assert report["pair_finetune_metrics"]["world"]["stage1_tail_anticollapse_loss"] == pytest.approx(0.004)
+    assert report["pair_finetune_metrics"]["world"]["stage1_tail_score_range_q10_q90"] == {
+        "q10": pytest.approx(0.31),
+        "q90": pytest.approx(0.34),
+        "range": pytest.approx(0.03),
+    }
     assert report["pair_finetune_metrics"]["world"]["stage1_tail_floor_reject_reasons"] == {
         "floor_stage1_acc_below_pre_tail_tolerance": 1
     }
