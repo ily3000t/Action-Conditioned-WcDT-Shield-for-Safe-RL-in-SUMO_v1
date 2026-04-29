@@ -1220,6 +1220,174 @@ def test_world_stage1_priority_mix_enabled_tracks_steps_and_respects_trusted_onl
     assert source_mix.get("phase_b_stage1_priority_pairs_seen", 0) > 0
 
 
+def test_world_phaseb_stage1_anticollapse_weight_zero_keeps_metrics_zero():
+    from safe_rl.models.world_model import WorldModelTrainer
+
+    trainer = WorldModelTrainer(
+        config=WorldModelConfig(
+            hidden_dim=64,
+            future_steps=2,
+            multimodal=2,
+            pair_finetune=True,
+            pair_finetune_epochs=2,
+            batch_size=1,
+            pair_ft_stage1_priority_mix_enabled=True,
+            pair_ft_stage1_priority_mix_fraction=1.0,
+            pair_ft_stage1_priority_trusted_only=True,
+            pair_ft_stage1_phaseb_anticollapse_weight=0.0,
+            pair_ft_stage1_tail_epochs=0,
+        ),
+        history_steps=2,
+        device="cpu",
+    )
+    stage1_trusted_pair = RiskPairSample(
+        history_scene=_history_scene()[:2],
+        action_a=4,
+        action_b=3,
+        preferred_action=4,
+        source="stage1_probe_same_state",
+        weight=1.0,
+        meta={"target_risk_a": 0.30, "target_risk_b": 0.80, "target_gap": 0.50, "trusted_for_spread": True},
+    )
+    _ = trainer.fine_tune_pairs(
+        pair_samples=[stage1_trusted_pair],
+        replay_samples=[],
+        stage5_pair_samples=[],
+        stage1_probe_pair_samples=[stage1_trusted_pair],
+        stage4_pair_samples=[],
+    )
+    report = dict(trainer.last_pair_ft_report or {})
+    source_mix = dict(report.get("world_pair_ft_source_mix", {}) or {})
+    assert report.get("phase_b_stage1_anticollapse_weight_effective") == pytest.approx(0.0, abs=1e-9)
+    assert report.get("phase_b_stage1_anticollapse_steps") == 0
+    assert report.get("phase_b_stage1_anticollapse_active_pair_count") == 0
+    assert report.get("phase_b_stage1_anticollapse_loss") == pytest.approx(0.0, abs=1e-9)
+    assert report.get("phase_b_stage1_score_range_q10_q90") == {"q10": 0.0, "q90": 0.0, "range": 0.0}
+    assert source_mix.get("phase_b_stage1_anticollapse_steps") == 0
+    assert source_mix.get("phase_b_stage1_anticollapse_active_pair_count") == 0
+
+
+def test_world_phaseb_stage1_anticollapse_priority_only_activates_and_reports():
+    from safe_rl.models.world_model import WorldModelTrainer
+
+    trainer = WorldModelTrainer(
+        config=WorldModelConfig(
+            hidden_dim=64,
+            future_steps=2,
+            multimodal=2,
+            pair_finetune=True,
+            pair_finetune_epochs=2,
+            batch_size=1,
+            pair_ft_stage1_priority_mix_enabled=True,
+            pair_ft_stage1_priority_mix_fraction=1.0,
+            pair_ft_stage1_priority_trusted_only=True,
+            pair_ft_stage1_phaseb_anticollapse_weight=0.003,
+            pair_ft_stage1_phaseb_score_range_floor=1.0,
+            pair_ft_stage1_phaseb_anticollapse_apply_on="priority_only",
+            pair_ft_stage1_tail_epochs=0,
+        ),
+        history_steps=2,
+        device="cpu",
+    )
+    stage1_trusted_pair = RiskPairSample(
+        history_scene=_history_scene()[:2],
+        action_a=4,
+        action_b=3,
+        preferred_action=4,
+        source="stage1_probe_same_state",
+        weight=1.0,
+        meta={"target_risk_a": 0.30, "target_risk_b": 0.80, "target_gap": 0.50, "trusted_for_spread": True},
+    )
+    _ = trainer.fine_tune_pairs(
+        pair_samples=[stage1_trusted_pair],
+        replay_samples=[],
+        stage5_pair_samples=[],
+        stage1_probe_pair_samples=[stage1_trusted_pair],
+        stage4_pair_samples=[],
+    )
+    report = dict(trainer.last_pair_ft_report or {})
+    source_mix = dict(report.get("world_pair_ft_source_mix", {}) or {})
+    assert report.get("phase_b_stage1_anticollapse_apply_on_effective") == "priority_only"
+    assert report.get("phase_b_stage1_anticollapse_weight_effective") == pytest.approx(0.003, abs=1e-9)
+    assert report.get("phase_b_stage1_anticollapse_steps", 0) > 0
+    assert report.get("phase_b_stage1_anticollapse_active_pair_count", 0) > 0
+    assert report.get("phase_b_stage1_anticollapse_loss", 0.0) > 0.0
+    ranges = dict(report.get("phase_b_stage1_score_range_q10_q90", {}) or {})
+    assert ranges.get("q90", 0.0) >= ranges.get("q10", 0.0)
+    assert ranges.get("range", 0.0) >= 0.0
+    assert source_mix.get("phase_b_stage1_anticollapse_steps", 0) > 0
+    assert source_mix.get("phase_b_stage1_anticollapse_active_pair_count", 0) > 0
+
+
+def test_world_phaseb_stage1_anticollapse_all_stage1_counts_more_steps_than_priority_only():
+    from safe_rl.models.world_model import WorldModelTrainer
+
+    common_kwargs = dict(
+        hidden_dim=64,
+        future_steps=2,
+        multimodal=2,
+        pair_finetune=True,
+        pair_finetune_epochs=2,
+        batch_size=1,
+        pair_ft_stage1_priority_mix_enabled=True,
+        pair_ft_stage1_priority_mix_fraction=1.0,
+        pair_ft_stage1_priority_trusted_only=True,
+        pair_ft_stage1_phaseb_anticollapse_weight=0.003,
+        pair_ft_stage1_phaseb_score_range_floor=1.0,
+        pair_ft_stage1_tail_epochs=0,
+    )
+    stage1_trusted_pair = RiskPairSample(
+        history_scene=_history_scene()[:2],
+        action_a=4,
+        action_b=3,
+        preferred_action=4,
+        source="stage1_probe_same_state",
+        weight=1.0,
+        meta={"target_risk_a": 0.30, "target_risk_b": 0.80, "target_gap": 0.50, "trusted_for_spread": True},
+    )
+    trainer_priority_only = WorldModelTrainer(
+        config=WorldModelConfig(
+            **common_kwargs,
+            pair_ft_stage1_phaseb_anticollapse_apply_on="priority_only",
+        ),
+        history_steps=2,
+        device="cpu",
+        seed=7,
+    )
+    _ = trainer_priority_only.fine_tune_pairs(
+        pair_samples=[stage1_trusted_pair],
+        replay_samples=[],
+        stage5_pair_samples=[],
+        stage1_probe_pair_samples=[stage1_trusted_pair],
+        stage4_pair_samples=[],
+    )
+    steps_priority_only = int(
+        dict(trainer_priority_only.last_pair_ft_report or {}).get("phase_b_stage1_anticollapse_steps", 0)
+    )
+
+    trainer_all_stage1 = WorldModelTrainer(
+        config=WorldModelConfig(
+            **common_kwargs,
+            pair_ft_stage1_phaseb_anticollapse_apply_on="all_stage1",
+        ),
+        history_steps=2,
+        device="cpu",
+        seed=7,
+    )
+    _ = trainer_all_stage1.fine_tune_pairs(
+        pair_samples=[stage1_trusted_pair],
+        replay_samples=[],
+        stage5_pair_samples=[],
+        stage1_probe_pair_samples=[stage1_trusted_pair],
+        stage4_pair_samples=[],
+    )
+    steps_all_stage1 = int(
+        dict(trainer_all_stage1.last_pair_ft_report or {}).get("phase_b_stage1_anticollapse_steps", 0)
+    )
+    assert steps_priority_only > 0
+    assert steps_all_stage1 > steps_priority_only
+
+
 def test_world_stage1_tail_anticollapse_loss_positive_when_range_below_floor():
     from safe_rl.models.world_model import WorldModelTrainer
 

@@ -529,6 +529,29 @@ class WorldModelTrainer:
             ]
         else:
             stage1_priority_pair_samples = list(stage1_probe_pair_samples)
+        phaseb_stage1_anticollapse_weight_effective = float(
+            getattr(self.config, 'pair_ft_stage1_phaseb_anticollapse_weight', 0.0) or 0.0
+        )
+        phaseb_stage1_anticollapse_score_range_floor = float(
+            getattr(self.config, 'pair_ft_stage1_phaseb_score_range_floor', 0.02) or 0.02
+        )
+        phaseb_stage1_anticollapse_q_low = float(
+            getattr(self.config, 'pair_ft_stage1_phaseb_score_range_quantile_low', 0.10) or 0.10
+        )
+        phaseb_stage1_anticollapse_q_high = float(
+            getattr(self.config, 'pair_ft_stage1_phaseb_score_range_quantile_high', 0.90) or 0.90
+        )
+        phaseb_stage1_anticollapse_q_low = float(min(1.0, max(0.0, phaseb_stage1_anticollapse_q_low)))
+        phaseb_stage1_anticollapse_q_high = float(min(1.0, max(0.0, phaseb_stage1_anticollapse_q_high)))
+        if phaseb_stage1_anticollapse_q_high <= phaseb_stage1_anticollapse_q_low:
+            phaseb_stage1_anticollapse_q_low = 0.10
+            phaseb_stage1_anticollapse_q_high = 0.90
+        phaseb_stage1_anticollapse_apply_on = str(
+            getattr(self.config, 'pair_ft_stage1_phaseb_anticollapse_apply_on', 'priority_only')
+            or 'priority_only'
+        ).strip().lower()
+        if phaseb_stage1_anticollapse_apply_on not in {'priority_only', 'all_stage1'}:
+            phaseb_stage1_anticollapse_apply_on = 'priority_only'
         stage1_tail_apply_trusted_only = bool(
             getattr(self.config, 'pair_ft_stage1_tail_apply_trusted_only', True)
         )
@@ -655,6 +678,14 @@ class WorldModelTrainer:
             'phase_b_stage1_priority_pair_count': int(len(stage1_priority_pair_samples)),
             'phase_b_stage1_priority_steps': 0,
             'phase_b_stage1_priority_pairs_seen': 0,
+            'phase_b_stage1_anticollapse_weight_effective': float(
+                phaseb_stage1_anticollapse_weight_effective
+            ),
+            'phase_b_stage1_anticollapse_apply_on_effective': str(
+                phaseb_stage1_anticollapse_apply_on
+            ),
+            'phase_b_stage1_anticollapse_steps': 0,
+            'phase_b_stage1_anticollapse_active_pair_count': 0,
             'stage1_tail_sampling_mode_effective': str(stage1_tail_sampling_mode),
             'stage1_tail_ranking_loss_weight_effective': float(tail_ranking_loss_weight_effective),
             'stage1_tail_resolution_loss_weight_effective': float(tail_resolution_loss_weight_effective),
@@ -790,6 +821,16 @@ class WorldModelTrainer:
                 'phase_b_stage1_priority_pair_count': int(len(stage1_priority_pair_samples)),
                 'phase_b_stage1_priority_steps': 0,
                 'phase_b_stage1_priority_pairs_seen': 0,
+                'phase_b_stage1_anticollapse_weight_effective': float(
+                    phaseb_stage1_anticollapse_weight_effective
+                ),
+                'phase_b_stage1_anticollapse_apply_on_effective': str(
+                    phaseb_stage1_anticollapse_apply_on
+                ),
+                'phase_b_stage1_anticollapse_steps': 0,
+                'phase_b_stage1_anticollapse_active_pair_count': 0,
+                'phase_b_stage1_anticollapse_loss': 0.0,
+                'phase_b_stage1_score_range_q10_q90': {'q10': 0.0, 'q90': 0.0, 'range': 0.0},
                 'stage1_tail_internal_best_epoch': -1,
                 'stage1_tail_internal_best_reason': 'tail_not_applied',
                 'stage1_tail_internal_best_stage1_probe_unique': float(
@@ -895,6 +936,12 @@ class WorldModelTrainer:
             f"fraction={stage1_priority_mix_fraction:.4f}, trusted_only={bool(stage1_priority_trusted_only)}, "
             f"pair_count={int(len(stage1_priority_pair_samples))}"
         )
+        print(
+            f"[WorldModel PairFT] phase_b_stage1_anticollapse: weight={phaseb_stage1_anticollapse_weight_effective:.4f}, "
+            f"floor={phaseb_stage1_anticollapse_score_range_floor:.4f}, "
+            f"q=({phaseb_stage1_anticollapse_q_low:.2f},{phaseb_stage1_anticollapse_q_high:.2f}), "
+            f"apply_on={phaseb_stage1_anticollapse_apply_on}"
+        )
         replay_loader = self._build_replay_loader(replay_samples)
         replay_iter = iter(replay_loader) if replay_loader is not None else None
         stage4_loader = self._build_pair_loader(stage4_pair_samples)
@@ -944,6 +991,12 @@ class WorldModelTrainer:
         epochs_without_improvement = 0
         total_stage5_seen_counts = {pair_id: 0 for pair_id in stage5_pair_ids}
         stage5_cap_reached_ids = set()
+        phaseb_stage1_anticollapse_steps = 0
+        phaseb_stage1_anticollapse_active_pair_count = 0
+        phaseb_stage1_anticollapse_loss_total = 0.0
+        phaseb_stage1_score_range_q10_sum = 0.0
+        phaseb_stage1_score_range_q90_sum = 0.0
+        phaseb_stage1_score_range_sum = 0.0
 
         for epoch_idx in range(total_epochs):
             phase_name = 'phase_a_strong_only' if epoch_idx < phase_a_epochs else 'phase_b_source_mixed'
@@ -969,6 +1022,12 @@ class WorldModelTrainer:
             epoch_stage1_probe_below_score_margin_count = 0
             epoch_stage1_probe_below_adaptive_margin_count = 0
             epoch_stage1_probe_pairs_seen = 0
+            epoch_phaseb_stage1_anticollapse_steps = 0
+            epoch_phaseb_stage1_anticollapse_active_pair_count = 0
+            epoch_phaseb_stage1_anticollapse_loss_total = 0.0
+            epoch_phaseb_stage1_score_range_q10_sum = 0.0
+            epoch_phaseb_stage1_score_range_q90_sum = 0.0
+            epoch_phaseb_stage1_score_range_sum = 0.0
             step_targets = [1]
             if stage5_pair_samples and stage5_batch_size > 0:
                 step_targets.append(int(np.ceil(len(stage5_pair_samples) / float(stage5_batch_size))))
@@ -981,6 +1040,7 @@ class WorldModelTrainer:
                 spread_terms: List[torch.Tensor] = []
                 stage4_resolution_terms: List[torch.Tensor] = []
                 stage1_resolution_terms: List[torch.Tensor] = []
+                phaseb_stage1_anticollapse_terms: List[torch.Tensor] = []
 
                 if stage5_pair_samples:
                     stage5_batch, selected_pair_ids = self._sample_stage5_batch_with_cap(
@@ -1008,10 +1068,19 @@ class WorldModelTrainer:
                 if stage1_probe_pair_samples:
                     stage1_probe_batch = self._sample_pair_batch_with_replacement(stage1_probe_pair_samples, stage1_probe_batch_size)
                     if stage1_probe_batch:
+                        enable_phaseb_stage1_anticollapse_on_standard = bool(
+                            epoch_idx >= phase_a_epochs
+                            and phaseb_stage1_anticollapse_weight_effective > 0.0
+                            and phaseb_stage1_anticollapse_apply_on == 'all_stage1'
+                        )
                         stage1_ranking_loss, stage1_spread_loss, stage1_resolution_loss, stage1_diag = self._compute_pair_losses(
                             stage1_probe_batch,
                             enable_resolution=False,
                             enable_stage1_resolution=True,
+                            enable_stage1_tail_anticollapse=enable_phaseb_stage1_anticollapse_on_standard,
+                            stage1_tail_score_range_floor=phaseb_stage1_anticollapse_score_range_floor,
+                            stage1_tail_score_range_quantile_low=phaseb_stage1_anticollapse_q_low,
+                            stage1_tail_score_range_quantile_high=phaseb_stage1_anticollapse_q_high,
                         )
                         ranking_terms.append(stage1_ranking_loss)
                         spread_terms.append(stage1_spread_loss)
@@ -1039,6 +1108,42 @@ class WorldModelTrainer:
                         epoch_stage1_probe_below_adaptive_margin_count += int(
                             stage1_diag.get('stage1_probe_below_adaptive_margin_count', 0)
                         )
+                        if enable_phaseb_stage1_anticollapse_on_standard:
+                            stage1_active_count = int(stage1_diag.get('stage1_probe_active_pair_count', 0))
+                            if stage1_active_count > 0:
+                                stage1_phaseb_anticollapse_loss_tensor = stage1_diag.get(
+                                    'stage1_tail_anticollapse_loss_tensor',
+                                    self._zero_loss(),
+                                )
+                                phaseb_stage1_anticollapse_terms.append(stage1_phaseb_anticollapse_loss_tensor)
+                                epoch_phaseb_stage1_anticollapse_steps += 1
+                                epoch_phaseb_stage1_anticollapse_active_pair_count += stage1_active_count
+                                epoch_phaseb_stage1_anticollapse_loss_total += float(
+                                    stage1_phaseb_anticollapse_loss_tensor.detach().item()
+                                )
+                                epoch_phaseb_stage1_score_range_q10_sum += float(
+                                    stage1_diag.get('stage1_tail_score_range_q10', 0.0)
+                                )
+                                epoch_phaseb_stage1_score_range_q90_sum += float(
+                                    stage1_diag.get('stage1_tail_score_range_q90', 0.0)
+                                )
+                                epoch_phaseb_stage1_score_range_sum += float(
+                                    stage1_diag.get('stage1_tail_score_range', 0.0)
+                                )
+                                phaseb_stage1_anticollapse_steps += 1
+                                phaseb_stage1_anticollapse_active_pair_count += stage1_active_count
+                                phaseb_stage1_anticollapse_loss_total += float(
+                                    stage1_phaseb_anticollapse_loss_tensor.detach().item()
+                                )
+                                phaseb_stage1_score_range_q10_sum += float(
+                                    stage1_diag.get('stage1_tail_score_range_q10', 0.0)
+                                )
+                                phaseb_stage1_score_range_q90_sum += float(
+                                    stage1_diag.get('stage1_tail_score_range_q90', 0.0)
+                                )
+                                phaseb_stage1_score_range_sum += float(
+                                    stage1_diag.get('stage1_tail_score_range', 0.0)
+                                )
 
                 if (
                     epoch_idx >= phase_a_epochs
@@ -1052,6 +1157,10 @@ class WorldModelTrainer:
                         stage1_priority_batch_size,
                     )
                     if stage1_priority_batch:
+                        enable_phaseb_stage1_anticollapse_on_priority = bool(
+                            phaseb_stage1_anticollapse_weight_effective > 0.0
+                            and phaseb_stage1_anticollapse_apply_on in {'priority_only', 'all_stage1'}
+                        )
                         (
                             stage1_priority_ranking_loss,
                             stage1_priority_spread_loss,
@@ -1061,6 +1170,10 @@ class WorldModelTrainer:
                             stage1_priority_batch,
                             enable_resolution=False,
                             enable_stage1_resolution=True,
+                            enable_stage1_tail_anticollapse=enable_phaseb_stage1_anticollapse_on_priority,
+                            stage1_tail_score_range_floor=phaseb_stage1_anticollapse_score_range_floor,
+                            stage1_tail_score_range_quantile_low=phaseb_stage1_anticollapse_q_low,
+                            stage1_tail_score_range_quantile_high=phaseb_stage1_anticollapse_q_high,
                         )
                         ranking_terms.append(stage1_priority_ranking_loss)
                         spread_terms.append(stage1_priority_spread_loss)
@@ -1088,6 +1201,44 @@ class WorldModelTrainer:
                         epoch_stage1_probe_below_adaptive_margin_count += int(
                             stage1_priority_diag.get('stage1_probe_below_adaptive_margin_count', 0)
                         )
+                        if enable_phaseb_stage1_anticollapse_on_priority:
+                            stage1_priority_active_count = int(
+                                stage1_priority_diag.get('stage1_probe_active_pair_count', 0)
+                            )
+                            if stage1_priority_active_count > 0:
+                                stage1_priority_anticollapse_loss_tensor = stage1_priority_diag.get(
+                                    'stage1_tail_anticollapse_loss_tensor',
+                                    self._zero_loss(),
+                                )
+                                phaseb_stage1_anticollapse_terms.append(stage1_priority_anticollapse_loss_tensor)
+                                epoch_phaseb_stage1_anticollapse_steps += 1
+                                epoch_phaseb_stage1_anticollapse_active_pair_count += stage1_priority_active_count
+                                epoch_phaseb_stage1_anticollapse_loss_total += float(
+                                    stage1_priority_anticollapse_loss_tensor.detach().item()
+                                )
+                                epoch_phaseb_stage1_score_range_q10_sum += float(
+                                    stage1_priority_diag.get('stage1_tail_score_range_q10', 0.0)
+                                )
+                                epoch_phaseb_stage1_score_range_q90_sum += float(
+                                    stage1_priority_diag.get('stage1_tail_score_range_q90', 0.0)
+                                )
+                                epoch_phaseb_stage1_score_range_sum += float(
+                                    stage1_priority_diag.get('stage1_tail_score_range', 0.0)
+                                )
+                                phaseb_stage1_anticollapse_steps += 1
+                                phaseb_stage1_anticollapse_active_pair_count += stage1_priority_active_count
+                                phaseb_stage1_anticollapse_loss_total += float(
+                                    stage1_priority_anticollapse_loss_tensor.detach().item()
+                                )
+                                phaseb_stage1_score_range_q10_sum += float(
+                                    stage1_priority_diag.get('stage1_tail_score_range_q10', 0.0)
+                                )
+                                phaseb_stage1_score_range_q90_sum += float(
+                                    stage1_priority_diag.get('stage1_tail_score_range_q90', 0.0)
+                                )
+                                phaseb_stage1_score_range_sum += float(
+                                    stage1_priority_diag.get('stage1_tail_score_range', 0.0)
+                                )
 
                 if epoch_idx >= phase_a_epochs and stage4_loader is not None and (step_idx + 1) % int(stage4_mix_every_n_steps) == 0:
                     stage4_batch, stage4_iter = self._next_pair_batch(stage4_iter, stage4_loader)
@@ -1119,6 +1270,11 @@ class WorldModelTrainer:
                 stage1_resolution_loss = (
                     torch.mean(torch.stack(stage1_resolution_terms)) if stage1_resolution_terms else self._zero_loss()
                 )
+                phaseb_stage1_anticollapse_loss = (
+                    torch.mean(torch.stack(phaseb_stage1_anticollapse_terms))
+                    if phaseb_stage1_anticollapse_terms
+                    else self._zero_loss()
+                )
                 resolution_loss = stage4_resolution_loss + stage1_resolution_loss
                 pointwise_total, _, _, _, replay_iter = self._compute_replay_losses(replay_iter, replay_loader)
                 total_loss = (
@@ -1127,6 +1283,7 @@ class WorldModelTrainer:
                     + float(self.config.spread_loss_weight) * spread_loss
                     + float(getattr(self.config, 'pair_ft_resolution_loss_weight', 0.0) or 0.0) * stage4_resolution_loss
                     + float(getattr(self.config, 'pair_ft_stage1_resolution_loss_weight', 0.0) or 0.0) * stage1_resolution_loss
+                    + float(phaseb_stage1_anticollapse_weight_effective) * phaseb_stage1_anticollapse_loss
                 )
 
                 optimizer.zero_grad()
@@ -1258,6 +1415,33 @@ class WorldModelTrainer:
                         if epoch_stage1_probe_active_pairs > 0
                         else 0.0
                     ),
+                    'phase_b_stage1_anticollapse_loss': (
+                        float(epoch_phaseb_stage1_anticollapse_loss_total)
+                        / float(epoch_phaseb_stage1_anticollapse_steps)
+                        if epoch_phaseb_stage1_anticollapse_steps > 0
+                        else 0.0
+                    ),
+                    'phase_b_stage1_score_range_q10': (
+                        float(epoch_phaseb_stage1_score_range_q10_sum)
+                        / float(epoch_phaseb_stage1_anticollapse_steps)
+                        if epoch_phaseb_stage1_anticollapse_steps > 0
+                        else 0.0
+                    ),
+                    'phase_b_stage1_score_range_q90': (
+                        float(epoch_phaseb_stage1_score_range_q90_sum)
+                        / float(epoch_phaseb_stage1_anticollapse_steps)
+                        if epoch_phaseb_stage1_anticollapse_steps > 0
+                        else 0.0
+                    ),
+                    'phase_b_stage1_score_range': (
+                        float(epoch_phaseb_stage1_score_range_sum)
+                        / float(epoch_phaseb_stage1_anticollapse_steps)
+                        if epoch_phaseb_stage1_anticollapse_steps > 0
+                        else 0.0
+                    ),
+                    'phase_b_stage1_anticollapse_active_pair_count': float(
+                        epoch_phaseb_stage1_anticollapse_active_pair_count
+                    ),
                 }
                 eval_metrics = self.evaluate_pairs(best_eval_pairs)
                 eval_stage1_probe_metrics = self.evaluate_pairs(stage1_probe_pair_samples)
@@ -1323,6 +1507,31 @@ class WorldModelTrainer:
                     tb_writer.add_scalar(
                         'eval/epoch_stage1_probe_below_adaptive_margin_fraction',
                         epoch_summary['stage1_probe_below_adaptive_margin_fraction'],
+                        epoch_idx,
+                    )
+                    tb_writer.add_scalar(
+                        'eval/epoch_phase_b_stage1_anticollapse_loss',
+                        epoch_summary['phase_b_stage1_anticollapse_loss'],
+                        epoch_idx,
+                    )
+                    tb_writer.add_scalar(
+                        'eval/epoch_phase_b_stage1_score_range_q10',
+                        epoch_summary['phase_b_stage1_score_range_q10'],
+                        epoch_idx,
+                    )
+                    tb_writer.add_scalar(
+                        'eval/epoch_phase_b_stage1_score_range_q90',
+                        epoch_summary['phase_b_stage1_score_range_q90'],
+                        epoch_idx,
+                    )
+                    tb_writer.add_scalar(
+                        'eval/epoch_phase_b_stage1_score_range',
+                        epoch_summary['phase_b_stage1_score_range'],
+                        epoch_idx,
+                    )
+                    tb_writer.add_scalar(
+                        'eval/epoch_phase_b_stage1_anticollapse_active_pair_count',
+                        epoch_summary['phase_b_stage1_anticollapse_active_pair_count'],
                         epoch_idx,
                     )
                 if tb_writer is not None:
@@ -1635,6 +1844,11 @@ class WorldModelTrainer:
                             if epoch_stage1_probe_active_pairs > 0
                             else 0.0
                         ),
+                        'phase_b_stage1_anticollapse_loss': 0.0,
+                        'phase_b_stage1_score_range_q10': 0.0,
+                        'phase_b_stage1_score_range_q90': 0.0,
+                        'phase_b_stage1_score_range': 0.0,
+                        'phase_b_stage1_anticollapse_active_pair_count': 0.0,
                         'stage1_tail_sampling_mode_effective': str(stage1_tail_sampling_mode),
                     }
                     eval_metrics = self.evaluate_pairs(best_eval_pairs)
@@ -1750,6 +1964,10 @@ class WorldModelTrainer:
         after_pointwise_metrics = self._evaluate_risk_only_samples(eval_replay_samples)
         source_mix['stage5_pair_seen_counts'] = dict(total_stage5_seen_counts)
         source_mix['stage5_cap_reached_pairs'] = int(len(stage5_cap_reached_ids))
+        source_mix['phase_b_stage1_anticollapse_steps'] = int(phaseb_stage1_anticollapse_steps)
+        source_mix['phase_b_stage1_anticollapse_active_pair_count'] = int(
+            phaseb_stage1_anticollapse_active_pair_count
+        )
         self.last_pair_metrics = after_pair_metrics
         self.last_pair_ft_report = {
             'enabled': True,
@@ -1815,6 +2033,38 @@ class WorldModelTrainer:
             'stage1_tail_floor_reject_reasons': dict(stage1_tail_floor_reject_reasons),
             'pair_ft_selection_accuracy_tie_epsilon_effective': float(selection_accuracy_tie_epsilon),
             'stage1_tail_sampling_mode_effective': str(stage1_tail_sampling_mode),
+            'phase_b_stage1_anticollapse_weight_effective': float(
+                phaseb_stage1_anticollapse_weight_effective
+            ),
+            'phase_b_stage1_anticollapse_apply_on_effective': str(
+                phaseb_stage1_anticollapse_apply_on
+            ),
+            'phase_b_stage1_anticollapse_steps': int(phaseb_stage1_anticollapse_steps),
+            'phase_b_stage1_anticollapse_active_pair_count': int(
+                phaseb_stage1_anticollapse_active_pair_count
+            ),
+            'phase_b_stage1_anticollapse_loss': (
+                float(phaseb_stage1_anticollapse_loss_total) / float(phaseb_stage1_anticollapse_steps)
+                if phaseb_stage1_anticollapse_steps > 0
+                else 0.0
+            ),
+            'phase_b_stage1_score_range_q10_q90': {
+                'q10': (
+                    float(phaseb_stage1_score_range_q10_sum) / float(phaseb_stage1_anticollapse_steps)
+                    if phaseb_stage1_anticollapse_steps > 0
+                    else 0.0
+                ),
+                'q90': (
+                    float(phaseb_stage1_score_range_q90_sum) / float(phaseb_stage1_anticollapse_steps)
+                    if phaseb_stage1_anticollapse_steps > 0
+                    else 0.0
+                ),
+                'range': (
+                    float(phaseb_stage1_score_range_sum) / float(phaseb_stage1_anticollapse_steps)
+                    if phaseb_stage1_anticollapse_steps > 0
+                    else 0.0
+                ),
+            },
             'world_pair_ft_frozen_modules': frozen_modules,
             'world_pair_ft_trainable_modules': trainable_modules,
             'world_pair_ft_source_mix': dict(source_mix),

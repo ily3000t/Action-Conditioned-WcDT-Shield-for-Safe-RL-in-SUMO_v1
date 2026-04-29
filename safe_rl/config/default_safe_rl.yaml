@@ -87,6 +87,11 @@ world_model:
   pair_ft_stage1_priority_mix_enabled: false
   pair_ft_stage1_priority_mix_fraction: 0.35
   pair_ft_stage1_priority_trusted_only: true
+  pair_ft_stage1_phaseb_anticollapse_weight: 0.0
+  pair_ft_stage1_phaseb_score_range_floor: 0.02
+  pair_ft_stage1_phaseb_score_range_quantile_low: 0.10
+  pair_ft_stage1_phaseb_score_range_quantile_high: 0.90
+  pair_ft_stage1_phaseb_anticollapse_apply_on: "priority_only"
   min_spread_eligible_pairs_for_gate_source: 128
   stage4_aux_min_high_gap_pairs: 128
   stage4_aux_unique_floor: 12
