@@ -509,6 +509,26 @@ class WorldModelTrainer:
                 if str(sample.source) in ('stage4_buffer', 'stage4_candidate_rank')
             ]
         )
+        stage1_priority_mix_enabled = bool(
+            getattr(self.config, 'pair_ft_stage1_priority_mix_enabled', False)
+        )
+        stage1_priority_mix_fraction = float(
+            getattr(self.config, 'pair_ft_stage1_priority_mix_fraction', 0.35) or 0.35
+        )
+        stage1_priority_mix_fraction = float(
+            min(1.0, max(0.0, stage1_priority_mix_fraction))
+        )
+        stage1_priority_trusted_only = bool(
+            getattr(self.config, 'pair_ft_stage1_priority_trusted_only', True)
+        )
+        if stage1_priority_trusted_only:
+            stage1_priority_pair_samples = [
+                sample
+                for sample in stage1_probe_pair_samples
+                if bool((sample.meta or {}).get('trusted_for_spread', False))
+            ]
+        else:
+            stage1_priority_pair_samples = list(stage1_probe_pair_samples)
         stage1_tail_apply_trusted_only = bool(
             getattr(self.config, 'pair_ft_stage1_tail_apply_trusted_only', True)
         )
@@ -629,6 +649,12 @@ class WorldModelTrainer:
             'stage1_probe_pair_count': int(len(stage1_probe_pair_samples)),
             'stage4_pair_count': int(len(stage4_pair_samples)),
             'stage1_tail_pair_count': int(len(stage1_tail_pair_samples)),
+            'phase_b_stage1_priority_enabled': bool(stage1_priority_mix_enabled),
+            'phase_b_stage1_priority_fraction_configured': float(stage1_priority_mix_fraction),
+            'phase_b_stage1_priority_trusted_only': bool(stage1_priority_trusted_only),
+            'phase_b_stage1_priority_pair_count': int(len(stage1_priority_pair_samples)),
+            'phase_b_stage1_priority_steps': 0,
+            'phase_b_stage1_priority_pairs_seen': 0,
             'stage1_tail_sampling_mode_effective': str(stage1_tail_sampling_mode),
             'stage1_tail_ranking_loss_weight_effective': float(tail_ranking_loss_weight_effective),
             'stage1_tail_resolution_loss_weight_effective': float(tail_resolution_loss_weight_effective),
@@ -758,6 +784,12 @@ class WorldModelTrainer:
                 'stage1_tail_epochs_configured': int(stage1_tail_epochs),
                 'stage1_tail_epochs_executed': 0,
                 'stage1_tail_pair_count': int(len(stage1_tail_pair_samples)),
+                'phase_b_stage1_priority_enabled': bool(stage1_priority_mix_enabled),
+                'phase_b_stage1_priority_fraction_configured': float(stage1_priority_mix_fraction),
+                'phase_b_stage1_priority_trusted_only': bool(stage1_priority_trusted_only),
+                'phase_b_stage1_priority_pair_count': int(len(stage1_priority_pair_samples)),
+                'phase_b_stage1_priority_steps': 0,
+                'phase_b_stage1_priority_pairs_seen': 0,
                 'stage1_tail_internal_best_epoch': -1,
                 'stage1_tail_internal_best_reason': 'tail_not_applied',
                 'stage1_tail_internal_best_stage1_probe_unique': float(
@@ -858,6 +890,11 @@ class WorldModelTrainer:
             f"range_floor={stage1_tail_score_range_floor_effective:.4f}, "
             f"range_q=({stage1_tail_score_range_quantile_low_effective:.2f},{stage1_tail_score_range_quantile_high_effective:.2f})"
         )
+        print(
+            f"[WorldModel PairFT] phase_b_stage1_priority_mix: enabled={bool(stage1_priority_mix_enabled)}, "
+            f"fraction={stage1_priority_mix_fraction:.4f}, trusted_only={bool(stage1_priority_trusted_only)}, "
+            f"pair_count={int(len(stage1_priority_pair_samples))}"
+        )
         replay_loader = self._build_replay_loader(replay_samples)
         replay_iter = iter(replay_loader) if replay_loader is not None else None
         stage4_loader = self._build_pair_loader(stage4_pair_samples)
@@ -870,6 +907,11 @@ class WorldModelTrainer:
         epoch_metrics: List[Dict[str, float]] = []
         stage5_batch_size = max(1, min(int(self.config.batch_size), max(1, len(stage5_pair_samples)))) if stage5_pair_samples else 0
         stage1_probe_batch_size = max(1, min(int(self.config.batch_size), max(1, len(stage1_probe_pair_samples)))) if stage1_probe_pair_samples else 0
+        stage1_priority_batch_size = (
+            max(1, min(int(self.config.batch_size), max(1, len(stage1_priority_pair_samples))))
+            if stage1_priority_pair_samples
+            else 0
+        )
         stage1_tail_batch_size = (
             max(1, min(int(self.config.batch_size), max(1, len(stage1_tail_pair_samples))))
             if stage1_tail_pair_samples
@@ -996,6 +1038,55 @@ class WorldModelTrainer:
                         )
                         epoch_stage1_probe_below_adaptive_margin_count += int(
                             stage1_diag.get('stage1_probe_below_adaptive_margin_count', 0)
+                        )
+
+                if (
+                    epoch_idx >= phase_a_epochs
+                    and stage1_priority_mix_enabled
+                    and stage1_priority_pair_samples
+                    and stage1_priority_batch_size > 0
+                    and self.rng.random() < stage1_priority_mix_fraction
+                ):
+                    stage1_priority_batch = self._sample_pair_batch_with_replacement(
+                        stage1_priority_pair_samples,
+                        stage1_priority_batch_size,
+                    )
+                    if stage1_priority_batch:
+                        (
+                            stage1_priority_ranking_loss,
+                            stage1_priority_spread_loss,
+                            stage1_priority_resolution_loss,
+                            stage1_priority_diag,
+                        ) = self._compute_pair_losses(
+                            stage1_priority_batch,
+                            enable_resolution=False,
+                            enable_stage1_resolution=True,
+                        )
+                        ranking_terms.append(stage1_priority_ranking_loss)
+                        spread_terms.append(stage1_priority_spread_loss)
+                        stage1_resolution_terms.append(stage1_priority_resolution_loss)
+                        source_mix['phase_b_stage1_priority_steps'] += 1
+                        source_mix['phase_b_stage1_priority_pairs_seen'] += len(stage1_priority_batch)
+                        epoch_stage1_probe_pairs_seen += int(len(stage1_priority_batch))
+                        stage1_priority_active_count = int(stage1_priority_diag.get('stage1_probe_active_pair_count', 0))
+                        epoch_stage1_probe_active_pairs += stage1_priority_active_count
+                        epoch_stage1_probe_score_gap_values.extend(
+                            float(value)
+                            for value in list(stage1_priority_diag.get('stage1_probe_score_gaps', []) or [])
+                        )
+                        epoch_stage1_probe_margin_values.extend(
+                            float(value)
+                            for value in list(stage1_priority_diag.get('stage1_probe_margins', []) or [])
+                        )
+                        epoch_stage1_probe_pred_gap_to_margin_ratios.extend(
+                            float(value)
+                            for value in list(stage1_priority_diag.get('stage1_probe_pred_gap_to_margin_ratios', []) or [])
+                        )
+                        epoch_stage1_probe_below_score_margin_count += int(
+                            stage1_priority_diag.get('stage1_probe_below_score_margin_count', 0)
+                        )
+                        epoch_stage1_probe_below_adaptive_margin_count += int(
+                            stage1_priority_diag.get('stage1_probe_below_adaptive_margin_count', 0)
                         )
 
                 if epoch_idx >= phase_a_epochs and stage4_loader is not None and (step_idx + 1) % int(stage4_mix_every_n_steps) == 0:
@@ -1436,6 +1527,9 @@ class WorldModelTrainer:
                     epoch_stage1_tail_score_range_q10_sum += float(stage1_diag.get('stage1_tail_score_range_q10', 0.0))
                     epoch_stage1_tail_score_range_q90_sum += float(stage1_diag.get('stage1_tail_score_range_q90', 0.0))
                     epoch_stage1_tail_score_range_sum += float(stage1_diag.get('stage1_tail_score_range', 0.0))
+                    stage1_tail_score_range_q10_sum += float(stage1_diag.get('stage1_tail_score_range_q10', 0.0))
+                    stage1_tail_score_range_q90_sum += float(stage1_diag.get('stage1_tail_score_range_q90', 0.0))
+                    stage1_tail_score_range_sum += float(stage1_diag.get('stage1_tail_score_range', 0.0))
 
                     step_total = float(total_loss.item())
                     step_ranking = float(stage1_ranking_loss.item())
@@ -1779,6 +1873,12 @@ class WorldModelTrainer:
             'stage1_tail_epochs_configured': int(stage1_tail_epochs),
             'stage1_tail_epochs_executed': int(stage1_tail_epochs_executed),
             'stage1_tail_pair_count': int(len(stage1_tail_pair_samples)),
+            'phase_b_stage1_priority_enabled': bool(stage1_priority_mix_enabled),
+            'phase_b_stage1_priority_fraction_configured': float(stage1_priority_mix_fraction),
+            'phase_b_stage1_priority_trusted_only': bool(stage1_priority_trusted_only),
+            'phase_b_stage1_priority_pair_count': int(len(stage1_priority_pair_samples)),
+            'phase_b_stage1_priority_steps': int(source_mix.get('phase_b_stage1_priority_steps', 0)),
+            'phase_b_stage1_priority_pairs_seen': int(source_mix.get('phase_b_stage1_priority_pairs_seen', 0)),
             'stage1_tail_internal_best_epoch': int(stage1_tail_internal_best_epoch),
             'stage1_tail_internal_best_reason': str(stage1_tail_internal_best_reason),
             'stage1_tail_internal_best_stage1_probe_unique': float(stage1_tail_internal_best_stage1_probe_unique),

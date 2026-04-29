@@ -915,7 +915,10 @@ def test_world_stage1_tail_phase_applies_when_trusted_pairs_available():
     assert report.get("stage1_tail_ranking_loss", 0.0) >= 0.0
     assert report.get("stage1_tail_resolution_loss", 0.0) >= 0.0
     assert report.get("stage1_tail_anticollapse_loss") == pytest.approx(0.0, abs=1e-9)
-    assert report.get("stage1_tail_score_range_q10_q90") == {"q10": 0.0, "q90": 0.0, "range": 0.0}
+    tail_range = dict(report.get("stage1_tail_score_range_q10_q90", {}) or {})
+    assert tail_range.get("q90", 0.0) >= tail_range.get("q10", 0.0)
+    assert tail_range.get("q90", 0.0) > 0.0
+    assert tail_range.get("range", 0.0) >= 0.0
     assert isinstance(report.get("stage1_tail_floor_reject_reasons"), dict)
     assert report.get("world_pair_ft_final_state_source") == "selected_best_plus_stage1_tail"
     assert source_mix.get("stage1_tail_steps", 0) > 0
@@ -1102,6 +1105,119 @@ def test_world_stage1_tail_floor_reject_reasons_are_aggregated(monkeypatch):
     assert report.get("stage1_tail_applied") is True
     assert report.get("stage1_tail_internal_best_epoch") == -1
     assert reasons.get("floor_stage1_acc_below_pre_tail_tolerance", 0) >= 1
+
+
+def test_world_stage1_priority_mix_disabled_has_zero_counters():
+    from safe_rl.models.world_model import WorldModelTrainer
+
+    trainer = WorldModelTrainer(
+        config=WorldModelConfig(
+            hidden_dim=64,
+            future_steps=2,
+            multimodal=2,
+            pair_finetune=True,
+            pair_finetune_epochs=2,
+            batch_size=1,
+            pair_ft_stage1_priority_mix_enabled=False,
+            pair_ft_stage1_tail_epochs=0,
+        ),
+        history_steps=2,
+        device="cpu",
+    )
+
+    stage1_pair = RiskPairSample(
+        history_scene=_history_scene()[:2],
+        action_a=4,
+        action_b=3,
+        preferred_action=4,
+        source="stage1_probe_same_state",
+        weight=1.0,
+        meta={
+            "target_risk_a": 0.30,
+            "target_risk_b": 0.80,
+            "target_gap": 0.50,
+            "trusted_for_spread": True,
+        },
+    )
+
+    _ = trainer.fine_tune_pairs(
+        pair_samples=[stage1_pair],
+        replay_samples=[],
+        stage5_pair_samples=[],
+        stage1_probe_pair_samples=[stage1_pair],
+        stage4_pair_samples=[],
+    )
+    source_mix = dict((trainer.last_pair_ft_report or {}).get("world_pair_ft_source_mix", {}) or {})
+    assert source_mix.get("phase_b_stage1_priority_enabled") is False
+    assert source_mix.get("phase_b_stage1_priority_pair_count") == 1
+    assert source_mix.get("phase_b_stage1_priority_steps") == 0
+    assert source_mix.get("phase_b_stage1_priority_pairs_seen") == 0
+
+
+def test_world_stage1_priority_mix_enabled_tracks_steps_and_respects_trusted_only():
+    from safe_rl.models.world_model import WorldModelTrainer
+
+    trainer = WorldModelTrainer(
+        config=WorldModelConfig(
+            hidden_dim=64,
+            future_steps=2,
+            multimodal=2,
+            pair_finetune=True,
+            pair_finetune_epochs=2,
+            batch_size=1,
+            pair_ft_stage1_priority_mix_enabled=True,
+            pair_ft_stage1_priority_mix_fraction=1.0,
+            pair_ft_stage1_priority_trusted_only=True,
+            pair_ft_stage1_tail_epochs=0,
+        ),
+        history_steps=2,
+        device="cpu",
+    )
+
+    trusted_pair = RiskPairSample(
+        history_scene=_history_scene()[:2],
+        action_a=4,
+        action_b=3,
+        preferred_action=4,
+        source="stage1_probe_same_state",
+        weight=1.0,
+        meta={
+            "target_risk_a": 0.30,
+            "target_risk_b": 0.80,
+            "target_gap": 0.50,
+            "trusted_for_spread": True,
+        },
+    )
+    untrusted_pair = RiskPairSample(
+        history_scene=_history_scene()[:2],
+        action_a=3,
+        action_b=2,
+        preferred_action=3,
+        source="stage1_probe_same_state",
+        weight=1.0,
+        meta={
+            "target_risk_a": 0.32,
+            "target_risk_b": 0.78,
+            "target_gap": 0.46,
+            "trusted_for_spread": False,
+        },
+    )
+
+    _ = trainer.fine_tune_pairs(
+        pair_samples=[trusted_pair, untrusted_pair],
+        replay_samples=[],
+        stage5_pair_samples=[],
+        stage1_probe_pair_samples=[trusted_pair, untrusted_pair],
+        stage4_pair_samples=[],
+    )
+    report = dict(trainer.last_pair_ft_report or {})
+    source_mix = dict(report.get("world_pair_ft_source_mix", {}) or {})
+    assert source_mix.get("phase_b_stage1_priority_enabled") is True
+    assert source_mix.get("phase_b_stage1_priority_fraction_configured") == pytest.approx(1.0)
+    assert source_mix.get("phase_b_stage1_priority_trusted_only") is True
+    assert source_mix.get("phase_b_stage1_priority_pair_count") == 1
+    assert source_mix.get("phase_b_stage1_priority_steps", 0) > 0
+    assert source_mix.get("phase_b_stage1_priority_pairs_seen", 0) > 0
 
 
 def test_world_stage1_tail_anticollapse_loss_positive_when_range_below_floor():

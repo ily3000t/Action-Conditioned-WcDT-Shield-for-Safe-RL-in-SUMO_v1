@@ -2468,6 +2468,12 @@ def test_stage2_report_includes_pair_finetune_metadata(monkeypatch):
                 "stage1_tail_epochs_configured": 2,
                 "stage1_tail_epochs_executed": 1,
                 "stage1_tail_pair_count": 12,
+                "phase_b_stage1_priority_enabled": True,
+                "phase_b_stage1_priority_fraction_configured": 0.35,
+                "phase_b_stage1_priority_trusted_only": True,
+                "phase_b_stage1_priority_pair_count": 24,
+                "phase_b_stage1_priority_steps": 2,
+                "phase_b_stage1_priority_pairs_seen": 6,
                 "stage1_tail_internal_best_epoch": 6,
                 "stage1_tail_internal_best_reason": "stage1_unique_higher",
                 "stage1_tail_internal_best_stage1_probe_unique": 17.0,
@@ -2506,6 +2512,12 @@ def test_stage2_report_includes_pair_finetune_metadata(monkeypatch):
                 "stage4_pairs_seen": 1,
                 "stage1_tail_pairs_seen": 2,
                 "stage1_tail_sampling_mode_effective": "without_replacement",
+                "phase_b_stage1_priority_enabled": True,
+                "phase_b_stage1_priority_fraction_configured": 0.35,
+                "phase_b_stage1_priority_trusted_only": True,
+                "phase_b_stage1_priority_pair_count": 24,
+                "phase_b_stage1_priority_steps": 2,
+                "phase_b_stage1_priority_pairs_seen": 6,
                 "stage1_tail_ranking_loss_weight_effective": 0.25,
                 "stage1_tail_resolution_loss_weight_effective": 0.025,
                 "stage1_tail_anticollapse_weight_effective": 0.005,
@@ -2547,6 +2559,12 @@ def test_stage2_report_includes_pair_finetune_metadata(monkeypatch):
     assert report["world_pair_ft_source_mix"]["stage1_tail_steps"] == 2
     assert report["world_pair_ft_source_mix"]["stage1_tail_pairs_seen"] == 2
     assert report["world_pair_ft_source_mix"]["stage1_tail_sampling_mode_effective"] == "without_replacement"
+    assert report["world_pair_ft_source_mix"]["phase_b_stage1_priority_enabled"] is True
+    assert report["world_pair_ft_source_mix"]["phase_b_stage1_priority_fraction_configured"] == pytest.approx(0.35)
+    assert report["world_pair_ft_source_mix"]["phase_b_stage1_priority_trusted_only"] is True
+    assert report["world_pair_ft_source_mix"]["phase_b_stage1_priority_pair_count"] == 24
+    assert report["world_pair_ft_source_mix"]["phase_b_stage1_priority_steps"] == 2
+    assert report["world_pair_ft_source_mix"]["phase_b_stage1_priority_pairs_seen"] == 6
     assert report["world_pair_ft_source_mix"]["stage1_tail_ranking_loss_weight_effective"] == pytest.approx(0.25)
     assert report["world_pair_ft_source_mix"]["stage1_tail_resolution_loss_weight_effective"] == pytest.approx(0.025)
     assert report["world_pair_ft_source_mix"]["stage1_tail_anticollapse_weight_effective"] == pytest.approx(0.005)
@@ -2641,6 +2659,12 @@ def test_stage2_report_includes_pair_finetune_metadata(monkeypatch):
     assert report["pair_finetune_metrics"]["world"]["stage1_tail_epochs_configured"] == 2
     assert report["pair_finetune_metrics"]["world"]["stage1_tail_epochs_executed"] == 1
     assert report["pair_finetune_metrics"]["world"]["stage1_tail_pair_count"] == 12
+    assert report["pair_finetune_metrics"]["world"]["phase_b_stage1_priority_enabled"] is True
+    assert report["pair_finetune_metrics"]["world"]["phase_b_stage1_priority_fraction_configured"] == pytest.approx(0.35)
+    assert report["pair_finetune_metrics"]["world"]["phase_b_stage1_priority_trusted_only"] is True
+    assert report["pair_finetune_metrics"]["world"]["phase_b_stage1_priority_pair_count"] == 24
+    assert report["pair_finetune_metrics"]["world"]["phase_b_stage1_priority_steps"] == 2
+    assert report["pair_finetune_metrics"]["world"]["phase_b_stage1_priority_pairs_seen"] == 6
     assert report["pair_finetune_metrics"]["world"]["stage1_tail_sampling_mode_effective"] == "without_replacement"
     assert report["pair_finetune_metrics"]["world"]["stage1_tail_ranking_loss_weight_effective"] == pytest.approx(0.25)
     assert report["pair_finetune_metrics"]["world"]["stage1_tail_resolution_loss_weight_effective"] == pytest.approx(0.025)

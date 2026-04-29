@@ -124,6 +124,9 @@ class WorldModelConfig:
     pair_ft_stage1_tail_score_range_floor: float = 0.02
     pair_ft_stage1_tail_score_range_quantile_low: float = 0.10
     pair_ft_stage1_tail_score_range_quantile_high: float = 0.90
+    pair_ft_stage1_priority_mix_enabled: bool = False
+    pair_ft_stage1_priority_mix_fraction: float = 0.35
+    pair_ft_stage1_priority_trusted_only: bool = True
     min_spread_eligible_pairs_for_gate_source: int = 128
     stage4_aux_min_high_gap_pairs: int = 128
     stage4_aux_unique_floor: int = 12
