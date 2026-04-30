@@ -1263,8 +1263,13 @@ def test_world_phaseb_stage1_anticollapse_weight_zero_keeps_metrics_zero():
     assert report.get("phase_b_stage1_anticollapse_active_pair_count") == 0
     assert report.get("phase_b_stage1_anticollapse_loss") == pytest.approx(0.0, abs=1e-9)
     assert report.get("phase_b_stage1_score_range_q10_q90") == {"q10": 0.0, "q90": 0.0, "range": 0.0}
+    assert report.get("phase_b_stage1_score_range_below_floor_fraction") == pytest.approx(0.0, abs=1e-9)
+    assert report.get("phase_b_stage1_score_range_p10") == pytest.approx(0.0, abs=1e-9)
+    assert report.get("phase_b_stage1_score_range_p50") == pytest.approx(0.0, abs=1e-9)
+    assert report.get("phase_b_stage1_score_range_p90") == pytest.approx(0.0, abs=1e-9)
     assert source_mix.get("phase_b_stage1_anticollapse_steps") == 0
     assert source_mix.get("phase_b_stage1_anticollapse_active_pair_count") == 0
+    assert source_mix.get("phase_b_stage1_score_range_below_floor_fraction") == pytest.approx(0.0, abs=1e-9)
 
 
 def test_world_phaseb_stage1_anticollapse_priority_only_activates_and_reports():
@@ -1315,8 +1320,13 @@ def test_world_phaseb_stage1_anticollapse_priority_only_activates_and_reports():
     ranges = dict(report.get("phase_b_stage1_score_range_q10_q90", {}) or {})
     assert ranges.get("q90", 0.0) >= ranges.get("q10", 0.0)
     assert ranges.get("range", 0.0) >= 0.0
+    assert report.get("phase_b_stage1_score_range_below_floor_fraction", 0.0) >= 0.0
+    assert report.get("phase_b_stage1_score_range_p10", 0.0) >= 0.0
+    assert report.get("phase_b_stage1_score_range_p50", 0.0) >= report.get("phase_b_stage1_score_range_p10", 0.0)
+    assert report.get("phase_b_stage1_score_range_p90", 0.0) >= report.get("phase_b_stage1_score_range_p50", 0.0)
     assert source_mix.get("phase_b_stage1_anticollapse_steps", 0) > 0
     assert source_mix.get("phase_b_stage1_anticollapse_active_pair_count", 0) > 0
+    assert source_mix.get("phase_b_stage1_score_range_below_floor_fraction", 0.0) >= 0.0
 
 
 def test_world_phaseb_stage1_anticollapse_all_stage1_counts_more_steps_than_priority_only():

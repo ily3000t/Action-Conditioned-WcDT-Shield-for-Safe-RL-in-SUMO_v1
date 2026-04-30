@@ -2395,6 +2395,10 @@ def test_stage2_report_includes_pair_finetune_metadata(monkeypatch):
                         "phase_b_stage1_score_range_q10": 0.0,
                         "phase_b_stage1_score_range_q90": 0.0,
                         "phase_b_stage1_score_range": 0.0,
+                        "phase_b_stage1_score_range_below_floor_fraction": 0.0,
+                        "phase_b_stage1_score_range_p10": 0.0,
+                        "phase_b_stage1_score_range_p50": 0.0,
+                        "phase_b_stage1_score_range_p90": 0.0,
                         "phase_b_stage1_anticollapse_active_pair_count": 0.0,
                         "stage1_tail_anticollapse_loss": 0.0,
                         "stage1_tail_score_range_q10": 0.0,
@@ -2433,6 +2437,10 @@ def test_stage2_report_includes_pair_finetune_metadata(monkeypatch):
                         "phase_b_stage1_score_range_q10": 0.30,
                         "phase_b_stage1_score_range_q90": 0.34,
                         "phase_b_stage1_score_range": 0.04,
+                        "phase_b_stage1_score_range_below_floor_fraction": 0.5,
+                        "phase_b_stage1_score_range_p10": 0.035,
+                        "phase_b_stage1_score_range_p50": 0.040,
+                        "phase_b_stage1_score_range_p90": 0.045,
                         "phase_b_stage1_anticollapse_active_pair_count": 6.0,
                         "stage1_tail_anticollapse_loss": 0.004,
                         "stage1_tail_score_range_q10": 0.31,
@@ -2457,6 +2465,10 @@ def test_stage2_report_includes_pair_finetune_metadata(monkeypatch):
                 "phase_b_stage1_anticollapse_active_pair_count": 6,
                 "phase_b_stage1_anticollapse_loss": 0.002,
                 "phase_b_stage1_score_range_q10_q90": {"q10": 0.30, "q90": 0.34, "range": 0.04},
+                "phase_b_stage1_score_range_below_floor_fraction": 0.5,
+                "phase_b_stage1_score_range_p10": 0.035,
+                "phase_b_stage1_score_range_p50": 0.040,
+                "phase_b_stage1_score_range_p90": 0.045,
                 "stage1_tail_anticollapse_weight_effective": 0.005,
                 "stage1_tail_score_range_floor_effective": 0.02,
                 "stage1_tail_score_range_quantiles_effective": {"low": 0.1, "high": 0.9},
@@ -2538,6 +2550,7 @@ def test_stage2_report_includes_pair_finetune_metadata(monkeypatch):
                 "phase_b_stage1_anticollapse_apply_on_effective": "priority_only",
                 "phase_b_stage1_anticollapse_steps": 2,
                 "phase_b_stage1_anticollapse_active_pair_count": 6,
+                "phase_b_stage1_score_range_below_floor_fraction": 0.5,
                 "stage1_tail_ranking_loss_weight_effective": 0.25,
                 "stage1_tail_resolution_loss_weight_effective": 0.025,
                 "stage1_tail_anticollapse_weight_effective": 0.005,
@@ -2589,6 +2602,7 @@ def test_stage2_report_includes_pair_finetune_metadata(monkeypatch):
     assert report["world_pair_ft_source_mix"]["phase_b_stage1_anticollapse_apply_on_effective"] == "priority_only"
     assert report["world_pair_ft_source_mix"]["phase_b_stage1_anticollapse_steps"] == 2
     assert report["world_pair_ft_source_mix"]["phase_b_stage1_anticollapse_active_pair_count"] == 6
+    assert report["world_pair_ft_source_mix"]["phase_b_stage1_score_range_below_floor_fraction"] == pytest.approx(0.5)
     assert report["world_pair_ft_source_mix"]["stage1_tail_ranking_loss_weight_effective"] == pytest.approx(0.25)
     assert report["world_pair_ft_source_mix"]["stage1_tail_resolution_loss_weight_effective"] == pytest.approx(0.025)
     assert report["world_pair_ft_source_mix"]["stage1_tail_anticollapse_weight_effective"] == pytest.approx(0.005)
@@ -2633,6 +2647,10 @@ def test_stage2_report_includes_pair_finetune_metadata(monkeypatch):
     assert "phase_b_stage1_score_range_q10" in world_epoch_metrics[0]
     assert "phase_b_stage1_score_range_q90" in world_epoch_metrics[0]
     assert "phase_b_stage1_score_range" in world_epoch_metrics[0]
+    assert "phase_b_stage1_score_range_below_floor_fraction" in world_epoch_metrics[0]
+    assert "phase_b_stage1_score_range_p10" in world_epoch_metrics[0]
+    assert "phase_b_stage1_score_range_p50" in world_epoch_metrics[0]
+    assert "phase_b_stage1_score_range_p90" in world_epoch_metrics[0]
     assert "phase_b_stage1_anticollapse_active_pair_count" in world_epoch_metrics[0]
     assert "stage1_tail_anticollapse_loss" in world_epoch_metrics[0]
     assert "stage1_tail_score_range_q10" in world_epoch_metrics[0]
@@ -2664,6 +2682,10 @@ def test_stage2_report_includes_pair_finetune_metadata(monkeypatch):
     assert world_epoch_metrics[1]["phase_b_stage1_score_range_q10"] == pytest.approx(0.30)
     assert world_epoch_metrics[1]["phase_b_stage1_score_range_q90"] == pytest.approx(0.34)
     assert world_epoch_metrics[1]["phase_b_stage1_score_range"] == pytest.approx(0.04)
+    assert world_epoch_metrics[1]["phase_b_stage1_score_range_below_floor_fraction"] == pytest.approx(0.5)
+    assert world_epoch_metrics[1]["phase_b_stage1_score_range_p10"] == pytest.approx(0.035)
+    assert world_epoch_metrics[1]["phase_b_stage1_score_range_p50"] == pytest.approx(0.040)
+    assert world_epoch_metrics[1]["phase_b_stage1_score_range_p90"] == pytest.approx(0.045)
     assert world_epoch_metrics[1]["phase_b_stage1_anticollapse_active_pair_count"] == pytest.approx(6.0)
     assert world_epoch_metrics[1]["stage1_tail_anticollapse_loss"] == pytest.approx(0.004)
     assert world_epoch_metrics[1]["stage1_tail_score_range_q10"] == pytest.approx(0.31)
@@ -2689,6 +2711,10 @@ def test_stage2_report_includes_pair_finetune_metadata(monkeypatch):
         "q90": pytest.approx(0.34),
         "range": pytest.approx(0.04),
     }
+    assert report["pair_finetune_metrics"]["world"]["phase_b_stage1_score_range_below_floor_fraction"] == pytest.approx(0.5)
+    assert report["pair_finetune_metrics"]["world"]["phase_b_stage1_score_range_p10"] == pytest.approx(0.035)
+    assert report["pair_finetune_metrics"]["world"]["phase_b_stage1_score_range_p50"] == pytest.approx(0.040)
+    assert report["pair_finetune_metrics"]["world"]["phase_b_stage1_score_range_p90"] == pytest.approx(0.045)
     assert report["pair_finetune_metrics"]["world"]["stage1_tail_anticollapse_weight_effective"] == pytest.approx(0.005)
     assert report["pair_finetune_metrics"]["world"]["stage1_tail_score_range_floor_effective"] == pytest.approx(0.02)
     assert report["pair_finetune_metrics"]["world"]["stage1_tail_score_range_quantiles_effective"] == {"low": 0.1, "high": 0.9}

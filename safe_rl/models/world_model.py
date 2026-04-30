@@ -686,6 +686,7 @@ class WorldModelTrainer:
             ),
             'phase_b_stage1_anticollapse_steps': 0,
             'phase_b_stage1_anticollapse_active_pair_count': 0,
+            'phase_b_stage1_score_range_below_floor_fraction': 0.0,
             'stage1_tail_sampling_mode_effective': str(stage1_tail_sampling_mode),
             'stage1_tail_ranking_loss_weight_effective': float(tail_ranking_loss_weight_effective),
             'stage1_tail_resolution_loss_weight_effective': float(tail_resolution_loss_weight_effective),
@@ -831,6 +832,10 @@ class WorldModelTrainer:
                 'phase_b_stage1_anticollapse_active_pair_count': 0,
                 'phase_b_stage1_anticollapse_loss': 0.0,
                 'phase_b_stage1_score_range_q10_q90': {'q10': 0.0, 'q90': 0.0, 'range': 0.0},
+                'phase_b_stage1_score_range_below_floor_fraction': 0.0,
+                'phase_b_stage1_score_range_p10': 0.0,
+                'phase_b_stage1_score_range_p50': 0.0,
+                'phase_b_stage1_score_range_p90': 0.0,
                 'stage1_tail_internal_best_epoch': -1,
                 'stage1_tail_internal_best_reason': 'tail_not_applied',
                 'stage1_tail_internal_best_stage1_probe_unique': float(
@@ -997,6 +1002,8 @@ class WorldModelTrainer:
         phaseb_stage1_score_range_q10_sum = 0.0
         phaseb_stage1_score_range_q90_sum = 0.0
         phaseb_stage1_score_range_sum = 0.0
+        phaseb_stage1_score_range_values: List[float] = []
+        phaseb_stage1_score_range_below_floor_steps = 0
 
         for epoch_idx in range(total_epochs):
             phase_name = 'phase_a_strong_only' if epoch_idx < phase_a_epochs else 'phase_b_source_mixed'
@@ -1028,6 +1035,8 @@ class WorldModelTrainer:
             epoch_phaseb_stage1_score_range_q10_sum = 0.0
             epoch_phaseb_stage1_score_range_q90_sum = 0.0
             epoch_phaseb_stage1_score_range_sum = 0.0
+            epoch_phaseb_stage1_score_range_values: List[float] = []
+            epoch_phaseb_stage1_score_range_below_floor_steps = 0
             step_targets = [1]
             if stage5_pair_samples and stage5_batch_size > 0:
                 step_targets.append(int(np.ceil(len(stage5_pair_samples) / float(stage5_batch_size))))
@@ -1127,9 +1136,13 @@ class WorldModelTrainer:
                                 epoch_phaseb_stage1_score_range_q90_sum += float(
                                     stage1_diag.get('stage1_tail_score_range_q90', 0.0)
                                 )
-                                epoch_phaseb_stage1_score_range_sum += float(
+                                stage1_range_value = float(
                                     stage1_diag.get('stage1_tail_score_range', 0.0)
                                 )
+                                epoch_phaseb_stage1_score_range_sum += stage1_range_value
+                                epoch_phaseb_stage1_score_range_values.append(stage1_range_value)
+                                if stage1_range_value < float(phaseb_stage1_anticollapse_score_range_floor):
+                                    epoch_phaseb_stage1_score_range_below_floor_steps += 1
                                 phaseb_stage1_anticollapse_steps += 1
                                 phaseb_stage1_anticollapse_active_pair_count += stage1_active_count
                                 phaseb_stage1_anticollapse_loss_total += float(
@@ -1141,9 +1154,10 @@ class WorldModelTrainer:
                                 phaseb_stage1_score_range_q90_sum += float(
                                     stage1_diag.get('stage1_tail_score_range_q90', 0.0)
                                 )
-                                phaseb_stage1_score_range_sum += float(
-                                    stage1_diag.get('stage1_tail_score_range', 0.0)
-                                )
+                                phaseb_stage1_score_range_sum += stage1_range_value
+                                phaseb_stage1_score_range_values.append(stage1_range_value)
+                                if stage1_range_value < float(phaseb_stage1_anticollapse_score_range_floor):
+                                    phaseb_stage1_score_range_below_floor_steps += 1
 
                 if (
                     epoch_idx >= phase_a_epochs
@@ -1222,9 +1236,13 @@ class WorldModelTrainer:
                                 epoch_phaseb_stage1_score_range_q90_sum += float(
                                     stage1_priority_diag.get('stage1_tail_score_range_q90', 0.0)
                                 )
-                                epoch_phaseb_stage1_score_range_sum += float(
+                                stage1_priority_range_value = float(
                                     stage1_priority_diag.get('stage1_tail_score_range', 0.0)
                                 )
+                                epoch_phaseb_stage1_score_range_sum += stage1_priority_range_value
+                                epoch_phaseb_stage1_score_range_values.append(stage1_priority_range_value)
+                                if stage1_priority_range_value < float(phaseb_stage1_anticollapse_score_range_floor):
+                                    epoch_phaseb_stage1_score_range_below_floor_steps += 1
                                 phaseb_stage1_anticollapse_steps += 1
                                 phaseb_stage1_anticollapse_active_pair_count += stage1_priority_active_count
                                 phaseb_stage1_anticollapse_loss_total += float(
@@ -1236,9 +1254,10 @@ class WorldModelTrainer:
                                 phaseb_stage1_score_range_q90_sum += float(
                                     stage1_priority_diag.get('stage1_tail_score_range_q90', 0.0)
                                 )
-                                phaseb_stage1_score_range_sum += float(
-                                    stage1_priority_diag.get('stage1_tail_score_range', 0.0)
-                                )
+                                phaseb_stage1_score_range_sum += stage1_priority_range_value
+                                phaseb_stage1_score_range_values.append(stage1_priority_range_value)
+                                if stage1_priority_range_value < float(phaseb_stage1_anticollapse_score_range_floor):
+                                    phaseb_stage1_score_range_below_floor_steps += 1
 
                 if epoch_idx >= phase_a_epochs and stage4_loader is not None and (step_idx + 1) % int(stage4_mix_every_n_steps) == 0:
                     stage4_batch, stage4_iter = self._next_pair_batch(stage4_iter, stage4_loader)
@@ -1439,6 +1458,27 @@ class WorldModelTrainer:
                         if epoch_phaseb_stage1_anticollapse_steps > 0
                         else 0.0
                     ),
+                    'phase_b_stage1_score_range_below_floor_fraction': (
+                        float(epoch_phaseb_stage1_score_range_below_floor_steps)
+                        / float(epoch_phaseb_stage1_anticollapse_steps)
+                        if epoch_phaseb_stage1_anticollapse_steps > 0
+                        else 0.0
+                    ),
+                    'phase_b_stage1_score_range_p10': (
+                        float(np.quantile(epoch_phaseb_stage1_score_range_values, 0.10))
+                        if epoch_phaseb_stage1_score_range_values
+                        else 0.0
+                    ),
+                    'phase_b_stage1_score_range_p50': (
+                        float(np.quantile(epoch_phaseb_stage1_score_range_values, 0.50))
+                        if epoch_phaseb_stage1_score_range_values
+                        else 0.0
+                    ),
+                    'phase_b_stage1_score_range_p90': (
+                        float(np.quantile(epoch_phaseb_stage1_score_range_values, 0.90))
+                        if epoch_phaseb_stage1_score_range_values
+                        else 0.0
+                    ),
                     'phase_b_stage1_anticollapse_active_pair_count': float(
                         epoch_phaseb_stage1_anticollapse_active_pair_count
                     ),
@@ -1527,6 +1567,26 @@ class WorldModelTrainer:
                     tb_writer.add_scalar(
                         'eval/epoch_phase_b_stage1_score_range',
                         epoch_summary['phase_b_stage1_score_range'],
+                        epoch_idx,
+                    )
+                    tb_writer.add_scalar(
+                        'eval/epoch_phase_b_stage1_score_range_below_floor_fraction',
+                        epoch_summary['phase_b_stage1_score_range_below_floor_fraction'],
+                        epoch_idx,
+                    )
+                    tb_writer.add_scalar(
+                        'eval/epoch_phase_b_stage1_score_range_p10',
+                        epoch_summary['phase_b_stage1_score_range_p10'],
+                        epoch_idx,
+                    )
+                    tb_writer.add_scalar(
+                        'eval/epoch_phase_b_stage1_score_range_p50',
+                        epoch_summary['phase_b_stage1_score_range_p50'],
+                        epoch_idx,
+                    )
+                    tb_writer.add_scalar(
+                        'eval/epoch_phase_b_stage1_score_range_p90',
+                        epoch_summary['phase_b_stage1_score_range_p90'],
                         epoch_idx,
                     )
                     tb_writer.add_scalar(
@@ -1848,6 +1908,10 @@ class WorldModelTrainer:
                         'phase_b_stage1_score_range_q10': 0.0,
                         'phase_b_stage1_score_range_q90': 0.0,
                         'phase_b_stage1_score_range': 0.0,
+                        'phase_b_stage1_score_range_below_floor_fraction': 0.0,
+                        'phase_b_stage1_score_range_p10': 0.0,
+                        'phase_b_stage1_score_range_p50': 0.0,
+                        'phase_b_stage1_score_range_p90': 0.0,
                         'phase_b_stage1_anticollapse_active_pair_count': 0.0,
                         'stage1_tail_sampling_mode_effective': str(stage1_tail_sampling_mode),
                     }
@@ -1968,6 +2032,11 @@ class WorldModelTrainer:
         source_mix['phase_b_stage1_anticollapse_active_pair_count'] = int(
             phaseb_stage1_anticollapse_active_pair_count
         )
+        source_mix['phase_b_stage1_score_range_below_floor_fraction'] = (
+            float(phaseb_stage1_score_range_below_floor_steps) / float(phaseb_stage1_anticollapse_steps)
+            if phaseb_stage1_anticollapse_steps > 0
+            else 0.0
+        )
         self.last_pair_metrics = after_pair_metrics
         self.last_pair_ft_report = {
             'enabled': True,
@@ -2065,6 +2134,26 @@ class WorldModelTrainer:
                     else 0.0
                 ),
             },
+            'phase_b_stage1_score_range_below_floor_fraction': (
+                float(phaseb_stage1_score_range_below_floor_steps) / float(phaseb_stage1_anticollapse_steps)
+                if phaseb_stage1_anticollapse_steps > 0
+                else 0.0
+            ),
+            'phase_b_stage1_score_range_p10': (
+                float(np.quantile(phaseb_stage1_score_range_values, 0.10))
+                if phaseb_stage1_score_range_values
+                else 0.0
+            ),
+            'phase_b_stage1_score_range_p50': (
+                float(np.quantile(phaseb_stage1_score_range_values, 0.50))
+                if phaseb_stage1_score_range_values
+                else 0.0
+            ),
+            'phase_b_stage1_score_range_p90': (
+                float(np.quantile(phaseb_stage1_score_range_values, 0.90))
+                if phaseb_stage1_score_range_values
+                else 0.0
+            ),
             'world_pair_ft_frozen_modules': frozen_modules,
             'world_pair_ft_trainable_modules': trainable_modules,
             'world_pair_ft_source_mix': dict(source_mix),
