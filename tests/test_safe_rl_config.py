@@ -592,6 +592,34 @@ def test_stage2_stage1_priority_mix_phaseb_anticollapse_f025_w005_config_loads()
     assert config.shield.risk_threshold == default_config.shield.risk_threshold
 
 
+def test_stage2_stage1_priority_mix_phaseb_anticollapse_f025_allstage1_config_loads():
+    default_config = load_safe_rl_config("safe_rl/config/default_safe_rl.yaml")
+    config = load_safe_rl_config(
+        "safe_rl/config/advanced/stage2_stage1_priority_mix_phaseb_anticollapse_f025_allstage1.yaml"
+    )
+    assert config.world_model.pair_ft_stage1_priority_mix_enabled is True
+    assert config.world_model.pair_ft_stage1_priority_mix_fraction == pytest.approx(0.35)
+    assert config.world_model.pair_ft_stage1_priority_trusted_only is True
+    assert config.world_model.pair_ft_stage1_tail_epochs == 0
+    assert config.world_model.pair_ft_stage1_resolution_loss_weight == pytest.approx(0.02)
+    assert config.world_model.pair_ft_stage1_resolution_mode == "adaptive"
+    assert config.world_model.pair_ft_stage1_resolution_min_score_gap == pytest.approx(0.018)
+    assert config.world_model.pair_ft_stage1_resolution_alpha == pytest.approx(0.2)
+    assert config.world_model.pair_ft_stage1_resolution_max_score_gap == pytest.approx(0.05)
+    assert config.world_model.pair_ft_selection_accuracy_tie_epsilon == pytest.approx(0.01)
+    assert config.world_model.pair_ft_stage1_phaseb_anticollapse_weight == pytest.approx(0.003)
+    assert config.world_model.pair_ft_stage1_phaseb_score_range_floor == pytest.approx(0.025)
+    assert config.world_model.pair_ft_stage1_phaseb_score_range_quantile_low == pytest.approx(0.10)
+    assert config.world_model.pair_ft_stage1_phaseb_score_range_quantile_high == pytest.approx(0.90)
+    assert config.world_model.pair_ft_stage1_phaseb_anticollapse_apply_on == "all_stage1"
+    assert config.world_model.pair_ft_stage4_mix_every_n_steps == default_config.world_model.pair_ft_stage4_mix_every_n_steps
+    assert config.world_model.pair_ft_resolution_loss_weight == default_config.world_model.pair_ft_resolution_loss_weight
+    assert config.world_model.pair_ft_patience == default_config.world_model.pair_ft_patience
+    assert config.world_model.pair_finetune_gate_mode == default_config.world_model.pair_finetune_gate_mode
+    assert config.shield.profile == default_config.shield.profile
+    assert config.shield.risk_threshold == default_config.shield.risk_threshold
+
+
 def test_stage1_probe_recovery_config_loads():
     default_config = load_safe_rl_config("safe_rl/config/default_safe_rl.yaml")
     config = load_safe_rl_config("safe_rl/config/advanced/stage1_probe_recovery.yaml")
