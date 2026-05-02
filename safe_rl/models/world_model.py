@@ -1,3 +1,4 @@
+import math
 import random
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Sequence, Tuple
@@ -277,6 +278,17 @@ class ActionConditionedWorldModel(nn.Module):
             nn.Linear(64, 1),
             nn.Softplus(),
         )
+        stage1_calib_eps = 1e-6
+        stage1_scale_init = float(getattr(config, 'pair_ft_stage1_calibration_scale_init', 1.0) or 1.0)
+        stage1_scale_init = max(stage1_calib_eps * 2.0, stage1_scale_init)
+        stage1_raw_scale_init = math.log(math.expm1(stage1_scale_init - stage1_calib_eps))
+        stage1_bias_init = float(getattr(config, 'pair_ft_stage1_calibration_bias_init', 0.0) or 0.0)
+        self.pair_ft_stage1_calibration_raw_scale = nn.Parameter(
+            torch.tensor(stage1_raw_scale_init, dtype=torch.float32)
+        )
+        self.pair_ft_stage1_calibration_bias = nn.Parameter(
+            torch.tensor(stage1_bias_init, dtype=torch.float32)
+        )
 
     def forward(self, batch: Dict[str, torch.Tensor]) -> Dict[str, torch.Tensor]:
         scene_feature = self.scene_encoder(
@@ -552,6 +564,32 @@ class WorldModelTrainer:
         ).strip().lower()
         if phaseb_stage1_anticollapse_apply_on not in {'priority_only', 'all_stage1'}:
             phaseb_stage1_anticollapse_apply_on = 'priority_only'
+        stage1_calibration_enabled = self._stage1_pair_ft_calibration_enabled()
+        stage1_softbin_loss_weight_effective = float(
+            getattr(self.config, 'pair_ft_stage1_softbin_loss_weight', 0.0) or 0.0
+        )
+        stage1_softbin_num_bins_effective = max(
+            2,
+            int(getattr(self.config, 'pair_ft_stage1_softbin_num_bins', 16) or 16),
+        )
+        stage1_softbin_temperature_effective = max(
+            1e-6,
+            float(getattr(self.config, 'pair_ft_stage1_softbin_temperature', 80.0) or 80.0),
+        )
+        stage1_softbin_apply_on_effective = str(
+            getattr(self.config, 'pair_ft_stage1_softbin_apply_on', 'stage1_probe')
+            or 'stage1_probe'
+        ).strip().lower()
+        if stage1_softbin_apply_on_effective not in {'stage1_probe'}:
+            stage1_softbin_apply_on_effective = 'stage1_probe'
+        stage1_softbin_apply_trusted_only_effective = bool(
+            getattr(self.config, 'pair_ft_stage1_softbin_apply_trusted_only', True)
+        )
+        stage1_softbin_enabled = bool(
+            stage1_softbin_loss_weight_effective > 0.0
+            and stage1_softbin_apply_on_effective == 'stage1_probe'
+        )
+        use_stage1_pair_ft_calibrated_scores = bool(stage1_calibration_enabled)
         stage1_tail_apply_trusted_only = bool(
             getattr(self.config, 'pair_ft_stage1_tail_apply_trusted_only', True)
         )
@@ -632,15 +670,40 @@ class WorldModelTrainer:
         eval_replay_sample_count = int(len(eval_replay_samples))
         trusted_pair_count = sum(1 for sample in pair_samples if bool(sample.meta.get('trusted_for_spread', False)))
         hard_negative_count = sum(1 for sample in pair_samples if bool(sample.meta.get('hard_negative', False)))
-        before_pair_metrics = self.evaluate_pairs(pair_samples)
-        before_stage5_metrics = self.evaluate_pairs(stage5_pair_samples)
-        before_stage1_probe_metrics = self.evaluate_pairs(stage1_probe_pair_samples)
-        before_stage4_metrics = self.evaluate_pairs(stage4_pair_samples)
+        before_pair_metrics = self.evaluate_pairs(
+            pair_samples,
+            use_stage1_pair_ft_calibration=use_stage1_pair_ft_calibrated_scores,
+        )
+        before_stage5_metrics = self.evaluate_pairs(
+            stage5_pair_samples,
+            use_stage1_pair_ft_calibration=use_stage1_pair_ft_calibrated_scores,
+        )
+        before_stage1_probe_metrics = self.evaluate_pairs(
+            stage1_probe_pair_samples,
+            use_stage1_pair_ft_calibration=use_stage1_pair_ft_calibrated_scores,
+        )
+        before_stage4_metrics = self.evaluate_pairs(
+            stage4_pair_samples,
+            use_stage1_pair_ft_calibration=use_stage1_pair_ft_calibrated_scores,
+        )
         stage4_high_gap_pair_samples = self._filter_high_gap_pairs(stage4_pair_samples)
-        before_stage4_high_gap_metrics = self.evaluate_pairs(stage4_high_gap_pair_samples)
+        before_stage4_high_gap_metrics = self.evaluate_pairs(
+            stage4_high_gap_pair_samples,
+            use_stage1_pair_ft_calibration=use_stage1_pair_ft_calibrated_scores,
+        )
         stage4_aux_pair_samples = self._filter_stage4_aux_pairs(stage4_pair_samples)
-        before_stage4_aux_metrics = self.evaluate_pairs(stage4_aux_pair_samples)
+        before_stage4_aux_metrics = self.evaluate_pairs(
+            stage4_aux_pair_samples,
+            use_stage1_pair_ft_calibration=use_stage1_pair_ft_calibrated_scores,
+        )
         before_stage4_aux_logit_gap_metrics = self._evaluate_pair_logit_gap_metrics(stage4_aux_pair_samples)
+        before_stage1_softbin_stats = self._evaluate_stage1_softbin_stats(
+            pair_samples=stage1_probe_pair_samples,
+            use_stage1_pair_ft_calibration=use_stage1_pair_ft_calibrated_scores,
+            num_bins=stage1_softbin_num_bins_effective,
+            temperature=stage1_softbin_temperature_effective,
+            apply_trusted_only=stage1_softbin_apply_trusted_only_effective,
+        )
         before_pointwise_metrics = self._evaluate_risk_only_samples(eval_replay_samples)
         stage5_spread_eligible_count = self._spread_eligible_pair_count(stage5_pair_samples)
         stage1_probe_spread_eligible_count = self._spread_eligible_pair_count(stage1_probe_pair_samples)
@@ -743,6 +806,33 @@ class WorldModelTrainer:
                 'pair_ft_stage1_resolution_apply_trusted_only': bool(
                     getattr(self.config, 'pair_ft_stage1_resolution_apply_trusted_only', True)
                 ),
+                'stage1_calibration_enabled': bool(stage1_calibration_enabled),
+                'stage1_calibration_scale': float(
+                    self._stage1_pair_ft_calibration_scale_bias()[0].detach().item()
+                    if stage1_calibration_enabled
+                    else 1.0
+                ),
+                'stage1_calibration_bias': float(
+                    self._stage1_pair_ft_calibration_scale_bias()[1].detach().item()
+                    if stage1_calibration_enabled
+                    else 0.0
+                ),
+                'stage1_softbin_loss': 0.0,
+                'stage1_softbin_entropy': float(before_stage1_softbin_stats.get('entropy', 0.0)),
+                'stage1_softbin_effective_bins': float(before_stage1_softbin_stats.get('effective_bins', 0.0)),
+                'stage1_softbin_num_bins': int(stage1_softbin_num_bins_effective),
+                'stage1_softbin_temperature': float(stage1_softbin_temperature_effective),
+                'stage1_softbin_apply_on': str(stage1_softbin_apply_on_effective),
+                'stage1_softbin_apply_trusted_only': bool(stage1_softbin_apply_trusted_only_effective),
+                'stage1_softbin_active_count': int(before_stage1_softbin_stats.get('active_count', 0)),
+                'stage1_score_bin_occupancy_before_after': {
+                    'before': list(before_stage1_softbin_stats.get('occupancy', [])),
+                    'after': list(before_stage1_softbin_stats.get('occupancy', [])),
+                },
+                'stage1_score_entropy_before_after': {
+                    'before': float(before_stage1_softbin_stats.get('entropy', 0.0)),
+                    'after': float(before_stage1_softbin_stats.get('entropy', 0.0)),
+                },
                 'stage1_tail_ranking_loss_weight_effective': float(tail_ranking_loss_weight_effective),
                 'stage1_tail_resolution_loss_weight_effective': float(tail_resolution_loss_weight_effective),
                 'stage1_tail_anticollapse_weight_effective': float(stage1_tail_anticollapse_weight_effective),
@@ -947,6 +1037,17 @@ class WorldModelTrainer:
             f"q=({phaseb_stage1_anticollapse_q_low:.2f},{phaseb_stage1_anticollapse_q_high:.2f}), "
             f"apply_on={phaseb_stage1_anticollapse_apply_on}"
         )
+        print(
+            f"[WorldModel PairFT] stage1_calibration: enabled={bool(stage1_calibration_enabled)}, "
+            f"scope=pair_ft_only"
+        )
+        print(
+            f"[WorldModel PairFT] stage1_softbin: weight={stage1_softbin_loss_weight_effective:.4f}, "
+            f"bins={int(stage1_softbin_num_bins_effective)}, "
+            f"temperature={stage1_softbin_temperature_effective:.4f}, "
+            f"apply_on={stage1_softbin_apply_on_effective}, "
+            f"trusted_only={bool(stage1_softbin_apply_trusted_only_effective)}"
+        )
         replay_loader = self._build_replay_loader(replay_samples)
         replay_iter = iter(replay_loader) if replay_loader is not None else None
         stage4_loader = self._build_pair_loader(stage4_pair_samples)
@@ -975,8 +1076,18 @@ class WorldModelTrainer:
         source_mix['phase_a_epochs'] = int(phase_a_epochs)
         source_mix['phase_b_epochs'] = int(phase_b_epochs)
         best_eval_pairs = stage5_pair_samples or stage1_probe_pair_samples or pair_samples
-        initial_metrics = dict(self.evaluate_pairs(best_eval_pairs))
-        initial_stage1_probe_metrics = dict(self.evaluate_pairs(stage1_probe_pair_samples))
+        initial_metrics = dict(
+            self.evaluate_pairs(
+                best_eval_pairs,
+                use_stage1_pair_ft_calibration=use_stage1_pair_ft_calibrated_scores,
+            )
+        )
+        initial_stage1_probe_metrics = dict(
+            self.evaluate_pairs(
+                stage1_probe_pair_samples,
+                use_stage1_pair_ft_calibration=use_stage1_pair_ft_calibrated_scores,
+            )
+        )
         legacy_best_metrics = dict(initial_metrics)
         legacy_best_stage1_probe_metrics = dict(initial_stage1_probe_metrics)
         legacy_best_epoch = -1
@@ -1004,6 +1115,11 @@ class WorldModelTrainer:
         phaseb_stage1_score_range_sum = 0.0
         phaseb_stage1_score_range_values: List[float] = []
         phaseb_stage1_score_range_below_floor_steps = 0
+        stage1_softbin_steps = 0
+        stage1_softbin_active_count_total = 0
+        stage1_softbin_loss_total = 0.0
+        stage1_softbin_entropy_total = 0.0
+        stage1_softbin_effective_bins_total = 0.0
 
         for epoch_idx in range(total_epochs):
             phase_name = 'phase_a_strong_only' if epoch_idx < phase_a_epochs else 'phase_b_source_mixed'
@@ -1037,6 +1153,11 @@ class WorldModelTrainer:
             epoch_phaseb_stage1_score_range_sum = 0.0
             epoch_phaseb_stage1_score_range_values: List[float] = []
             epoch_phaseb_stage1_score_range_below_floor_steps = 0
+            epoch_stage1_softbin_steps = 0
+            epoch_stage1_softbin_active_count = 0
+            epoch_stage1_softbin_loss_total = 0.0
+            epoch_stage1_softbin_entropy_total = 0.0
+            epoch_stage1_softbin_effective_bins_total = 0.0
             step_targets = [1]
             if stage5_pair_samples and stage5_batch_size > 0:
                 step_targets.append(int(np.ceil(len(stage5_pair_samples) / float(stage5_batch_size))))
@@ -1050,6 +1171,7 @@ class WorldModelTrainer:
                 stage4_resolution_terms: List[torch.Tensor] = []
                 stage1_resolution_terms: List[torch.Tensor] = []
                 phaseb_stage1_anticollapse_terms: List[torch.Tensor] = []
+                stage1_softbin_terms: List[torch.Tensor] = []
 
                 if stage5_pair_samples:
                     stage5_batch, selected_pair_ids = self._sample_stage5_batch_with_cap(
@@ -1086,6 +1208,11 @@ class WorldModelTrainer:
                             stage1_probe_batch,
                             enable_resolution=False,
                             enable_stage1_resolution=True,
+                            enable_stage1_pair_ft_calibration=stage1_calibration_enabled,
+                            enable_stage1_softbin=stage1_softbin_enabled,
+                            stage1_softbin_num_bins=stage1_softbin_num_bins_effective,
+                            stage1_softbin_temperature=stage1_softbin_temperature_effective,
+                            stage1_softbin_apply_trusted_only=stage1_softbin_apply_trusted_only_effective,
                             enable_stage1_tail_anticollapse=enable_phaseb_stage1_anticollapse_on_standard,
                             stage1_tail_score_range_floor=phaseb_stage1_anticollapse_score_range_floor,
                             stage1_tail_score_range_quantile_low=phaseb_stage1_anticollapse_q_low,
@@ -1117,6 +1244,27 @@ class WorldModelTrainer:
                         epoch_stage1_probe_below_adaptive_margin_count += int(
                             stage1_diag.get('stage1_probe_below_adaptive_margin_count', 0)
                         )
+                        stage1_softbin_active = int(stage1_diag.get('stage1_softbin_active_count', 0))
+                        if stage1_softbin_enabled and stage1_softbin_active > 0:
+                            stage1_softbin_loss_tensor = stage1_diag.get(
+                                'stage1_softbin_loss_tensor',
+                                self._zero_loss(),
+                            )
+                            stage1_softbin_terms.append(stage1_softbin_loss_tensor)
+                            epoch_stage1_softbin_steps += 1
+                            epoch_stage1_softbin_active_count += stage1_softbin_active
+                            epoch_stage1_softbin_loss_total += float(stage1_softbin_loss_tensor.detach().item())
+                            epoch_stage1_softbin_entropy_total += float(stage1_diag.get('stage1_softbin_entropy', 0.0))
+                            epoch_stage1_softbin_effective_bins_total += float(
+                                stage1_diag.get('stage1_softbin_effective_bins', 0.0)
+                            )
+                            stage1_softbin_steps += 1
+                            stage1_softbin_active_count_total += stage1_softbin_active
+                            stage1_softbin_loss_total += float(stage1_softbin_loss_tensor.detach().item())
+                            stage1_softbin_entropy_total += float(stage1_diag.get('stage1_softbin_entropy', 0.0))
+                            stage1_softbin_effective_bins_total += float(
+                                stage1_diag.get('stage1_softbin_effective_bins', 0.0)
+                            )
                         if enable_phaseb_stage1_anticollapse_on_standard:
                             stage1_active_count = int(stage1_diag.get('stage1_probe_active_pair_count', 0))
                             if stage1_active_count > 0:
@@ -1184,6 +1332,11 @@ class WorldModelTrainer:
                             stage1_priority_batch,
                             enable_resolution=False,
                             enable_stage1_resolution=True,
+                            enable_stage1_pair_ft_calibration=stage1_calibration_enabled,
+                            enable_stage1_softbin=stage1_softbin_enabled,
+                            stage1_softbin_num_bins=stage1_softbin_num_bins_effective,
+                            stage1_softbin_temperature=stage1_softbin_temperature_effective,
+                            stage1_softbin_apply_trusted_only=stage1_softbin_apply_trusted_only_effective,
                             enable_stage1_tail_anticollapse=enable_phaseb_stage1_anticollapse_on_priority,
                             stage1_tail_score_range_floor=phaseb_stage1_anticollapse_score_range_floor,
                             stage1_tail_score_range_quantile_low=phaseb_stage1_anticollapse_q_low,
@@ -1215,6 +1368,31 @@ class WorldModelTrainer:
                         epoch_stage1_probe_below_adaptive_margin_count += int(
                             stage1_priority_diag.get('stage1_probe_below_adaptive_margin_count', 0)
                         )
+                        stage1_priority_softbin_active = int(stage1_priority_diag.get('stage1_softbin_active_count', 0))
+                        if stage1_softbin_enabled and stage1_priority_softbin_active > 0:
+                            stage1_priority_softbin_loss_tensor = stage1_priority_diag.get(
+                                'stage1_softbin_loss_tensor',
+                                self._zero_loss(),
+                            )
+                            stage1_softbin_terms.append(stage1_priority_softbin_loss_tensor)
+                            epoch_stage1_softbin_steps += 1
+                            epoch_stage1_softbin_active_count += stage1_priority_softbin_active
+                            epoch_stage1_softbin_loss_total += float(stage1_priority_softbin_loss_tensor.detach().item())
+                            epoch_stage1_softbin_entropy_total += float(
+                                stage1_priority_diag.get('stage1_softbin_entropy', 0.0)
+                            )
+                            epoch_stage1_softbin_effective_bins_total += float(
+                                stage1_priority_diag.get('stage1_softbin_effective_bins', 0.0)
+                            )
+                            stage1_softbin_steps += 1
+                            stage1_softbin_active_count_total += stage1_priority_softbin_active
+                            stage1_softbin_loss_total += float(stage1_priority_softbin_loss_tensor.detach().item())
+                            stage1_softbin_entropy_total += float(
+                                stage1_priority_diag.get('stage1_softbin_entropy', 0.0)
+                            )
+                            stage1_softbin_effective_bins_total += float(
+                                stage1_priority_diag.get('stage1_softbin_effective_bins', 0.0)
+                            )
                         if enable_phaseb_stage1_anticollapse_on_priority:
                             stage1_priority_active_count = int(
                                 stage1_priority_diag.get('stage1_probe_active_pair_count', 0)
@@ -1294,6 +1472,11 @@ class WorldModelTrainer:
                     if phaseb_stage1_anticollapse_terms
                     else self._zero_loss()
                 )
+                stage1_softbin_loss = (
+                    torch.mean(torch.stack(stage1_softbin_terms))
+                    if stage1_softbin_terms
+                    else self._zero_loss()
+                )
                 resolution_loss = stage4_resolution_loss + stage1_resolution_loss
                 pointwise_total, _, _, _, replay_iter = self._compute_replay_losses(replay_iter, replay_loader)
                 total_loss = (
@@ -1303,6 +1486,7 @@ class WorldModelTrainer:
                     + float(getattr(self.config, 'pair_ft_resolution_loss_weight', 0.0) or 0.0) * stage4_resolution_loss
                     + float(getattr(self.config, 'pair_ft_stage1_resolution_loss_weight', 0.0) or 0.0) * stage1_resolution_loss
                     + float(phaseb_stage1_anticollapse_weight_effective) * phaseb_stage1_anticollapse_loss
+                    + float(stage1_softbin_loss_weight_effective) * stage1_softbin_loss
                 )
 
                 optimizer.zero_grad()
@@ -1434,6 +1618,22 @@ class WorldModelTrainer:
                         if epoch_stage1_probe_active_pairs > 0
                         else 0.0
                     ),
+                    'stage1_softbin_loss': (
+                        float(epoch_stage1_softbin_loss_total) / float(epoch_stage1_softbin_steps)
+                        if epoch_stage1_softbin_steps > 0
+                        else 0.0
+                    ),
+                    'stage1_softbin_entropy': (
+                        float(epoch_stage1_softbin_entropy_total) / float(epoch_stage1_softbin_steps)
+                        if epoch_stage1_softbin_steps > 0
+                        else 0.0
+                    ),
+                    'stage1_softbin_effective_bins': (
+                        float(epoch_stage1_softbin_effective_bins_total) / float(epoch_stage1_softbin_steps)
+                        if epoch_stage1_softbin_steps > 0
+                        else 0.0
+                    ),
+                    'stage1_softbin_active_count': float(epoch_stage1_softbin_active_count),
                     'phase_b_stage1_anticollapse_loss': (
                         float(epoch_phaseb_stage1_anticollapse_loss_total)
                         / float(epoch_phaseb_stage1_anticollapse_steps)
@@ -1483,8 +1683,14 @@ class WorldModelTrainer:
                         epoch_phaseb_stage1_anticollapse_active_pair_count
                     ),
                 }
-                eval_metrics = self.evaluate_pairs(best_eval_pairs)
-                eval_stage1_probe_metrics = self.evaluate_pairs(stage1_probe_pair_samples)
+                eval_metrics = self.evaluate_pairs(
+                    best_eval_pairs,
+                    use_stage1_pair_ft_calibration=use_stage1_pair_ft_calibrated_scores,
+                )
+                eval_stage1_probe_metrics = self.evaluate_pairs(
+                    stage1_probe_pair_samples,
+                    use_stage1_pair_ft_calibration=use_stage1_pair_ft_calibrated_scores,
+                )
                 epoch_summary.update(
                     {
                         'eval_pair_ranking_accuracy': float(eval_metrics.get('pair_ranking_accuracy', 0.0)),
@@ -1686,8 +1892,14 @@ class WorldModelTrainer:
         )
         stage1_tail_accepted = False
         stage1_tail_acceptance_reason = 'tail_not_applied'
-        stage1_tail_stage1_probe_metrics_before = self.evaluate_pairs(stage1_probe_pair_samples)
-        stage1_tail_eval_metrics_before = self.evaluate_pairs(best_eval_pairs)
+        stage1_tail_stage1_probe_metrics_before = self.evaluate_pairs(
+            stage1_probe_pair_samples,
+            use_stage1_pair_ft_calibration=use_stage1_pair_ft_calibrated_scores,
+        )
+        stage1_tail_eval_metrics_before = self.evaluate_pairs(
+            best_eval_pairs,
+            use_stage1_pair_ft_calibration=use_stage1_pair_ft_calibrated_scores,
+        )
         stage1_tail_stage1_probe_metrics_after = dict(stage1_tail_stage1_probe_metrics_before)
         stage1_tail_eval_metrics_after = dict(stage1_tail_eval_metrics_before)
         stage1_tail_ranking_loss_total = 0.0
@@ -1915,8 +2127,14 @@ class WorldModelTrainer:
                         'phase_b_stage1_anticollapse_active_pair_count': 0.0,
                         'stage1_tail_sampling_mode_effective': str(stage1_tail_sampling_mode),
                     }
-                    eval_metrics = self.evaluate_pairs(best_eval_pairs)
-                    eval_stage1_probe_metrics = self.evaluate_pairs(stage1_probe_pair_samples)
+                    eval_metrics = self.evaluate_pairs(
+                        best_eval_pairs,
+                        use_stage1_pair_ft_calibration=use_stage1_pair_ft_calibrated_scores,
+                    )
+                    eval_stage1_probe_metrics = self.evaluate_pairs(
+                        stage1_probe_pair_samples,
+                        use_stage1_pair_ft_calibration=use_stage1_pair_ft_calibrated_scores,
+                    )
                     epoch_summary.update(
                         {
                             'eval_pair_ranking_accuracy': float(eval_metrics.get('pair_ranking_accuracy', 0.0)),
@@ -1987,10 +2205,16 @@ class WorldModelTrainer:
         if stage1_tail_applied and tail_internal_best_state is not None:
             self.model.load_state_dict(tail_internal_best_state)
             stage1_tail_stage1_probe_metrics_after = dict(
-                tail_internal_best_stage1_probe_metrics or self.evaluate_pairs(stage1_probe_pair_samples)
+                tail_internal_best_stage1_probe_metrics or self.evaluate_pairs(
+                    stage1_probe_pair_samples,
+                    use_stage1_pair_ft_calibration=use_stage1_pair_ft_calibrated_scores,
+                )
             )
             stage1_tail_eval_metrics_after = dict(
-                tail_internal_best_eval_metrics or self.evaluate_pairs(best_eval_pairs)
+                tail_internal_best_eval_metrics or self.evaluate_pairs(
+                    best_eval_pairs,
+                    use_stage1_pair_ft_calibration=use_stage1_pair_ft_calibrated_scores,
+                )
             )
             stage1_tail_accepted, stage1_tail_acceptance_reason = self._evaluate_stage1_tail_acceptance(
                 pre_tail_stage1_probe_metrics=stage1_tail_stage1_probe_metrics_before,
@@ -2018,13 +2242,38 @@ class WorldModelTrainer:
 
         self._restore_grad_state(grad_state)
         self.model.eval()
-        after_pair_metrics = self.evaluate_pairs(pair_samples)
-        after_stage5_metrics = self.evaluate_pairs(stage5_pair_samples)
-        after_stage1_probe_metrics = self.evaluate_pairs(stage1_probe_pair_samples)
-        after_stage4_metrics = self.evaluate_pairs(stage4_pair_samples)
-        after_stage4_high_gap_metrics = self.evaluate_pairs(stage4_high_gap_pair_samples)
-        after_stage4_aux_metrics = self.evaluate_pairs(stage4_aux_pair_samples)
+        after_pair_metrics = self.evaluate_pairs(
+            pair_samples,
+            use_stage1_pair_ft_calibration=use_stage1_pair_ft_calibrated_scores,
+        )
+        after_stage5_metrics = self.evaluate_pairs(
+            stage5_pair_samples,
+            use_stage1_pair_ft_calibration=use_stage1_pair_ft_calibrated_scores,
+        )
+        after_stage1_probe_metrics = self.evaluate_pairs(
+            stage1_probe_pair_samples,
+            use_stage1_pair_ft_calibration=use_stage1_pair_ft_calibrated_scores,
+        )
+        after_stage4_metrics = self.evaluate_pairs(
+            stage4_pair_samples,
+            use_stage1_pair_ft_calibration=use_stage1_pair_ft_calibrated_scores,
+        )
+        after_stage4_high_gap_metrics = self.evaluate_pairs(
+            stage4_high_gap_pair_samples,
+            use_stage1_pair_ft_calibration=use_stage1_pair_ft_calibrated_scores,
+        )
+        after_stage4_aux_metrics = self.evaluate_pairs(
+            stage4_aux_pair_samples,
+            use_stage1_pair_ft_calibration=use_stage1_pair_ft_calibrated_scores,
+        )
         after_stage4_aux_logit_gap_metrics = self._evaluate_pair_logit_gap_metrics(stage4_aux_pair_samples)
+        after_stage1_softbin_stats = self._evaluate_stage1_softbin_stats(
+            pair_samples=stage1_probe_pair_samples,
+            use_stage1_pair_ft_calibration=use_stage1_pair_ft_calibrated_scores,
+            num_bins=stage1_softbin_num_bins_effective,
+            temperature=stage1_softbin_temperature_effective,
+            apply_trusted_only=stage1_softbin_apply_trusted_only_effective,
+        )
         after_pointwise_metrics = self._evaluate_risk_only_samples(eval_replay_samples)
         source_mix['stage5_pair_seen_counts'] = dict(total_stage5_seen_counts)
         source_mix['stage5_cap_reached_pairs'] = int(len(stage5_cap_reached_ids))
@@ -2037,6 +2286,13 @@ class WorldModelTrainer:
             if phaseb_stage1_anticollapse_steps > 0
             else 0.0
         )
+        if stage1_calibration_enabled:
+            stage1_calibration_scale_value, stage1_calibration_bias_value = self._stage1_pair_ft_calibration_scale_bias()
+            stage1_calibration_scale = float(stage1_calibration_scale_value.detach().item())
+            stage1_calibration_bias = float(stage1_calibration_bias_value.detach().item())
+        else:
+            stage1_calibration_scale = 1.0
+            stage1_calibration_bias = 0.0
         self.last_pair_metrics = after_pair_metrics
         self.last_pair_ft_report = {
             'enabled': True,
@@ -2059,6 +2315,37 @@ class WorldModelTrainer:
             'pair_ft_stage1_resolution_alpha': float(stage1_resolution_alpha),
             'pair_ft_stage1_resolution_max_score_gap': float(stage1_resolution_max_score_gap),
             'pair_ft_stage1_resolution_apply_trusted_only': bool(stage1_resolution_apply_trusted_only),
+            'stage1_calibration_enabled': bool(stage1_calibration_enabled),
+            'stage1_calibration_scale': float(stage1_calibration_scale),
+            'stage1_calibration_bias': float(stage1_calibration_bias),
+            'stage1_softbin_loss': (
+                float(stage1_softbin_loss_total) / float(stage1_softbin_steps)
+                if stage1_softbin_steps > 0
+                else 0.0
+            ),
+            'stage1_softbin_entropy': (
+                float(stage1_softbin_entropy_total) / float(stage1_softbin_steps)
+                if stage1_softbin_steps > 0
+                else 0.0
+            ),
+            'stage1_softbin_effective_bins': (
+                float(stage1_softbin_effective_bins_total) / float(stage1_softbin_steps)
+                if stage1_softbin_steps > 0
+                else 0.0
+            ),
+            'stage1_softbin_num_bins': int(stage1_softbin_num_bins_effective),
+            'stage1_softbin_temperature': float(stage1_softbin_temperature_effective),
+            'stage1_softbin_apply_on': str(stage1_softbin_apply_on_effective),
+            'stage1_softbin_apply_trusted_only': bool(stage1_softbin_apply_trusted_only_effective),
+            'stage1_softbin_active_count': int(stage1_softbin_active_count_total),
+            'stage1_score_bin_occupancy_before_after': {
+                'before': list(before_stage1_softbin_stats.get('occupancy', [])),
+                'after': list(after_stage1_softbin_stats.get('occupancy', [])),
+            },
+            'stage1_score_entropy_before_after': {
+                'before': float(before_stage1_softbin_stats.get('entropy', 0.0)),
+                'after': float(after_stage1_softbin_stats.get('entropy', 0.0)),
+            },
             'stage1_tail_ranking_loss_weight_effective': float(tail_ranking_loss_weight_effective),
             'stage1_tail_resolution_loss_weight_effective': float(tail_resolution_loss_weight_effective),
             'stage1_tail_anticollapse_weight_effective': float(stage1_tail_anticollapse_weight_effective),
@@ -2585,7 +2872,11 @@ class WorldModelTrainer:
         return current_gap > best_gap + 1e-9
 
     @torch.no_grad()
-    def evaluate_pairs(self, pair_samples: Sequence[RiskPairSample]) -> Dict[str, float]:
+    def evaluate_pairs(
+        self,
+        pair_samples: Sequence[RiskPairSample],
+        use_stage1_pair_ft_calibration: bool = False,
+    ) -> Dict[str, float]:
         if len(pair_samples) == 0:
             return self._empty_pair_metrics()
 
@@ -2609,8 +2900,19 @@ class WorldModelTrainer:
         try:
             for batch in loader:
                 batch_a, batch_b, preferred_a, target_a, target_b, _, hard_negative, _, _, _ = self._tensorize_pair_batch(batch)
-                score_a = self.model(batch_a)['risk_score']
-                score_b = self.model(batch_b)['risk_score']
+                out_a = self.model(batch_a)
+                out_b = self.model(batch_b)
+                score_a = out_a['risk_score']
+                score_b = out_b['risk_score']
+                score_a_logit = out_a.get('risk_score_logit')
+                score_b_logit = out_b.get('risk_score_logit')
+                if score_a_logit is None:
+                    score_a_logit = torch.logit(torch.clamp(score_a, min=1e-6, max=1.0 - 1e-6))
+                if score_b_logit is None:
+                    score_b_logit = torch.logit(torch.clamp(score_b, min=1e-6, max=1.0 - 1e-6))
+                if use_stage1_pair_ft_calibration:
+                    _, score_a = self._apply_stage1_pair_ft_calibration(score_a_logit, score_a)
+                    _, score_b = self._apply_stage1_pair_ft_calibration(score_b_logit, score_b)
                 pred_pref_a = score_a <= score_b
                 correct += int(torch.sum(pred_pref_a == preferred_a).item())
                 if hard_negative.any():
@@ -2713,6 +3015,11 @@ class WorldModelTrainer:
         batch: Sequence[RiskPairSample],
         enable_resolution: bool = False,
         enable_stage1_resolution: bool = False,
+        enable_stage1_pair_ft_calibration: bool = False,
+        enable_stage1_softbin: bool = False,
+        stage1_softbin_num_bins: int = 16,
+        stage1_softbin_temperature: float = 80.0,
+        stage1_softbin_apply_trusted_only: bool = True,
         enable_stage1_tail_anticollapse: bool = False,
         stage1_tail_score_range_floor: float = 0.02,
         stage1_tail_score_range_quantile_low: float = 0.10,
@@ -2740,6 +3047,9 @@ class WorldModelTrainer:
             score_a_logit = torch.logit(torch.clamp(score_a, min=1e-6, max=1.0 - 1e-6))
         if score_b_logit is None:
             score_b_logit = torch.logit(torch.clamp(score_b, min=1e-6, max=1.0 - 1e-6))
+        if enable_stage1_pair_ft_calibration:
+            score_a_logit, score_a = self._apply_stage1_pair_ft_calibration(score_a_logit, score_a)
+            score_b_logit, score_b = self._apply_stage1_pair_ft_calibration(score_b_logit, score_b)
 
         safer = torch.where(preferred_a, score_a_logit, score_b_logit)
         riskier = torch.where(preferred_a, score_b_logit, score_a_logit)
@@ -2773,6 +3083,14 @@ class WorldModelTrainer:
         stage1_resolution_mask = (
             stage1_probe_active_mask.to(torch.float32)
             if enable_stage1_resolution
+            else torch.zeros_like(weight)
+        )
+        stage1_softbin_mask = stage1_probe_mask
+        if stage1_softbin_apply_trusted_only:
+            stage1_softbin_mask = stage1_softbin_mask & trusted_for_spread
+        stage1_softbin_mask = (
+            stage1_softbin_mask.to(torch.float32)
+            if enable_stage1_softbin
             else torch.zeros_like(weight)
         )
         resolution_score_gap = torch.abs(score_a - score_b)
@@ -2891,6 +3209,29 @@ class WorldModelTrainer:
             stage1_probe_below_score_margin_fraction = 0.0
             stage1_probe_below_adaptive_margin_count = 0
             stage1_probe_below_adaptive_margin_fraction = 0.0
+        stage1_softbin_active_mask = stage1_softbin_mask > 0.0
+        stage1_softbin_active_count = int(torch.sum(stage1_softbin_mask).item())
+        stage1_softbin_entropy = self._zero_loss()
+        stage1_softbin_effective_bins = self._zero_loss()
+        stage1_softbin_loss = self._zero_loss()
+        stage1_softbin_occupancy_values: List[float] = []
+        if enable_stage1_softbin and stage1_softbin_active_count > 0:
+            stage1_softbin_score_a = score_a[stage1_softbin_active_mask]
+            stage1_softbin_score_b = score_b[stage1_softbin_active_mask]
+            stage1_softbin_scores = torch.cat([stage1_softbin_score_a, stage1_softbin_score_b], dim=0)
+            (
+                stage1_softbin_loss,
+                stage1_softbin_entropy,
+                stage1_softbin_effective_bins,
+                stage1_softbin_occupancy,
+            ) = self._compute_softbin_stats_from_scores(
+                scores=stage1_softbin_scores,
+                num_bins=stage1_softbin_num_bins,
+                temperature=stage1_softbin_temperature,
+            )
+            stage1_softbin_occupancy_values = (
+                stage1_softbin_occupancy.detach().cpu().numpy().astype(float).tolist()
+            )
         stage1_tail_q10 = 0.0
         stage1_tail_q90 = 0.0
         stage1_tail_score_range = 0.0
@@ -2916,6 +3257,13 @@ class WorldModelTrainer:
         else:
             stage1_tail_anticollapse_loss = self._zero_loss()
         resolution_loss = stage4_resolution_loss + stage1_resolution_loss
+        if enable_stage1_pair_ft_calibration:
+            stage1_calib_scale_tensor, stage1_calib_bias_tensor = self._stage1_pair_ft_calibration_scale_bias()
+            stage1_calib_scale = float(stage1_calib_scale_tensor.detach().item())
+            stage1_calib_bias = float(stage1_calib_bias_tensor.detach().item())
+        else:
+            stage1_calib_scale = 1.0
+            stage1_calib_bias = 0.0
         diagnostics = {
             'stage4_aux_active_pair_count': int(stage4_active_resolution_count),
             'stage4_aux_batch_size': int(weight.shape[0]),
@@ -2959,6 +3307,17 @@ class WorldModelTrainer:
             'pair_ft_stage1_resolution_max_score_gap': float(stage1_resolution_max_score_gap),
             'pair_ft_stage1_resolution_apply_trusted_only': bool(stage1_resolution_apply_trusted_only),
             'pair_ft_stage1_resolution_min_score_gap': float(stage1_min_score_gap),
+            'stage1_calibration_enabled': bool(enable_stage1_pair_ft_calibration),
+            'stage1_calibration_scale': float(stage1_calib_scale),
+            'stage1_calibration_bias': float(stage1_calib_bias),
+            'stage1_softbin_loss': float(stage1_softbin_loss.detach().item()),
+            'stage1_softbin_entropy': float(stage1_softbin_entropy.detach().item()),
+            'stage1_softbin_effective_bins': float(stage1_softbin_effective_bins.detach().item()),
+            'stage1_softbin_num_bins': int(max(2, int(stage1_softbin_num_bins))),
+            'stage1_softbin_temperature': float(max(1e-6, float(stage1_softbin_temperature))),
+            'stage1_softbin_active_count': int(stage1_softbin_active_count),
+            'stage1_softbin_occupancy': stage1_softbin_occupancy_values,
+            'stage1_softbin_loss_tensor': stage1_softbin_loss,
             'stage1_tail_anticollapse_loss': float(stage1_tail_anticollapse_loss.detach().item()),
             'stage1_tail_score_range_q10': float(stage1_tail_q10),
             'stage1_tail_score_range_q90': float(stage1_tail_q90),
@@ -3074,6 +3433,138 @@ class WorldModelTrainer:
 
     def _zero_loss(self) -> torch.Tensor:
         return torch.zeros((), dtype=torch.float32, device=self.device)
+
+    def _stage1_pair_ft_calibration_enabled(self) -> bool:
+        enabled = bool(getattr(self.config, 'pair_ft_stage1_calibration_enabled', False))
+        scope = str(getattr(self.config, 'pair_ft_stage1_calibration_train_scope', 'pair_ft_only') or 'pair_ft_only')
+        scope = scope.strip().lower()
+        if scope not in {'pair_ft_only'}:
+            return False
+        return enabled
+
+    def _stage1_pair_ft_calibration_scale_bias(self) -> Tuple[torch.Tensor, torch.Tensor]:
+        raw_scale = getattr(self.model, 'pair_ft_stage1_calibration_raw_scale')
+        bias = getattr(self.model, 'pair_ft_stage1_calibration_bias')
+        scale = torch.nn.functional.softplus(raw_scale) + 1e-6
+        return scale, bias
+
+    def _apply_stage1_pair_ft_calibration(
+        self,
+        score_logit: torch.Tensor,
+        score: Optional[torch.Tensor] = None,
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        scale, bias = self._stage1_pair_ft_calibration_scale_bias()
+        calibrated_logit = scale * score_logit + bias
+        calibrated_score = torch.sigmoid(calibrated_logit)
+        if score is None:
+            return calibrated_logit, calibrated_score
+        return calibrated_logit, calibrated_score
+
+    def _compute_softbin_stats_from_scores(
+        self,
+        scores: torch.Tensor,
+        num_bins: int,
+        temperature: float,
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        effective_bins = max(2, int(num_bins))
+        temp = max(1e-6, float(temperature))
+        if scores.numel() == 0:
+            zero = self._zero_loss()
+            occupancy = torch.zeros((effective_bins,), dtype=torch.float32, device=self.device)
+            return zero, zero, torch.ones((), dtype=torch.float32, device=self.device), occupancy
+        clipped = torch.clamp(scores, min=0.0, max=1.0)
+        centers = torch.linspace(0.0, 1.0, steps=effective_bins, dtype=clipped.dtype, device=clipped.device)
+        dist_sq = (clipped.unsqueeze(-1) - centers.unsqueeze(0)) ** 2
+        assignment = torch.softmax(-temp * dist_sq, dim=-1)
+        occupancy = torch.mean(assignment, dim=0)
+        entropy = -torch.sum(occupancy * torch.log(torch.clamp(occupancy, min=1e-8)))
+        loss = -entropy
+        effective_bin_count = torch.exp(entropy)
+        return loss, entropy, effective_bin_count, occupancy
+
+    @torch.no_grad()
+    def _evaluate_stage1_softbin_stats(
+        self,
+        pair_samples: Sequence[RiskPairSample],
+        use_stage1_pair_ft_calibration: bool,
+        num_bins: int,
+        temperature: float,
+        apply_trusted_only: bool,
+    ) -> Dict[str, Any]:
+        filtered = [
+            sample
+            for sample in list(pair_samples or [])
+            if str(sample.source) == 'stage1_probe_same_state'
+            and (
+                (not apply_trusted_only)
+                or bool((sample.meta or {}).get('trusted_for_spread', False))
+            )
+        ]
+        effective_bins = max(2, int(num_bins))
+        temp = max(1e-6, float(temperature))
+        if not filtered:
+            return {
+                'active_count': 0,
+                'entropy': 0.0,
+                'effective_bins': 0.0,
+                'occupancy': [0.0] * effective_bins,
+                'num_bins': effective_bins,
+                'temperature': temp,
+            }
+        loader = DataLoader(
+            RiskPairDataset(filtered),
+            batch_size=max(1, min(int(self.config.batch_size), len(filtered))),
+            shuffle=False,
+            drop_last=False,
+            collate_fn=collate_risk_pairs,
+        )
+        collected: List[torch.Tensor] = []
+        was_training = bool(self.model.training)
+        self.model.eval()
+        try:
+            for batch in loader:
+                batch_a, batch_b, _, _, _, _, _, _, _, _ = self._tensorize_pair_batch(batch)
+                out_a = self.model(batch_a)
+                out_b = self.model(batch_b)
+                score_a = out_a['risk_score']
+                score_b = out_b['risk_score']
+                score_a_logit = out_a.get('risk_score_logit')
+                score_b_logit = out_b.get('risk_score_logit')
+                if score_a_logit is None:
+                    score_a_logit = torch.logit(torch.clamp(score_a, min=1e-6, max=1.0 - 1e-6))
+                if score_b_logit is None:
+                    score_b_logit = torch.logit(torch.clamp(score_b, min=1e-6, max=1.0 - 1e-6))
+                if use_stage1_pair_ft_calibration:
+                    _, score_a = self._apply_stage1_pair_ft_calibration(score_a_logit, score_a)
+                    _, score_b = self._apply_stage1_pair_ft_calibration(score_b_logit, score_b)
+                collected.append(score_a.detach())
+                collected.append(score_b.detach())
+        finally:
+            if was_training:
+                self.model.train()
+        if not collected:
+            return {
+                'active_count': 0,
+                'entropy': 0.0,
+                'effective_bins': 0.0,
+                'occupancy': [0.0] * effective_bins,
+                'num_bins': effective_bins,
+                'temperature': temp,
+            }
+        scores = torch.cat(collected, dim=0)
+        _, entropy, effective_bin_count, occupancy = self._compute_softbin_stats_from_scores(
+            scores=scores,
+            num_bins=effective_bins,
+            temperature=temp,
+        )
+        return {
+            'active_count': int(scores.numel()),
+            'entropy': float(entropy.detach().item()),
+            'effective_bins': float(effective_bin_count.detach().item()),
+            'occupancy': occupancy.detach().cpu().numpy().astype(float).tolist(),
+            'num_bins': effective_bins,
+            'temperature': temp,
+        }
 
     def _build_replay_loader(self, replay_samples: Sequence[ActionConditionedSample]):
         samples = list(replay_samples or [])

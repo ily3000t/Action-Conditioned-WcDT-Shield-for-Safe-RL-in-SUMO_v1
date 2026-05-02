@@ -1398,6 +1398,128 @@ def test_world_phaseb_stage1_anticollapse_all_stage1_counts_more_steps_than_prio
     assert steps_all_stage1 > steps_priority_only
 
 
+def test_world_stage1_pair_ft_calibration_scale_positive_and_monotonic():
+    from safe_rl.models.world_model import WorldModelTrainer
+
+    trainer = WorldModelTrainer(
+        config=WorldModelConfig(
+            hidden_dim=64,
+            future_steps=2,
+            multimodal=2,
+            pair_ft_stage1_calibration_enabled=True,
+            pair_ft_stage1_calibration_scale_init=1.0,
+            pair_ft_stage1_calibration_bias_init=0.0,
+            pair_ft_stage1_calibration_train_scope="pair_ft_only",
+        ),
+        history_steps=2,
+        device="cpu",
+    )
+    scale, _ = trainer._stage1_pair_ft_calibration_scale_bias()
+    assert float(scale.detach().item()) > 0.0
+    logits = torch.tensor([-2.0, -1.0, 0.0, 1.0], dtype=torch.float32, device=trainer.device)
+    _, calibrated_scores = trainer._apply_stage1_pair_ft_calibration(logits)
+    diffs = calibrated_scores[1:] - calibrated_scores[:-1]
+    assert torch.all(diffs > 0).item() is True
+
+
+def test_world_stage1_softbin_entropy_tracks_distribution_dispersion():
+    from safe_rl.models.world_model import WorldModelTrainer
+
+    trainer = WorldModelTrainer(
+        config=WorldModelConfig(hidden_dim=64, future_steps=2, multimodal=2),
+        history_steps=2,
+        device="cpu",
+    )
+    concentrated = torch.full((64,), 0.5, dtype=torch.float32, device=trainer.device)
+    dispersed = torch.linspace(0.0, 1.0, steps=64, dtype=torch.float32, device=trainer.device)
+    loss_conc, entropy_conc, _, _ = trainer._compute_softbin_stats_from_scores(
+        concentrated, num_bins=16, temperature=80.0
+    )
+    loss_disp, entropy_disp, _, _ = trainer._compute_softbin_stats_from_scores(
+        dispersed, num_bins=16, temperature=80.0
+    )
+    assert float(entropy_disp.detach().item()) > float(entropy_conc.detach().item())
+    assert float(loss_disp.detach().item()) < float(loss_conc.detach().item())
+
+
+def test_world_stage1_softbin_active_and_zero_paths():
+    from safe_rl.models.world_model import WorldModelTrainer
+
+    trainer = WorldModelTrainer(
+        config=WorldModelConfig(
+            hidden_dim=64,
+            future_steps=2,
+            multimodal=2,
+            pair_ft_stage1_softbin_num_bins=16,
+            pair_ft_stage1_softbin_temperature=80.0,
+            pair_ft_stage1_softbin_apply_trusted_only=True,
+        ),
+        history_steps=2,
+        device="cpu",
+    )
+    stage1_trusted_pair = RiskPairSample(
+        history_scene=_history_scene()[:2],
+        action_a=4,
+        action_b=3,
+        preferred_action=4,
+        source="stage1_probe_same_state",
+        weight=1.0,
+        meta={"target_risk_a": 0.30, "target_risk_b": 0.80, "target_gap": 0.50, "trusted_for_spread": True},
+    )
+    _, _, _, diag_active = trainer._compute_pair_losses(
+        [stage1_trusted_pair],
+        enable_stage1_resolution=False,
+        enable_stage1_softbin=True,
+        stage1_softbin_num_bins=16,
+        stage1_softbin_temperature=80.0,
+        stage1_softbin_apply_trusted_only=True,
+    )
+    assert diag_active["stage1_softbin_active_count"] == 1
+    assert diag_active["stage1_softbin_entropy"] >= 0.0
+    assert diag_active["stage1_softbin_effective_bins"] >= 1.0
+    assert diag_active["stage1_softbin_loss"] <= 0.0
+
+    stage1_untrusted_pair = RiskPairSample(
+        history_scene=_history_scene()[:2],
+        action_a=4,
+        action_b=3,
+        preferred_action=4,
+        source="stage1_probe_same_state",
+        weight=1.0,
+        meta={"target_risk_a": 0.30, "target_risk_b": 0.80, "target_gap": 0.50, "trusted_for_spread": False},
+    )
+    _, _, _, diag_untrusted = trainer._compute_pair_losses(
+        [stage1_untrusted_pair],
+        enable_stage1_resolution=False,
+        enable_stage1_softbin=True,
+        stage1_softbin_num_bins=16,
+        stage1_softbin_temperature=80.0,
+        stage1_softbin_apply_trusted_only=True,
+    )
+    assert diag_untrusted["stage1_softbin_active_count"] == 0
+    assert diag_untrusted["stage1_softbin_loss"] == pytest.approx(0.0, abs=1e-9)
+
+    stage4_pair = RiskPairSample(
+        history_scene=_history_scene()[:2],
+        action_a=4,
+        action_b=3,
+        preferred_action=4,
+        source="stage4_candidate_rank",
+        weight=1.0,
+        meta={"target_risk_a": 0.30, "target_risk_b": 0.80, "target_gap": 0.50, "trusted_for_spread": True},
+    )
+    _, _, _, diag_stage4 = trainer._compute_pair_losses(
+        [stage4_pair],
+        enable_stage1_resolution=False,
+        enable_stage1_softbin=True,
+        stage1_softbin_num_bins=16,
+        stage1_softbin_temperature=80.0,
+        stage1_softbin_apply_trusted_only=True,
+    )
+    assert diag_stage4["stage1_softbin_active_count"] == 0
+    assert diag_stage4["stage1_softbin_loss"] == pytest.approx(0.0, abs=1e-9)
+
+
 def test_world_stage1_tail_anticollapse_loss_positive_when_range_below_floor():
     from safe_rl.models.world_model import WorldModelTrainer
 

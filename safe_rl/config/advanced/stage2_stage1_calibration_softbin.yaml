@@ -1,0 +1,27 @@
+# Stage2-only experiment (v14): Stage1 gate-aligned calibration + soft-bin occupancy.
+# Keep stage1 priority mix baseline and disable phase_b anti-collapse for isolation.
+
+world_model:
+  pair_ft_stage1_priority_mix_enabled: true
+  pair_ft_stage1_priority_mix_fraction: 0.35
+  pair_ft_stage1_priority_trusted_only: true
+  pair_ft_stage1_tail_epochs: 0
+  pair_ft_stage1_resolution_loss_weight: 0.02
+  pair_ft_stage1_resolution_mode: "adaptive"
+  pair_ft_stage1_resolution_min_score_gap: 0.018
+  pair_ft_stage1_resolution_alpha: 0.2
+  pair_ft_stage1_resolution_max_score_gap: 0.05
+  pair_ft_selection_accuracy_tie_epsilon: 0.01
+  pair_ft_stage1_phaseb_anticollapse_weight: 0.0
+  pair_ft_stage1_calibration_enabled: true
+  pair_ft_stage1_calibration_scale_init: 1.0
+  pair_ft_stage1_calibration_bias_init: 0.0
+  pair_ft_stage1_calibration_train_scope: "pair_ft_only"
+  pair_ft_stage1_softbin_loss_weight: 0.003
+  pair_ft_stage1_softbin_num_bins: 16
+  pair_ft_stage1_softbin_temperature: 80.0
+  pair_ft_stage1_softbin_apply_on: "stage1_probe"
+  pair_ft_stage1_softbin_apply_trusted_only: true
+
+tensorboard:
+  run_name: "stage2_stage1_calibration_softbin"

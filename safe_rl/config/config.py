@@ -132,6 +132,15 @@ class WorldModelConfig:
     pair_ft_stage1_phaseb_score_range_quantile_low: float = 0.10
     pair_ft_stage1_phaseb_score_range_quantile_high: float = 0.90
     pair_ft_stage1_phaseb_anticollapse_apply_on: str = "priority_only"
+    pair_ft_stage1_calibration_enabled: bool = False
+    pair_ft_stage1_calibration_scale_init: float = 1.0
+    pair_ft_stage1_calibration_bias_init: float = 0.0
+    pair_ft_stage1_calibration_train_scope: str = "pair_ft_only"
+    pair_ft_stage1_softbin_loss_weight: float = 0.0
+    pair_ft_stage1_softbin_num_bins: int = 16
+    pair_ft_stage1_softbin_temperature: float = 80.0
+    pair_ft_stage1_softbin_apply_on: str = "stage1_probe"
+    pair_ft_stage1_softbin_apply_trusted_only: bool = True
     min_spread_eligible_pairs_for_gate_source: int = 128
     stage4_aux_min_high_gap_pairs: int = 128
     stage4_aux_unique_floor: int = 12

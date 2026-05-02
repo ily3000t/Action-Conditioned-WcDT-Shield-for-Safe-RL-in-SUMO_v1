@@ -2391,6 +2391,10 @@ def test_stage2_report_includes_pair_finetune_metadata(monkeypatch):
                         "stage1_probe_below_score_margin_count": 0.0,
                         "stage1_probe_below_score_margin_fraction": 0.0,
                         "stage1_probe_below_adaptive_margin_fraction": 0.0,
+                        "stage1_softbin_loss": 0.0,
+                        "stage1_softbin_entropy": 0.0,
+                        "stage1_softbin_effective_bins": 0.0,
+                        "stage1_softbin_active_count": 0.0,
                         "phase_b_stage1_anticollapse_loss": 0.0,
                         "phase_b_stage1_score_range_q10": 0.0,
                         "phase_b_stage1_score_range_q90": 0.0,
@@ -2429,6 +2433,10 @@ def test_stage2_report_includes_pair_finetune_metadata(monkeypatch):
                         "stage1_probe_below_score_margin_count": 2.0,
                         "stage1_probe_below_score_margin_fraction": 0.6666667,
                         "stage1_probe_below_adaptive_margin_fraction": 0.5555556,
+                        "stage1_softbin_loss": -2.3401,
+                        "stage1_softbin_entropy": 2.3401,
+                        "stage1_softbin_effective_bins": 10.3825,
+                        "stage1_softbin_active_count": 6.0,
                         "stage1_probe_eval_pair_ranking_accuracy": 0.68,
                         "stage1_probe_eval_same_state_score_gap": 0.021,
                         "stage1_probe_eval_score_spread": 0.016,
@@ -2458,6 +2466,22 @@ def test_stage2_report_includes_pair_finetune_metadata(monkeypatch):
                 "pair_ft_stage1_resolution_alpha": 0.2,
                 "pair_ft_stage1_resolution_max_score_gap": 0.05,
                 "pair_ft_stage1_resolution_apply_trusted_only": True,
+                "stage1_calibration_enabled": True,
+                "stage1_calibration_scale": 1.01,
+                "stage1_calibration_bias": 0.002,
+                "stage1_softbin_loss": -2.3401,
+                "stage1_softbin_entropy": 2.3401,
+                "stage1_softbin_effective_bins": 10.3825,
+                "stage1_softbin_num_bins": 16,
+                "stage1_softbin_temperature": 80.0,
+                "stage1_softbin_apply_on": "stage1_probe",
+                "stage1_softbin_apply_trusted_only": True,
+                "stage1_softbin_active_count": 12,
+                "stage1_score_bin_occupancy_before_after": {
+                    "before": [0.1] * 16,
+                    "after": [0.1] * 16,
+                },
+                "stage1_score_entropy_before_after": {"before": 2.1, "after": 2.34},
                 "pair_ft_selection_accuracy_tie_epsilon_effective": 0.01,
                 "phase_b_stage1_anticollapse_weight_effective": 0.003,
                 "phase_b_stage1_anticollapse_apply_on_effective": "priority_only",
@@ -2643,6 +2667,10 @@ def test_stage2_report_includes_pair_finetune_metadata(monkeypatch):
     assert "stage1_probe_margin_p90" in world_epoch_metrics[0]
     assert "stage1_probe_pred_gap_to_margin_ratio_mean" in world_epoch_metrics[0]
     assert "stage1_probe_below_adaptive_margin_fraction" in world_epoch_metrics[0]
+    assert "stage1_softbin_loss" in world_epoch_metrics[0]
+    assert "stage1_softbin_entropy" in world_epoch_metrics[0]
+    assert "stage1_softbin_effective_bins" in world_epoch_metrics[0]
+    assert "stage1_softbin_active_count" in world_epoch_metrics[0]
     assert "phase_b_stage1_anticollapse_loss" in world_epoch_metrics[0]
     assert "phase_b_stage1_score_range_q10" in world_epoch_metrics[0]
     assert "phase_b_stage1_score_range_q90" in world_epoch_metrics[0]
@@ -2674,6 +2702,10 @@ def test_stage2_report_includes_pair_finetune_metadata(monkeypatch):
     assert world_epoch_metrics[1]["stage1_probe_margin_mean"] == pytest.approx(0.019)
     assert world_epoch_metrics[1]["stage1_probe_pred_gap_to_margin_ratio_mean"] == pytest.approx(0.73)
     assert world_epoch_metrics[1]["stage1_probe_below_adaptive_margin_fraction"] == pytest.approx(0.5555556)
+    assert world_epoch_metrics[1]["stage1_softbin_loss"] == pytest.approx(-2.3401)
+    assert world_epoch_metrics[1]["stage1_softbin_entropy"] == pytest.approx(2.3401)
+    assert world_epoch_metrics[1]["stage1_softbin_effective_bins"] == pytest.approx(10.3825)
+    assert world_epoch_metrics[1]["stage1_softbin_active_count"] == pytest.approx(6.0)
     assert world_epoch_metrics[1]["stage1_probe_eval_pair_ranking_accuracy"] == pytest.approx(0.68)
     assert world_epoch_metrics[1]["stage1_probe_eval_same_state_score_gap"] == pytest.approx(0.021)
     assert world_epoch_metrics[1]["stage1_probe_eval_score_spread"] == pytest.approx(0.016)
@@ -2700,6 +2732,21 @@ def test_stage2_report_includes_pair_finetune_metadata(monkeypatch):
     assert report["pair_finetune_metrics"]["world"]["pair_ft_stage1_resolution_alpha"] == pytest.approx(0.2)
     assert report["pair_finetune_metrics"]["world"]["pair_ft_stage1_resolution_max_score_gap"] == pytest.approx(0.05)
     assert report["pair_finetune_metrics"]["world"]["pair_ft_stage1_resolution_apply_trusted_only"] is True
+    assert report["pair_finetune_metrics"]["world"]["stage1_calibration_enabled"] is True
+    assert report["pair_finetune_metrics"]["world"]["stage1_calibration_scale"] == pytest.approx(1.01)
+    assert report["pair_finetune_metrics"]["world"]["stage1_calibration_bias"] == pytest.approx(0.002)
+    assert report["pair_finetune_metrics"]["world"]["stage1_softbin_loss"] == pytest.approx(-2.3401)
+    assert report["pair_finetune_metrics"]["world"]["stage1_softbin_entropy"] == pytest.approx(2.3401)
+    assert report["pair_finetune_metrics"]["world"]["stage1_softbin_effective_bins"] == pytest.approx(10.3825)
+    assert report["pair_finetune_metrics"]["world"]["stage1_softbin_num_bins"] == 16
+    assert report["pair_finetune_metrics"]["world"]["stage1_softbin_temperature"] == pytest.approx(80.0)
+    assert report["pair_finetune_metrics"]["world"]["stage1_softbin_apply_on"] == "stage1_probe"
+    assert report["pair_finetune_metrics"]["world"]["stage1_softbin_apply_trusted_only"] is True
+    assert report["pair_finetune_metrics"]["world"]["stage1_softbin_active_count"] == 12
+    assert len(report["pair_finetune_metrics"]["world"]["stage1_score_bin_occupancy_before_after"]["before"]) == 16
+    assert len(report["pair_finetune_metrics"]["world"]["stage1_score_bin_occupancy_before_after"]["after"]) == 16
+    assert report["pair_finetune_metrics"]["world"]["stage1_score_entropy_before_after"]["before"] == pytest.approx(2.1)
+    assert report["pair_finetune_metrics"]["world"]["stage1_score_entropy_before_after"]["after"] == pytest.approx(2.34)
     assert report["pair_finetune_metrics"]["world"]["pair_ft_selection_accuracy_tie_epsilon_effective"] == pytest.approx(0.01)
     assert report["pair_finetune_metrics"]["world"]["phase_b_stage1_anticollapse_weight_effective"] == pytest.approx(0.003)
     assert report["pair_finetune_metrics"]["world"]["phase_b_stage1_anticollapse_apply_on_effective"] == "priority_only"
