@@ -660,6 +660,46 @@ def test_stage2_stage1_calibration_softbin_config_loads():
     assert config.shield.risk_threshold == default_config.shield.risk_threshold
 
 
+def test_stage2_stage1_calibration_softbin_w006_config_loads():
+    default_config = load_safe_rl_config("safe_rl/config/default_safe_rl.yaml")
+    base_config = load_safe_rl_config("safe_rl/config/advanced/stage2_stage1_calibration_softbin.yaml")
+    config = load_safe_rl_config("safe_rl/config/advanced/stage2_stage1_calibration_softbin_w006.yaml")
+    assert config.world_model.pair_ft_stage1_priority_mix_enabled is True
+    assert config.world_model.pair_ft_stage1_priority_mix_fraction == pytest.approx(0.35)
+    assert config.world_model.pair_ft_stage1_priority_trusted_only is True
+    assert config.world_model.pair_ft_stage1_tail_epochs == 0
+    assert config.world_model.pair_ft_stage1_resolution_loss_weight == pytest.approx(0.02)
+    assert config.world_model.pair_ft_stage1_resolution_mode == "adaptive"
+    assert config.world_model.pair_ft_stage1_resolution_min_score_gap == pytest.approx(0.018)
+    assert config.world_model.pair_ft_stage1_resolution_alpha == pytest.approx(0.2)
+    assert config.world_model.pair_ft_stage1_resolution_max_score_gap == pytest.approx(0.05)
+    assert config.world_model.pair_ft_selection_accuracy_tie_epsilon == pytest.approx(0.01)
+    assert config.world_model.pair_ft_stage1_phaseb_anticollapse_weight == pytest.approx(0.0)
+    assert config.world_model.pair_ft_stage1_calibration_enabled is True
+    assert config.world_model.pair_ft_stage1_calibration_scale_init == pytest.approx(1.0)
+    assert config.world_model.pair_ft_stage1_calibration_bias_init == pytest.approx(0.0)
+    assert config.world_model.pair_ft_stage1_calibration_train_scope == "pair_ft_only"
+    assert config.world_model.pair_ft_stage1_softbin_loss_weight == pytest.approx(0.006)
+    assert config.world_model.pair_ft_stage1_softbin_num_bins == 16
+    assert config.world_model.pair_ft_stage1_softbin_temperature == pytest.approx(80.0)
+    assert config.world_model.pair_ft_stage1_softbin_apply_on == "stage1_probe"
+    assert config.world_model.pair_ft_stage1_softbin_apply_trusted_only is True
+    assert base_config.world_model.pair_ft_stage1_softbin_loss_weight == pytest.approx(0.003)
+    assert config.world_model.pair_ft_stage1_priority_mix_fraction == pytest.approx(
+        base_config.world_model.pair_ft_stage1_priority_mix_fraction
+    )
+    assert config.world_model.pair_ft_stage1_tail_epochs == base_config.world_model.pair_ft_stage1_tail_epochs
+    assert config.world_model.pair_ft_stage1_phaseb_anticollapse_weight == pytest.approx(
+        base_config.world_model.pair_ft_stage1_phaseb_anticollapse_weight
+    )
+    assert config.world_model.pair_ft_stage4_mix_every_n_steps == default_config.world_model.pair_ft_stage4_mix_every_n_steps
+    assert config.world_model.pair_ft_resolution_loss_weight == default_config.world_model.pair_ft_resolution_loss_weight
+    assert config.world_model.pair_ft_patience == default_config.world_model.pair_ft_patience
+    assert config.world_model.pair_finetune_gate_mode == default_config.world_model.pair_finetune_gate_mode
+    assert config.shield.profile == default_config.shield.profile
+    assert config.shield.risk_threshold == default_config.shield.risk_threshold
+
+
 def test_stage1_probe_recovery_config_loads():
     default_config = load_safe_rl_config("safe_rl/config/default_safe_rl.yaml")
     config = load_safe_rl_config("safe_rl/config/advanced/stage1_probe_recovery.yaml")
