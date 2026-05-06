@@ -9,6 +9,7 @@ from safe_rl.buffer import InterventionBuffer
 from safe_rl.config.config import SafeRLConfig, ShieldSweepVariant
 from safe_rl.pipeline.pipeline import SafeRLPipeline
 from safe_rl.rl.ppo import HeuristicPolicy
+from safe_rl.tools.restore_stage2_snapshot import restore_stage2_snapshot
 from safe_rl_main import parse_args
 
 
@@ -3154,6 +3155,154 @@ def test_stage5_pair_generation_report_failed_when_trace_assets_missing():
     assert "pair_files_missing_all" in reasons
     assert "pair_files_missing" in reasons
     assert "missing_pair_scalar_summaries" in reasons
+
+
+def test_stage2_healthy_snapshot_created_and_latest_pointer_updates():
+    config = _tiny_config()
+    pipeline = SafeRLPipeline(config)
+    run_id = f"ut_stage2_snapshot_ok_{uuid.uuid4().hex[:8]}"
+    pipeline._prepare_run_context(stage="stage2", run_id=run_id)
+    pipeline.models_dir.mkdir(parents=True, exist_ok=True)
+    pipeline.reports_dir.mkdir(parents=True, exist_ok=True)
+
+    pipeline.world_model_path.write_text("world_v1", encoding="utf-8")
+    pipeline.light_model_path.write_text("light_v1", encoding="utf-8")
+    pipeline._write_json(pipeline.stage2_training_report_path, {"stage": "stage2"})
+    pipeline._write_json(pipeline.risk_v2_eval_summary_path, {"summary": "ok"})
+
+    stage2_report = {
+        "model_quality_metric_source": "stage1_probe",
+        "stage2_pair_source_health": {
+            "model_quality": {
+                "status": "healthy",
+                "metrics": {
+                    "world_unique_score_count": 18,
+                    "world_score_spread": 0.012,
+                    "world_same_state_score_gap": 0.017,
+                },
+            }
+        },
+    }
+
+    first = pipeline._maybe_create_stage2_healthy_snapshot(stage2_report)
+    assert first["created"] is True
+    first_snapshot_dir = Path(first["snapshot_dir"])
+    assert first_snapshot_dir.exists()
+    assert (first_snapshot_dir / "snapshot_manifest.json").exists()
+    assert Path(first["world_model_snapshot"]).exists()
+    assert Path(first["light_model_snapshot"]).exists()
+    assert Path(first["stage2_report_snapshot"]).exists()
+
+    pipeline.world_model_path.write_text("world_v2", encoding="utf-8")
+    pipeline.light_model_path.write_text("light_v2", encoding="utf-8")
+    pipeline._write_json(pipeline.stage2_training_report_path, {"stage": "stage2", "round": 2})
+    second = pipeline._maybe_create_stage2_healthy_snapshot(stage2_report)
+    assert second["created"] is True
+    second_snapshot_dir = Path(second["snapshot_dir"])
+    assert second_snapshot_dir.exists()
+    assert second_snapshot_dir != first_snapshot_dir
+
+    latest_payload = json.loads(pipeline.stage2_healthy_latest_snapshot_path.read_text(encoding="utf-8"))
+    assert latest_payload["snapshot_dir"] == str(second_snapshot_dir)
+
+
+def test_stage2_healthy_snapshot_not_created_when_model_quality_not_healthy():
+    config = _tiny_config()
+    pipeline = SafeRLPipeline(config)
+    run_id = f"ut_stage2_snapshot_skip_{uuid.uuid4().hex[:8]}"
+    pipeline._prepare_run_context(stage="stage2", run_id=run_id)
+    pipeline.models_dir.mkdir(parents=True, exist_ok=True)
+    pipeline.reports_dir.mkdir(parents=True, exist_ok=True)
+    pipeline.world_model_path.write_text("world", encoding="utf-8")
+    pipeline.light_model_path.write_text("light", encoding="utf-8")
+    pipeline._write_json(pipeline.stage2_training_report_path, {"stage": "stage2"})
+
+    stage2_report = {
+        "stage2_pair_source_health": {
+            "model_quality": {
+                "status": "critical",
+                "metrics": {
+                    "world_unique_score_count": 10,
+                    "world_score_spread": 0.012,
+                    "world_same_state_score_gap": 0.018,
+                },
+            }
+        }
+    }
+
+    payload = pipeline._maybe_create_stage2_healthy_snapshot(stage2_report)
+    assert payload["created"] is False
+    assert "not_healthy_or_degraded" in payload["reason"]
+    assert not pipeline.stage2_healthy_snapshots_dir.exists()
+
+
+def test_stage5_gate_allows_after_restoring_healthy_stage2_snapshot():
+    config = _tiny_config()
+    pipeline = SafeRLPipeline(config)
+    run_id = f"ut_stage5_gate_restore_{uuid.uuid4().hex[:8]}"
+    pipeline._prepare_run_context(stage="stage5", run_id=run_id)
+    pipeline.models_dir.mkdir(parents=True, exist_ok=True)
+    pipeline.reports_dir.mkdir(parents=True, exist_ok=True)
+    pipeline.world_model_path.write_text("active_world_bad", encoding="utf-8")
+    pipeline.light_model_path.write_text("active_light_bad", encoding="utf-8")
+
+    pipeline._write_json(
+        pipeline.stage2_training_report_path,
+        {
+            "stage2_pair_source_health": {
+                "model_quality": {"status": "critical", "message": "critical for gate test"}
+            }
+        },
+    )
+    with pytest.raises(RuntimeError, match="blocked by Stage2 model quality gate"):
+        pipeline._enforce_stage2_model_quality_gate("stage5")
+
+    snapshot_dir = pipeline.run_root / "snapshots" / "stage2_healthy" / "20260506_000000"
+    snapshot_dir.mkdir(parents=True, exist_ok=True)
+    snapshot_report_path = snapshot_dir / "stage2_training_report.json"
+    snapshot_world_path = snapshot_dir / "world_model.pt"
+    snapshot_light_path = snapshot_dir / "light_risk.pt"
+    snapshot_report_path.write_text(
+        json.dumps(
+            {
+                "stage2_pair_source_health": {
+                    "model_quality": {"status": "healthy", "message": "healthy snapshot"}
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    snapshot_world_path.write_text("healthy_world", encoding="utf-8")
+    snapshot_light_path.write_text("healthy_light", encoding="utf-8")
+    (snapshot_dir / "snapshot_manifest.json").write_text(
+        json.dumps(
+            {
+                "snapshot_type": "stage2_healthy",
+                "run_id": run_id,
+                "stage2_training_report_path": str(snapshot_report_path),
+                "world_model_path": str(snapshot_world_path),
+                "light_model_path": str(snapshot_light_path),
+            }
+        ),
+        encoding="utf-8",
+    )
+    latest_path = pipeline.run_root / "snapshots" / "stage2_healthy" / "latest_snapshot.json"
+    latest_path.write_text(
+        json.dumps(
+            {
+                "run_id": run_id,
+                "snapshot_dir": str(snapshot_dir),
+                "snapshot_manifest_path": str(snapshot_dir / "snapshot_manifest.json"),
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    restore_stage2_snapshot(run_id=run_id, snapshot="latest", strict=True)
+    gate = pipeline._enforce_stage2_model_quality_gate("stage5")
+    assert gate["model_quality_status"] == "healthy"
+    assert gate["status"] == "healthy"
+    assert bool(gate.get("blocked", False)) is False
 
 
 def test_stage2_pair_source_health_reports_stage5_generation_diagnosis():

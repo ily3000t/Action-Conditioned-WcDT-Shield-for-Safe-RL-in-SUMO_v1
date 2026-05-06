@@ -4,6 +4,7 @@ import inspect
 import math
 import datetime as dt
 import json
+import shutil
 import time
 from collections import Counter
 from dataclasses import asdict, dataclass
@@ -70,9 +71,12 @@ class SafeRLPipeline:
         self.policy_sb3_path: Optional[Path] = None
         self.buffer_path: Optional[Path] = None
         self.report_path: Optional[Path] = None
+        self.snapshots_dir: Optional[Path] = None
         self.collector_failure_report_path: Optional[Path] = None
         self.warning_summary_report_path: Optional[Path] = None
         self.stage2_training_report_path: Optional[Path] = None
+        self.stage2_healthy_snapshots_dir: Optional[Path] = None
+        self.stage2_healthy_latest_snapshot_path: Optional[Path] = None
         self.pairs_stage1_probe_path: Optional[Path] = None
         self.pairs_stage4_path: Optional[Path] = None
         self.pairs_stage5_path: Optional[Path] = None
@@ -277,6 +281,7 @@ class SafeRLPipeline:
         self.policies_dir = self.run_root / "policies"
         self.buffers_dir = self.run_root / "buffers"
         self.reports_dir = self.run_root / "reports"
+        self.snapshots_dir = self.run_root / "snapshots"
         self.sumo_logs_dir = self.run_root / "sumo_logs"
         self.tensorboard_root = self.run_root / "tensorboard"
         self.manifest_path = self.run_root / "manifest.json"
@@ -293,6 +298,8 @@ class SafeRLPipeline:
         self.collector_failure_report_path = self.reports_dir / "collector_failures.json"
         self.warning_summary_report_path = self.reports_dir / "warning_summary.json"
         self.stage2_training_report_path = self.reports_dir / "stage2_training_report.json"
+        self.stage2_healthy_snapshots_dir = self.snapshots_dir / "stage2_healthy"
+        self.stage2_healthy_latest_snapshot_path = self.stage2_healthy_snapshots_dir / "latest_snapshot.json"
         self.pairs_stage1_probe_path = self.datasets_dir / "pairs_stage1_probe.pkl"
         self.pairs_stage4_path = self.datasets_dir / "pairs_stage4.pkl"
         self.pairs_stage5_path = self.datasets_dir / "pairs_stage5.pkl"
@@ -342,6 +349,8 @@ class SafeRLPipeline:
                 "collector_failure_report": str(self.collector_failure_report_path),
                 "warning_summary_report": str(self.warning_summary_report_path),
                 "stage2_training_report": str(self.stage2_training_report_path),
+                "stage2_healthy_snapshots_dir": str(self.stage2_healthy_snapshots_dir),
+                "stage2_healthy_latest_snapshot": str(self.stage2_healthy_latest_snapshot_path),
                 "pairs_stage1_probe": str(self.pairs_stage1_probe_path),
                 "pairs_stage4": str(self.pairs_stage4_path),
                 "pairs_stage5": str(self.pairs_stage5_path),
@@ -1473,7 +1482,26 @@ class SafeRLPipeline:
         )
         stage2_report["stage2_pair_source_health"]["model_quality_aux_stage4"] = dict(stage2_report["model_quality_aux_stage4"])
         self._update_warning_summary_with_stage2_pair_source_health(stage2_report["stage2_pair_source_health"])
+        stage2_report["stage2_healthy_snapshot"] = {
+            "created": False,
+            "reason": "snapshot_not_evaluated",
+            "snapshot_dir": "",
+            "world_model_snapshot": "",
+            "light_model_snapshot": "",
+            "stage2_report_snapshot": "",
+        }
         self._write_json(self.stage2_training_report_path, stage2_report)
+        self._write_risk_v2_eval_summary_from_stage2(stage2_report)
+        stage2_healthy_snapshot = self._maybe_create_stage2_healthy_snapshot(stage2_report)
+        stage2_report["stage2_healthy_snapshot"] = dict(stage2_healthy_snapshot)
+        self._write_json(self.stage2_training_report_path, stage2_report)
+        if bool(stage2_healthy_snapshot.get("created", False)):
+            snapshot_report_path = Path(str(stage2_healthy_snapshot.get("stage2_report_snapshot", "")).strip())
+            if snapshot_report_path:
+                try:
+                    self._copy_file(self.stage2_training_report_path, snapshot_report_path)
+                except Exception:
+                    pass
         self._write_risk_v2_eval_summary_from_stage2(stage2_report)
 
         return {
@@ -1488,6 +1516,170 @@ class SafeRLPipeline:
             "pair_finetune_applied": pair_finetune_applied,
             "training_report": str(self.stage2_training_report_path),
         }
+
+    def _copy_file(self, src: Path, dst: Path):
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(src, dst)
+
+    def _stage2_healthy_snapshot_eligibility(self, stage2_report: Dict[str, Any]) -> Dict[str, Any]:
+        def _to_optional_float(value: Any) -> Optional[float]:
+            if value is None:
+                return None
+            try:
+                return float(value)
+            except Exception:
+                return None
+
+        stage2_health = dict(stage2_report.get("stage2_pair_source_health", {}) or {})
+        model_quality = dict(stage2_health.get("model_quality", {}) or {})
+        metrics = dict(model_quality.get("metrics", {}) or {})
+        status = str(model_quality.get("status", "") or "").strip().lower()
+        world_unique_score_count = _to_optional_float(metrics.get("world_unique_score_count"))
+        world_score_spread = _to_optional_float(metrics.get("world_score_spread"))
+        world_same_state_score_gap = _to_optional_float(metrics.get("world_same_state_score_gap"))
+
+        if status not in {"healthy", "degraded"}:
+            return {
+                "eligible": False,
+                "reason": "model_quality_not_healthy_or_degraded",
+                "status": status or "unknown",
+                "world_unique_score_count": world_unique_score_count,
+                "world_score_spread": world_score_spread,
+                "world_same_state_score_gap": world_same_state_score_gap,
+            }
+        if world_unique_score_count is None or world_unique_score_count < 16.0:
+            return {
+                "eligible": False,
+                "reason": "world_unique_score_count_below_snapshot_threshold",
+                "status": status,
+                "world_unique_score_count": world_unique_score_count,
+                "world_score_spread": world_score_spread,
+                "world_same_state_score_gap": world_same_state_score_gap,
+            }
+        if world_score_spread is None or world_score_spread < 0.01:
+            return {
+                "eligible": False,
+                "reason": "world_score_spread_below_snapshot_threshold",
+                "status": status,
+                "world_unique_score_count": world_unique_score_count,
+                "world_score_spread": world_score_spread,
+                "world_same_state_score_gap": world_same_state_score_gap,
+            }
+        if world_same_state_score_gap is None or world_same_state_score_gap < 0.01:
+            return {
+                "eligible": False,
+                "reason": "world_same_state_score_gap_below_snapshot_threshold",
+                "status": status,
+                "world_unique_score_count": world_unique_score_count,
+                "world_score_spread": world_score_spread,
+                "world_same_state_score_gap": world_same_state_score_gap,
+            }
+
+        return {
+            "eligible": True,
+            "reason": "model_quality_healthy",
+            "status": status,
+            "world_unique_score_count": world_unique_score_count,
+            "world_score_spread": world_score_spread,
+            "world_same_state_score_gap": world_same_state_score_gap,
+        }
+
+    def _stage2_healthy_snapshot_default_payload(self, reason: str) -> Dict[str, Any]:
+        return {
+            "created": False,
+            "reason": str(reason),
+            "snapshot_dir": "",
+            "world_model_snapshot": "",
+            "light_model_snapshot": "",
+            "stage2_report_snapshot": "",
+        }
+
+    def _maybe_create_stage2_healthy_snapshot(self, stage2_report: Dict[str, Any]) -> Dict[str, Any]:
+        if self.run_root is None:
+            return self._stage2_healthy_snapshot_default_payload("missing_run_root")
+        if self.stage2_healthy_snapshots_dir is None or self.stage2_healthy_latest_snapshot_path is None:
+            return self._stage2_healthy_snapshot_default_payload("missing_snapshot_paths")
+        if self.stage2_training_report_path is None or self.models_dir is None:
+            return self._stage2_healthy_snapshot_default_payload("missing_stage2_artifact_paths")
+        eligibility = self._stage2_healthy_snapshot_eligibility(stage2_report)
+        if not bool(eligibility.get("eligible", False)):
+            return self._stage2_healthy_snapshot_default_payload(str(eligibility.get("reason", "not_eligible")))
+
+        timestamp = dt.datetime.now().strftime("%Y%m%d_%H%M%S")
+        snapshot_dir = self.stage2_healthy_snapshots_dir / timestamp
+        suffix = 1
+        while snapshot_dir.exists():
+            snapshot_dir = self.stage2_healthy_snapshots_dir / f"{timestamp}_{suffix:02d}"
+            suffix += 1
+        snapshot_dir.mkdir(parents=True, exist_ok=True)
+
+        stage2_report_snapshot_path = snapshot_dir / "stage2_training_report.json"
+        world_model_snapshot_path = snapshot_dir / "world_model.pt"
+        light_model_snapshot_path = snapshot_dir / "light_risk.pt"
+        risk_v2_snapshot_path = snapshot_dir / "risk_v2_eval_summary.json"
+        policy_meta_snapshot_path = snapshot_dir / "policy_meta.json"
+        manifest_path = snapshot_dir / "snapshot_manifest.json"
+
+        try:
+            required_artifacts = [
+                (self.stage2_training_report_path, stage2_report_snapshot_path, "stage2_training_report_missing"),
+                (self.world_model_path, world_model_snapshot_path, "world_model_missing"),
+                (self.light_model_path, light_model_snapshot_path, "light_model_missing"),
+            ]
+            for src, dst, error_code in required_artifacts:
+                if src is None or not src.exists():
+                    return self._stage2_healthy_snapshot_default_payload(error_code)
+                self._copy_file(src, dst)
+
+            risk_summary_copied = False
+            if self.risk_v2_eval_summary_path is not None and self.risk_v2_eval_summary_path.exists():
+                self._copy_file(self.risk_v2_eval_summary_path, risk_v2_snapshot_path)
+                risk_summary_copied = True
+
+            policy_meta_copied = False
+            if self.policy_meta_path is not None and self.policy_meta_path.exists():
+                self._copy_file(self.policy_meta_path, policy_meta_snapshot_path)
+                policy_meta_copied = True
+
+            snapshot_manifest = {
+                "snapshot_type": "stage2_healthy",
+                "run_id": str(self.run_id or ""),
+                "created_at": dt.datetime.now().isoformat(timespec="seconds"),
+                "config_path": str(self.manifest.get("config_path", "") or ""),
+                "model_quality_status": str(eligibility.get("status", "")),
+                "model_quality_metric_source": str(stage2_report.get("model_quality_metric_source", "")),
+                "world_unique_score_count": eligibility.get("world_unique_score_count"),
+                "world_score_spread": eligibility.get("world_score_spread"),
+                "world_same_state_score_gap": eligibility.get("world_same_state_score_gap"),
+                "snapshot_dir": str(snapshot_dir),
+                "stage2_training_report_path": str(stage2_report_snapshot_path),
+                "world_model_path": str(world_model_snapshot_path),
+                "light_model_path": str(light_model_snapshot_path),
+                "risk_v2_eval_summary_path": str(risk_v2_snapshot_path) if risk_summary_copied else "",
+                "policy_meta_path": str(policy_meta_snapshot_path) if policy_meta_copied else "",
+            }
+            self._write_json(manifest_path, snapshot_manifest)
+            latest_snapshot = {
+                "run_id": str(self.run_id or ""),
+                "updated_at": dt.datetime.now().isoformat(timespec="seconds"),
+                "snapshot_dir": str(snapshot_dir),
+                "snapshot_manifest_path": str(manifest_path),
+            }
+            self._write_json(self.stage2_healthy_latest_snapshot_path, latest_snapshot)
+            artifact_paths = self.manifest.setdefault("artifact_paths", {})
+            artifact_paths["stage2_healthy_latest_snapshot"] = str(self.stage2_healthy_latest_snapshot_path)
+            artifact_paths["stage2_healthy_snapshot_dir"] = str(snapshot_dir)
+
+            return {
+                "created": True,
+                "reason": str(eligibility.get("reason", "model_quality_healthy")),
+                "snapshot_dir": str(snapshot_dir),
+                "world_model_snapshot": str(world_model_snapshot_path),
+                "light_model_snapshot": str(light_model_snapshot_path),
+                "stage2_report_snapshot": str(stage2_report_snapshot_path),
+            }
+        except Exception as exc:
+            return self._stage2_healthy_snapshot_default_payload(f"snapshot_create_failed: {exc}")
 
     def _build_stage2_pair_source_health(
         self,
