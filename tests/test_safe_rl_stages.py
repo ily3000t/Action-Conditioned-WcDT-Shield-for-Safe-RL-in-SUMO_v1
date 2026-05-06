@@ -2634,6 +2634,10 @@ def test_stage2_report_includes_pair_finetune_metadata(monkeypatch):
     assert report["world_pair_ft_source_mix"]["stage1_tail_score_range_quantiles_effective"] == {"low": 0.1, "high": 0.9}
     assert report["world_pair_ft_source_mix"]["stage4_mix_every_n_steps"] == 4
     assert report["stage2_pair_source_health"]["status"] == "healthy"
+    assert report["stage2_pair_source_health"]["stage5_pair_generation_diagnosis"] == "stage5_pairs_ready"
+    assert report["stage2_pair_source_health"]["stage5_trace_dirs_seen"] >= 1
+    assert report["stage2_pair_source_health"]["stage5_pair_files_seen"] >= 1
+    assert "stage5_trace_dir_names" in report["stage2_pair_source_health"]
     risk_v2_summary = json.loads(Path(pipeline.risk_v2_eval_summary_path).read_text(encoding="utf-8"))
     assert risk_v2_summary["pair_finetune_applied"] is True
     assert risk_v2_summary["light_pair_finetune_applied"] is True
@@ -3078,6 +3082,105 @@ def test_stage5_pair_mining_supports_non_shield_trace_prefix_directories():
     assert "balance_scan_custom" in summary["trace_dir_names"]
     assert summary["discovery"]["selected_dirs"] >= 1
 
+
+
+def test_stage5_pair_generation_report_ok_when_trace_assets_exist():
+    config = _tiny_config()
+    config.shield_trace.enabled = True
+    config.shield_trace.trace_dir_name = "shield_trace_pair_bootstrap"
+    pipeline = SafeRLPipeline(config)
+    run_id = f"ut_stage5_pair_report_ok_{uuid.uuid4().hex[:8]}"
+    pipeline._prepare_run_context(stage="stage5", run_id=run_id)
+
+    trace_dir = pipeline.reports_dir / config.shield_trace.trace_dir_name
+    trace_dir.mkdir(parents=True, exist_ok=True)
+    pair_path = trace_dir / "pair_00_seed_1000.json"
+    scalar_path = trace_dir / "pair_scalar_summaries.json"
+    trace_summary_path = trace_dir / "trace_summary.json"
+
+    pipeline._write_json(pair_path, {"pair_index": 0, "seed": 1000, "first_replacement_step": 1})
+    pipeline._write_json(scalar_path, {"pairs": [{"pair_index": 0, "seed": 1000}]})
+    pipeline._write_json(
+        trace_summary_path,
+        {
+            "variant_name": "PAIR_BOOTSTRAP",
+            "pair_files": [str(pair_path)],
+            "pair_scalar_summaries_path": str(scalar_path),
+            "seeds": [1000],
+        },
+    )
+
+    report = pipeline._write_stage5_pair_generation_report(
+        stage_config=config,
+        evaluation={"shield_trace_summary_path": str(trace_summary_path)},
+    )
+    assert report["status"] == "ok"
+    assert report["pair_files_declared_count"] == 1
+    assert report["pair_files_existing_count"] == 1
+    assert report["pair_files_missing_count"] == 0
+    assert report["first_replacement_valid_count"] == 1
+    assert report["no_replacement_count"] == 0
+    assert Path(pipeline.stage5_pair_generation_report_path).exists()
+
+
+def test_stage5_pair_generation_report_failed_when_trace_assets_missing():
+    config = _tiny_config()
+    config.shield_trace.enabled = True
+    config.shield_trace.trace_dir_name = "shield_trace_pair_bootstrap"
+    pipeline = SafeRLPipeline(config)
+    run_id = f"ut_stage5_pair_report_fail_{uuid.uuid4().hex[:8]}"
+    pipeline._prepare_run_context(stage="stage5", run_id=run_id)
+
+    trace_dir = pipeline.reports_dir / config.shield_trace.trace_dir_name
+    trace_dir.mkdir(parents=True, exist_ok=True)
+    missing_pair_path = trace_dir / "pair_00_seed_1000.json"
+    trace_summary_path = trace_dir / "trace_summary.json"
+    pipeline._write_json(
+        trace_summary_path,
+        {
+            "variant_name": "PAIR_BOOTSTRAP",
+            "pair_files": [str(missing_pair_path)],
+            "pair_scalar_summaries_path": str(trace_dir / "pair_scalar_summaries.json"),
+            "seeds": [1000],
+        },
+    )
+
+    report = pipeline._write_stage5_pair_generation_report(
+        stage_config=config,
+        evaluation={"shield_trace_summary_path": str(trace_summary_path)},
+    )
+    assert report["status"] == "failed"
+    reasons = set(report["failure_reasons"])
+    assert "pair_files_missing_all" in reasons
+    assert "pair_files_missing" in reasons
+    assert "missing_pair_scalar_summaries" in reasons
+
+
+def test_stage2_pair_source_health_reports_stage5_generation_diagnosis():
+    config = _tiny_config()
+    pipeline = SafeRLPipeline(config)
+    run_id = f"ut_stage2_pair_health_{uuid.uuid4().hex[:8]}"
+    pipeline._prepare_run_context(stage="stage2", run_id=run_id)
+
+    health = pipeline._build_stage2_pair_source_health(
+        stage5_pairs_created=0,
+        stage1_probe_pairs_created=2,
+        stage4_pairs_created=4,
+        world_pair_finetune_mode="fallback_all_pairs",
+        stage5_requirement_met=False,
+        trace_artifact_available=False,
+        stage5_generation_summary={
+            "trace_dirs_seen": 1,
+            "trace_dir_names": ["shield_trace_pair_bootstrap"],
+            "pair_files_seen": 2,
+            "skipped_missing_pair_files": 0,
+            "skipped_missing_trace_summary": 0,
+        },
+    )
+    assert health["stage5_pair_generation_diagnosis"] == "stage5_pair_files_seen_but_no_pairs_created"
+    assert health["stage5_trace_dirs_seen"] == 1
+    assert health["stage5_pair_files_seen"] == 2
+    assert health["stage5_trace_dir_names"] == ["shield_trace_pair_bootstrap"]
 
 
 def test_stage5_pair_from_payload_uses_history_fallback_and_top_level_same_state_proof():

@@ -164,6 +164,8 @@ def test_stage5_pair_bootstrap_config_loads():
     assert config.shield.risk_threshold == 0.30
     assert config.shield.replacement_min_risk_margin == 0.02
     assert config.shield.raw_passthrough_risk_threshold == 0.24
+    assert config.shield_trace.enabled is True
+    assert config.shield_trace.save_pair_traces is True
     assert config.shield_trace.trace_dir_name == "shield_trace_pair_bootstrap"
     assert config.shield_trace.seed_list[0] == 1000
     assert config.shield_trace.seed_list[-1] == 1049

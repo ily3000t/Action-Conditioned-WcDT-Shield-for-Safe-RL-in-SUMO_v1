@@ -83,6 +83,7 @@ class SafeRLPipeline:
         self.stage3_session_events_path: Optional[Path] = None
         self.stage4_buffer_report_path: Optional[Path] = None
         self.stage5_paired_episode_results_path: Optional[Path] = None
+        self.stage5_pair_generation_report_path: Optional[Path] = None
         self.distill_supervision_path: Optional[Path] = None
         self.distill_training_report_path: Optional[Path] = None
         self.risk_v2_eval_summary_path: Optional[Path] = None
@@ -302,6 +303,7 @@ class SafeRLPipeline:
         self.stage3_session_events_path = self.reports_dir / "stage3_session_events.json"
         self.stage4_buffer_report_path = self.reports_dir / "stage4_buffer_report.json"
         self.stage5_paired_episode_results_path = self.reports_dir / "stage5_paired_episode_results.json"
+        self.stage5_pair_generation_report_path = self.reports_dir / "stage5_pair_generation_report.json"
         self.distill_supervision_path = self.datasets_dir / "distill_supervision.json"
         self.distill_training_report_path = self.reports_dir / "distill_training_report.json"
         self.risk_v2_eval_summary_path = self.reports_dir / "risk_v2_eval_summary.json"
@@ -350,6 +352,7 @@ class SafeRLPipeline:
                 "stage3_session_events_report": str(self.stage3_session_events_path),
                 "stage4_buffer_report": str(self.stage4_buffer_report_path),
                 "stage5_paired_episode_results": str(self.stage5_paired_episode_results_path),
+                "stage5_pair_generation_report": str(self.stage5_pair_generation_report_path),
                 "distill_supervision_dataset": str(self.distill_supervision_path),
                 "distill_training_report": str(self.distill_training_report_path),
                 "risk_v2_eval_summary_report": str(self.risk_v2_eval_summary_path),
@@ -588,6 +591,8 @@ class SafeRLPipeline:
             "skipped_missing_actions": 0,
             "skipped_no_replacement": 0,
             "skipped_no_preference": 0,
+            "skipped_missing_pair_files": 0,
+            "skipped_missing_trace_summary": 0,
             "discovery": {},
         }
         pair_samples: List[RiskPairSample] = []
@@ -602,6 +607,10 @@ class SafeRLPipeline:
             for key, value in discovery.items()
             if key != "trace_dirs"
         }
+        summary["skipped_missing_pair_files"] = int(summary["discovery"].get("skipped_missing_pair_files", 0) or 0)
+        summary["skipped_missing_trace_summary"] = int(
+            summary["discovery"].get("skipped_missing_trace_summary", 0) or 0
+        )
         summary["trace_dirs_seen"] = len(trace_dirs)
         summary["trace_dir_names"] = [path.name for path in trace_dirs]
         for trace_dir in trace_dirs:
@@ -1333,6 +1342,7 @@ class SafeRLPipeline:
         stage5_pairs_created = int(dict(pair_payload.get("generation_summary", {}).get("stage5", {})).get("pairs_created", 0))
         stage1_probe_pairs_created = int(dict(pair_payload.get("generation_summary", {}).get("stage1_probe", {})).get("pairs_created", 0))
         stage4_pairs_created = int(dict(pair_payload.get("generation_summary", {}).get("stage4", {})).get("pairs_created", 0))
+        stage5_generation_summary = dict(pair_payload.get("generation_summary", {}).get("stage5", {}) or {})
         stage2_pair_source_health = self._build_stage2_pair_source_health(
             stage5_pairs_created=stage5_pairs_created,
             stage1_probe_pairs_created=stage1_probe_pairs_created,
@@ -1340,6 +1350,7 @@ class SafeRLPipeline:
             world_pair_finetune_mode=str(getattr(self.config.world_model, "pair_finetune_gate_mode", "strict")),
             stage5_requirement_met=stage5_pairs_created >= int(getattr(self.config.world_model, "min_stage5_pairs_for_world_ft", 0) or 0),
             trace_artifact_available=stage5_pairs_created > 0,
+            stage5_generation_summary=stage5_generation_summary,
         )
         self._print_stage2_pair_source_preflight(stage2_pair_source_health)
         self._update_warning_summary_with_stage2_pair_source_health(stage2_pair_source_health)
@@ -1486,6 +1497,7 @@ class SafeRLPipeline:
         world_pair_finetune_mode: str,
         stage5_requirement_met: bool,
         trace_artifact_available: bool,
+        stage5_generation_summary: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         recommendation_commands: List[str] = []
         if self.run_id:
@@ -1510,6 +1522,25 @@ class SafeRLPipeline:
         else:
             status = "critical"
 
+        stage5_generation = dict(stage5_generation_summary or {})
+        trace_dirs_seen = int(stage5_generation.get("trace_dirs_seen", 0) or 0)
+        trace_dir_names = [str(item) for item in list(stage5_generation.get("trace_dir_names", []) or [])]
+        pair_files_seen = int(stage5_generation.get("pair_files_seen", 0) or 0)
+        skipped_missing_pair_files = int(stage5_generation.get("skipped_missing_pair_files", 0) or 0)
+        skipped_missing_trace_summary = int(stage5_generation.get("skipped_missing_trace_summary", 0) or 0)
+        if stage5_pairs_created > 0:
+            stage5_pair_generation_diagnosis = "stage5_pairs_ready"
+        elif trace_dirs_seen <= 0:
+            stage5_pair_generation_diagnosis = "stage5_trace_dirs_not_found"
+        elif pair_files_seen <= 0:
+            stage5_pair_generation_diagnosis = "stage5_pair_files_not_found"
+        elif skipped_missing_pair_files > 0:
+            stage5_pair_generation_diagnosis = "stage5_trace_dirs_missing_pair_files"
+        elif skipped_missing_trace_summary > 0:
+            stage5_pair_generation_diagnosis = "stage5_trace_dirs_missing_trace_summary"
+        else:
+            stage5_pair_generation_diagnosis = "stage5_pair_files_seen_but_no_pairs_created"
+
         health = {
             "run_id": str(self.run_id or ""),
             "created_at": dt.datetime.now().isoformat(timespec="seconds"),
@@ -1522,6 +1553,12 @@ class SafeRLPipeline:
             "stage5_pairs_required_for_world_ft": int(getattr(self.config.world_model, "min_stage5_pairs_for_world_ft", 0) or 0),
             "stage5_requirement_met": bool(stage5_requirement_met),
             "trace_artifact_available": bool(trace_artifact_available),
+            "stage5_pair_generation_diagnosis": stage5_pair_generation_diagnosis,
+            "stage5_trace_dirs_seen": int(trace_dirs_seen),
+            "stage5_trace_dir_names": trace_dir_names,
+            "stage5_pair_files_seen": int(pair_files_seen),
+            "stage5_skipped_missing_pair_files": int(skipped_missing_pair_files),
+            "stage5_skipped_missing_trace_summary": int(skipped_missing_trace_summary),
             "recommendation_commands": recommendation_commands,
         }
         if status != "healthy":
@@ -1892,6 +1929,14 @@ class SafeRLPipeline:
             f"stage1_probe_pairs={int(health.get('stage1_probe_pairs_created', 0))}, "
             f"stage4_pairs={int(health.get('stage4_pairs_created', 0))}, "
             f"gate_mode={str(health.get('world_pair_finetune_mode', ''))}",
+            flush=True,
+        )
+        print(
+            f"[Pipeline][Stage2][Preflight] stage5_pair_diagnosis={str(health.get('stage5_pair_generation_diagnosis', 'unknown'))}, "
+            f"trace_dirs_seen={int(health.get('stage5_trace_dirs_seen', 0))}, "
+            f"pair_files_seen={int(health.get('stage5_pair_files_seen', 0))}, "
+            f"skipped_missing_pair_files={int(health.get('stage5_skipped_missing_pair_files', 0))}, "
+            f"skipped_missing_trace_summary={int(health.get('stage5_skipped_missing_trace_summary', 0))}",
             flush=True,
         )
         for command in list(health.get("recommendation_commands", []) or []):
@@ -2281,9 +2326,132 @@ class SafeRLPipeline:
         evaluation["shield_contribution_validated"] = bool(evaluation["attribution_passed"])
         evaluation["stage2_model_quality_gate"] = stage2_model_quality_gate
         evaluation["conclusion_text"] = self._build_evaluation_conclusion(evaluation)
+        stage5_pair_generation_report = self._write_stage5_pair_generation_report(
+            stage_config=stage_config,
+            evaluation=evaluation,
+        )
+        evaluation["stage5_pair_bootstrap_status"] = str(stage5_pair_generation_report.get("status", "failed"))
+        evaluation["stage5_pair_bootstrap_failure_reasons"] = list(
+            stage5_pair_generation_report.get("failure_reasons", [])
+        )
+        evaluation["stage5_pair_generation_report_path"] = str(self.stage5_pair_generation_report_path)
         self._save_report(evaluation)
         self._write_risk_v2_eval_summary_from_stage5(evaluation)
+        if bool(self._shield_trace_enabled(stage_config)) and str(
+            stage5_pair_generation_report.get("status", "failed")
+        ) != "ok":
+            failure_reasons = list(stage5_pair_generation_report.get("failure_reasons", []))
+            raise RuntimeError(
+                "Stage5 pair bootstrap validation failed: "
+                + ", ".join(failure_reasons)
+                + f". report={self.stage5_pair_generation_report_path}"
+            )
         return evaluation
+
+    def _write_stage5_pair_generation_report(
+        self,
+        stage_config: SafeRLConfig,
+        evaluation: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        report = self._build_stage5_pair_generation_report(stage_config=stage_config, evaluation=evaluation)
+        if self.stage5_pair_generation_report_path is not None:
+            self._write_json(self.stage5_pair_generation_report_path, report)
+            self.manifest.setdefault("artifact_paths", {})["stage5_pair_generation_report"] = str(
+                self.stage5_pair_generation_report_path
+            )
+        return report
+
+    def _build_stage5_pair_generation_report(
+        self,
+        stage_config: SafeRLConfig,
+        evaluation: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        trace_enabled = bool(self._shield_trace_enabled(stage_config))
+        trace_dir_name = str(getattr(stage_config.shield_trace, "trace_dir_name", "shield_trace"))
+        trace_dir = self.shield_trace_dir or (self.reports_dir / trace_dir_name)
+        trace_summary_path = None
+        if evaluation is not None:
+            configured_path = str(dict(evaluation).get("shield_trace_summary_path", "") or "").strip()
+            if configured_path:
+                candidate = Path(configured_path)
+                if candidate.exists():
+                    trace_summary_path = candidate
+        if trace_summary_path is None and trace_dir.exists():
+            trace_summary_path = self._find_trace_summary_path(trace_dir)
+
+        trace_summary: Dict[str, Any] = {}
+        if trace_summary_path is not None and trace_summary_path.exists():
+            trace_summary = dict(self._read_json(trace_summary_path) or {})
+
+        pair_file_paths: List[Path] = []
+        for pair_path in list(trace_summary.get("pair_files", []) or []):
+            text = str(pair_path or "").strip()
+            if text:
+                pair_file_paths.append(Path(text))
+        pair_files_existing = [path for path in pair_file_paths if path.exists()]
+        pair_files_missing = [path for path in pair_file_paths if not path.exists()]
+
+        scalar_path_text = str(trace_summary.get("pair_scalar_summaries_path", "") or "").strip()
+        if scalar_path_text:
+            pair_scalar_summaries_path = Path(scalar_path_text)
+        else:
+            pair_scalar_summaries_path = trace_dir / "pair_scalar_summaries.json"
+        pair_scalar_summaries_count = 0
+        if pair_scalar_summaries_path.exists():
+            scalar_payload = dict(self._read_json(pair_scalar_summaries_path) or {})
+            pair_scalar_summaries_count = int(len(list(scalar_payload.get("pairs", []) or [])))
+
+        first_replacement_valid_count = 0
+        no_replacement_count = 0
+        for pair_path in pair_files_existing:
+            payload = dict(self._read_json(pair_path) or {})
+            first_replacement_step = int(payload.get("first_replacement_step", -1) or -1)
+            if first_replacement_step >= 0:
+                first_replacement_valid_count += 1
+            else:
+                no_replacement_count += 1
+
+        failure_reasons: List[str] = []
+        if trace_enabled:
+            if trace_summary_path is None or not trace_summary_path.exists():
+                failure_reasons.append("missing_trace_summary")
+            if len(pair_file_paths) <= 0:
+                failure_reasons.append("pair_files_declared_empty")
+            if len(pair_files_existing) <= 0:
+                failure_reasons.append("pair_files_missing_all")
+            if len(pair_files_missing) > 0:
+                failure_reasons.append("pair_files_missing")
+            if not pair_scalar_summaries_path.exists():
+                failure_reasons.append("missing_pair_scalar_summaries")
+            elif len(pair_file_paths) > 0:
+                count_delta = abs(int(pair_scalar_summaries_count) - int(len(pair_file_paths)))
+                allowed_delta = max(1, int(math.ceil(float(len(pair_file_paths)) * 0.05)))
+                if count_delta > allowed_delta:
+                    failure_reasons.append("pair_scalar_summaries_count_mismatch")
+
+        status = "ok" if len(failure_reasons) == 0 else "failed"
+        report = {
+            "run_id": str(self.run_id or ""),
+            "created_at": dt.datetime.now().isoformat(timespec="seconds"),
+            "shield_trace_enabled": bool(trace_enabled),
+            "trace_dir_name": trace_dir_name,
+            "trace_dir_path": str(trace_dir),
+            "trace_summary_path": str(trace_summary_path) if trace_summary_path is not None else "",
+            "pair_scalar_summaries_path": str(pair_scalar_summaries_path),
+            "pair_files_declared_count": int(len(pair_file_paths)),
+            "pair_files_existing_count": int(len(pair_files_existing)),
+            "pair_files_missing_count": int(len(pair_files_missing)),
+            "missing_paths_sample": [str(path) for path in pair_files_missing[:10]],
+            "pair_scalar_summaries_count": int(pair_scalar_summaries_count),
+            "first_replacement_valid_count": int(first_replacement_valid_count),
+            "no_replacement_count": int(no_replacement_count),
+            "seed_count": int(len(self._resolve_stage5_eval_seeds(stage_config))),
+            "eval_episodes": int(stage_config.eval.eval_episodes),
+            "save_pair_traces": bool(getattr(stage_config.shield_trace, "save_pair_traces", True)),
+            "status": status,
+            "failure_reasons": failure_reasons,
+        }
+        return report
 
     def train_models(
         self,
