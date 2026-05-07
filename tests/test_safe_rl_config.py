@@ -39,6 +39,7 @@ def test_default_config_loads():
     assert config.world_model.stage4_aux_target_gap_threshold == 0.068
     assert config.world_model.min_stage5_pairs_for_world_ft == 50
     assert config.world_model.pair_finetune_gate_mode == "fallback_all_pairs"
+    assert config.world_model.pair_ft_early_stop_enabled is True
     assert config.shield.profile == "balanced"
     assert config.shield.legacy_raw_passthrough_risk_threshold == 0.20
     assert config.shield.balanced_raw_passthrough_risk_threshold == 0.193
@@ -718,6 +719,7 @@ def test_stage2_stage1_calibration_softbin_w006_det_config_loads():
     assert config.world_model.pair_ft_strict_deterministic_algorithms is False
     assert config.world_model.pair_ft_save_healthy_candidates is True
     assert config.world_model.pair_ft_max_healthy_candidates_to_keep == 3
+    assert config.world_model.pair_ft_early_stop_enabled is True
     assert config.world_model.pair_ft_stage1_priority_mix_enabled == base_config.world_model.pair_ft_stage1_priority_mix_enabled
     assert config.world_model.pair_ft_stage1_priority_mix_fraction == pytest.approx(
         base_config.world_model.pair_ft_stage1_priority_mix_fraction
@@ -726,6 +728,25 @@ def test_stage2_stage1_calibration_softbin_w006_det_config_loads():
     assert config.world_model.pair_ft_stage1_resolution_min_score_gap == pytest.approx(
         base_config.world_model.pair_ft_stage1_resolution_min_score_gap
     )
+
+
+def test_stage2_stage1_calibration_softbin_w006_det_full6_config_loads():
+    base_config = load_safe_rl_config("safe_rl/config/advanced/stage2_stage1_calibration_softbin_w006_det.yaml")
+    config = load_safe_rl_config("safe_rl/config/advanced/stage2_stage1_calibration_softbin_w006_det_full6.yaml")
+    assert config.world_model.pair_ft_early_stop_enabled is False
+    assert config.world_model.pair_ft_random_seed == base_config.world_model.pair_ft_random_seed
+    assert config.world_model.pair_ft_deterministic == base_config.world_model.pair_ft_deterministic
+    assert (
+        config.world_model.pair_ft_strict_deterministic_algorithms
+        == base_config.world_model.pair_ft_strict_deterministic_algorithms
+    )
+    assert config.world_model.pair_ft_stage1_softbin_loss_weight == pytest.approx(
+        base_config.world_model.pair_ft_stage1_softbin_loss_weight
+    )
+    assert config.world_model.pair_ft_stage1_priority_mix_fraction == pytest.approx(
+        base_config.world_model.pair_ft_stage1_priority_mix_fraction
+    )
+    assert config.world_model.pair_ft_stage1_tail_epochs == base_config.world_model.pair_ft_stage1_tail_epochs
 
 
 def test_stage1_probe_recovery_config_loads():

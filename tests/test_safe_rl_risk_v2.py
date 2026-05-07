@@ -1154,6 +1154,130 @@ def test_world_stage1_priority_mix_disabled_has_zero_counters():
     assert source_mix.get("phase_b_stage1_priority_pairs_seen") == 0
 
 
+def test_world_pair_ft_early_stop_disabled_runs_configured_epochs(monkeypatch):
+    from safe_rl.models.world_model import WorldModelTrainer
+
+    trainer = WorldModelTrainer(
+        config=WorldModelConfig(
+            hidden_dim=64,
+            future_steps=2,
+            multimodal=2,
+            pair_finetune=True,
+            pair_finetune_epochs=3,
+            batch_size=1,
+            pair_ft_early_stop_enabled=False,
+            pair_ft_patience=1,
+            pair_ft_stage1_tail_epochs=0,
+        ),
+        history_steps=2,
+        device="cpu",
+    )
+
+    stage1_pair = RiskPairSample(
+        history_scene=_history_scene()[:2],
+        action_a=4,
+        action_b=3,
+        preferred_action=4,
+        source="stage1_probe_same_state",
+        weight=1.0,
+        meta={
+            "target_risk_a": 0.30,
+            "target_risk_b": 0.80,
+            "target_gap": 0.50,
+            "trusted_for_spread": True,
+        },
+    )
+
+    monkeypatch.setattr(
+        trainer,
+        "_compare_pair_ft_metrics_for_legacy_selection",
+        lambda *args, **kwargs: (0, "legacy_not_improved"),
+    )
+    monkeypatch.setattr(
+        trainer,
+        "_is_epoch_metrics_eligible_for_unique_guard",
+        lambda *_args, **_kwargs: False,
+    )
+
+    _ = trainer.fine_tune_pairs(
+        pair_samples=[stage1_pair],
+        replay_samples=[],
+        stage5_pair_samples=[],
+        stage1_probe_pair_samples=[stage1_pair],
+        stage4_pair_samples=[],
+    )
+    report = dict(trainer.last_pair_ft_report or {})
+    early_stop = dict(report.get("world_pair_ft_early_stop", {}) or {})
+    assert early_stop.get("enabled") is False
+    assert early_stop.get("patience") == 1
+    assert early_stop.get("epochs_configured") == 3
+    assert early_stop.get("epochs_executed") == 3
+    assert early_stop.get("stop_reason") == "disabled"
+    assert len(report.get("epoch_metrics", [])) == 3
+
+
+def test_world_pair_ft_early_stop_enabled_stops_on_patience(monkeypatch):
+    from safe_rl.models.world_model import WorldModelTrainer
+
+    trainer = WorldModelTrainer(
+        config=WorldModelConfig(
+            hidden_dim=64,
+            future_steps=2,
+            multimodal=2,
+            pair_finetune=True,
+            pair_finetune_epochs=3,
+            batch_size=1,
+            pair_ft_early_stop_enabled=True,
+            pair_ft_patience=1,
+            pair_ft_stage1_tail_epochs=0,
+        ),
+        history_steps=2,
+        device="cpu",
+    )
+
+    stage1_pair = RiskPairSample(
+        history_scene=_history_scene()[:2],
+        action_a=4,
+        action_b=3,
+        preferred_action=4,
+        source="stage1_probe_same_state",
+        weight=1.0,
+        meta={
+            "target_risk_a": 0.30,
+            "target_risk_b": 0.80,
+            "target_gap": 0.50,
+            "trusted_for_spread": True,
+        },
+    )
+
+    monkeypatch.setattr(
+        trainer,
+        "_compare_pair_ft_metrics_for_legacy_selection",
+        lambda *args, **kwargs: (0, "legacy_not_improved"),
+    )
+    monkeypatch.setattr(
+        trainer,
+        "_is_epoch_metrics_eligible_for_unique_guard",
+        lambda *_args, **_kwargs: False,
+    )
+
+    _ = trainer.fine_tune_pairs(
+        pair_samples=[stage1_pair],
+        replay_samples=[],
+        stage5_pair_samples=[],
+        stage1_probe_pair_samples=[stage1_pair],
+        stage4_pair_samples=[],
+    )
+    report = dict(trainer.last_pair_ft_report or {})
+    early_stop = dict(report.get("world_pair_ft_early_stop", {}) or {})
+    assert early_stop.get("enabled") is True
+    assert early_stop.get("patience") == 1
+    assert early_stop.get("epochs_configured") == 3
+    assert early_stop.get("epochs_executed") == 1
+    assert early_stop.get("stop_reason") == "patience_exhausted"
+    assert len(report.get("epoch_metrics", [])) == 1
+
+
 def test_world_stage1_priority_mix_enabled_tracks_steps_and_respects_trusted_only():
     from safe_rl.models.world_model import WorldModelTrainer
 

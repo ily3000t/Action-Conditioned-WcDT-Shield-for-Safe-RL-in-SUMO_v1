@@ -96,6 +96,7 @@ class WorldModelConfig:
     pair_ft_eval_max_samples: int = 2048
     stage5_pair_max_seen_per_epoch: int = 32
     pair_ft_patience: int = 2
+    pair_ft_early_stop_enabled: bool = True
     pair_ft_tie_gap_epsilon: float = 0.01
     pair_ft_min_score_spread_floor: float = 0.008
     pair_ft_min_same_state_gap_floor: float = 0.008

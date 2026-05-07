@@ -55,6 +55,7 @@ world_model:
   batch_size: 16
   epochs: 20
   pair_finetune_epochs: 6
+  pair_ft_early_stop_enabled: true
   stage5_pair_max_seen_per_epoch: 32
   pair_ft_tie_gap_epsilon: 0.01
   pair_ft_min_score_spread_floor: 0.008

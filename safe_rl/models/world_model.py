@@ -1137,8 +1137,11 @@ class WorldModelTrainer:
             eligible_best_stage1_probe_metrics = dict(initial_stage1_probe_metrics)
             eligible_best_reason = 'eligible_initial_metrics'
             eligible_best_state = {name: tensor.detach().cpu().clone() for name, tensor in self.model.state_dict().items()}
+        early_stop_enabled = bool(getattr(self.config, 'pair_ft_early_stop_enabled', True))
         patience = max(0, int(getattr(self.config, 'pair_ft_patience', 0) or 0))
         epochs_without_improvement = 0
+        world_pair_ft_epochs_executed = 0
+        world_pair_ft_early_stop_reason = 'disabled' if not early_stop_enabled else 'not_triggered'
         total_stage5_seen_counts = {pair_id: 0 for pair_id in stage5_pair_ids}
         stage5_cap_reached_ids = set()
         phaseb_stage1_anticollapse_steps = 0
@@ -1156,6 +1159,7 @@ class WorldModelTrainer:
         stage1_softbin_effective_bins_total = 0.0
 
         for epoch_idx in range(total_epochs):
+            world_pair_ft_epochs_executed = int(epoch_idx + 1)
             phase_name = 'phase_a_strong_only' if epoch_idx < phase_a_epochs else 'phase_b_source_mixed'
             epoch_total = 0.0
             epoch_pointwise = 0.0
@@ -1926,7 +1930,8 @@ class WorldModelTrainer:
                     epochs_without_improvement = 0
                 else:
                     epochs_without_improvement += 1
-                    if patience > 0 and epochs_without_improvement >= patience:
+                    if early_stop_enabled and patience > 0 and epochs_without_improvement >= patience:
+                        world_pair_ft_early_stop_reason = 'patience_exhausted'
                         break
 
         if eligible_best_state is not None and eligible_best_metrics is not None:
@@ -2517,6 +2522,13 @@ class WorldModelTrainer:
             'world_pair_ft_frozen_modules': frozen_modules,
             'world_pair_ft_trainable_modules': trainable_modules,
             'world_pair_ft_source_mix': dict(source_mix),
+            'world_pair_ft_early_stop': {
+                'enabled': bool(early_stop_enabled),
+                'patience': int(patience),
+                'epochs_configured': int(total_epochs),
+                'epochs_executed': int(world_pair_ft_epochs_executed),
+                'stop_reason': str(world_pair_ft_early_stop_reason),
+            },
             'stage2_healthy_candidate_capture_enabled': bool(save_healthy_candidates),
             'stage2_healthy_candidate_count': int(len(healthy_candidate_records)),
             'stage2_healthy_candidate_exists': bool(stage2_healthy_candidate_exists),

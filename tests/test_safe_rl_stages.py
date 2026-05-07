@@ -2556,6 +2556,13 @@ def test_stage2_report_includes_pair_finetune_metadata(monkeypatch):
                 "stage1_tail_stage1_probe_score_spread_before_after": {"before": 0.013, "after": 0.016},
                 "stage1_tail_stage1_probe_same_state_gap_before_after": {"before": 0.018, "after": 0.021},
                 "stage1_tail_stage1_probe_pair_ranking_accuracy_before_after": {"before": 0.66, "after": 0.68},
+                "world_pair_ft_early_stop": {
+                    "enabled": True,
+                    "patience": 2,
+                    "epochs_configured": 6,
+                    "epochs_executed": 6,
+                    "stop_reason": "not_triggered",
+                },
             },
             "world_pair_ft_source_mix": {
                 "stage5_steps": 3,
@@ -2822,6 +2829,11 @@ def test_stage2_report_includes_pair_finetune_metadata(monkeypatch):
     assert report["pair_finetune_metrics"]["world"]["stage1_tail_stage1_probe_score_spread_before_after"]["after"] == pytest.approx(0.016)
     assert report["pair_finetune_metrics"]["world"]["stage1_tail_stage1_probe_same_state_gap_before_after"]["after"] == pytest.approx(0.021)
     assert report["pair_finetune_metrics"]["world"]["stage1_tail_stage1_probe_pair_ranking_accuracy_before_after"]["after"] == pytest.approx(0.68)
+    assert report["pair_finetune_metrics"]["world"]["world_pair_ft_early_stop"]["enabled"] is True
+    assert report["pair_finetune_metrics"]["world"]["world_pair_ft_early_stop"]["patience"] == 2
+    assert report["pair_finetune_metrics"]["world"]["world_pair_ft_early_stop"]["epochs_configured"] == 6
+    assert report["pair_finetune_metrics"]["world"]["world_pair_ft_early_stop"]["epochs_executed"] == 6
+    assert report["pair_finetune_metrics"]["world"]["world_pair_ft_early_stop"]["stop_reason"] == "not_triggered"
     assert report["world_pair_finetune_mode"] == "fallback_all_pairs"
     assert report["stage5_requirement_met"] is True
     assert report["world_pair_gate_degraded"] is False
