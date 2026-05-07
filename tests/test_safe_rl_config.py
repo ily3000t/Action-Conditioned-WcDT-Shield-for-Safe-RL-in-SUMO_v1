@@ -274,6 +274,11 @@ def test_risk_model_v2_defaults_enabled():
     assert config.world_model.pair_ft_stage1_softbin_temperature == pytest.approx(80.0)
     assert config.world_model.pair_ft_stage1_softbin_apply_on == "stage1_probe"
     assert config.world_model.pair_ft_stage1_softbin_apply_trusted_only is True
+    assert config.world_model.pair_ft_random_seed == 42
+    assert config.world_model.pair_ft_deterministic is True
+    assert config.world_model.pair_ft_strict_deterministic_algorithms is False
+    assert config.world_model.pair_ft_save_healthy_candidates is True
+    assert config.world_model.pair_ft_max_healthy_candidates_to_keep == 3
     assert config.world_model.pair_ft_freeze_traj_decoder is True
     assert config.world_model.pair_ft_freeze_backbone == "partial"
 
@@ -700,6 +705,27 @@ def test_stage2_stage1_calibration_softbin_w006_config_loads():
     assert config.world_model.pair_finetune_gate_mode == default_config.world_model.pair_finetune_gate_mode
     assert config.shield.profile == default_config.shield.profile
     assert config.shield.risk_threshold == default_config.shield.risk_threshold
+
+
+def test_stage2_stage1_calibration_softbin_w006_det_config_loads():
+    base_config = load_safe_rl_config("safe_rl/config/advanced/stage2_stage1_calibration_softbin_w006.yaml")
+    config = load_safe_rl_config("safe_rl/config/advanced/stage2_stage1_calibration_softbin_w006_det.yaml")
+    assert config.world_model.pair_ft_stage1_softbin_loss_weight == pytest.approx(0.006)
+    assert config.world_model.pair_ft_stage1_phaseb_anticollapse_weight == pytest.approx(0.0)
+    assert config.world_model.pair_ft_stage1_tail_epochs == 0
+    assert config.world_model.pair_ft_random_seed == 42
+    assert config.world_model.pair_ft_deterministic is True
+    assert config.world_model.pair_ft_strict_deterministic_algorithms is False
+    assert config.world_model.pair_ft_save_healthy_candidates is True
+    assert config.world_model.pair_ft_max_healthy_candidates_to_keep == 3
+    assert config.world_model.pair_ft_stage1_priority_mix_enabled == base_config.world_model.pair_ft_stage1_priority_mix_enabled
+    assert config.world_model.pair_ft_stage1_priority_mix_fraction == pytest.approx(
+        base_config.world_model.pair_ft_stage1_priority_mix_fraction
+    )
+    assert config.world_model.pair_ft_stage1_resolution_mode == base_config.world_model.pair_ft_stage1_resolution_mode
+    assert config.world_model.pair_ft_stage1_resolution_min_score_gap == pytest.approx(
+        base_config.world_model.pair_ft_stage1_resolution_min_score_gap
+    )
 
 
 def test_stage1_probe_recovery_config_loads():

@@ -85,9 +85,23 @@ class LightRiskPredictor:
 
 
 class LightRiskTrainer:
-    def __init__(self, config: LightRiskConfig, seed: int = 42, device: Optional[str] = None):
+    def __init__(
+        self,
+        config: LightRiskConfig,
+        seed: int = 42,
+        device: Optional[str] = None,
+        deterministic: bool = True,
+        strict_deterministic_algorithms: bool = False,
+    ):
         self.config = config
-        self.rng = random.Random(seed)
+        self.seed = int(seed)
+        self.deterministic = bool(deterministic)
+        self.strict_deterministic_algorithms = bool(strict_deterministic_algorithms)
+        self.rng = random.Random(self.seed)
+        self.py_rng = random.Random(self.seed)
+        self.np_rng = np.random.default_rng(self.seed)
+        self.torch_generator = torch.Generator(device="cpu")
+        self.torch_generator.manual_seed(self.seed)
         if device:
             self.device = torch.device(device)
         else:
@@ -121,6 +135,7 @@ class LightRiskTrainer:
             batch_size=self.config.batch_size,
             shuffle=True,
             drop_last=False,
+            generator=self.torch_generator,
         )
         optimizer = torch.optim.AdamW(
             self.model.parameters(),
@@ -244,6 +259,7 @@ class LightRiskTrainer:
             shuffle=True,
             drop_last=False,
             collate_fn=collate_risk_pairs,
+            generator=self.torch_generator,
         )
         replay_loader = self._build_replay_loader(replay_samples)
         replay_iter = iter(replay_loader) if replay_loader is not None else None
@@ -461,6 +477,7 @@ class LightRiskTrainer:
             batch_size=self.config.batch_size,
             shuffle=True,
             drop_last=False,
+            generator=self.torch_generator,
         )
 
     def _next_replay_batch(self, replay_iter, replay_loader):

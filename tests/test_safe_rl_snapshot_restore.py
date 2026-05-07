@@ -41,6 +41,7 @@ def _build_snapshot_fixture(run_id: str) -> dict:
         json.dumps(
             {
                 "snapshot_type": "stage2_healthy",
+                "snapshot_source": "promoted_candidate",
                 "run_id": run_id,
                 "stage2_training_report_path": str(snapshot_report_path),
                 "world_model_path": str(snapshot_world_path),
@@ -56,6 +57,7 @@ def _build_snapshot_fixture(run_id: str) -> dict:
         json.dumps(
             {
                 "run_id": run_id,
+                "snapshot_source": "promoted_candidate",
                 "snapshot_dir": str(snapshot_dir),
                 "snapshot_manifest_path": str(manifest_path),
             }
@@ -79,6 +81,8 @@ def test_restore_stage2_snapshot_latest_success():
     audit = restore_stage2_snapshot(run_id=run_id, snapshot="latest", strict=True)
     assert audit["status"] == "restored"
     assert audit["resolved_snapshot_dir"] == str(fixture["snapshot_dir"])
+    assert audit["snapshot_source"] == "promoted_candidate"
+    assert audit["source_snapshot_dir"] == str(fixture["snapshot_dir"])
     assert (fixture["models_dir"] / "world_model.pt").read_text(encoding="utf-8") == "snapshot_world"
     assert (fixture["models_dir"] / "light_risk.pt").read_text(encoding="utf-8") == "snapshot_light"
     restored_report = json.loads((fixture["reports_dir"] / "stage2_training_report.json").read_text(encoding="utf-8"))
@@ -114,4 +118,3 @@ def test_restore_stage2_snapshot_strict_run_id_mismatch_fails():
     audit = json.loads((fixture["reports_dir"] / "stage2_active_snapshot_restore.json").read_text(encoding="utf-8"))
     assert audit["status"] == "failed"
     assert any("mismatch" in item for item in audit["errors"])
-

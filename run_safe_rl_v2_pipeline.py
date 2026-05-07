@@ -8,6 +8,8 @@ import sys
 from pathlib import Path
 from typing import Any, Dict, Sequence, Tuple
 
+from safe_rl.tools.restore_stage2_snapshot import SnapshotRestoreError, restore_stage2_snapshot
+
 STAGE4_BASE_STEPS: tuple[tuple[str, str, str], ...] = (
     (
         "Stage 4 - collect intervention buffer (self-recovery candidates)",
@@ -121,6 +123,21 @@ def run_step(repo_root: Path, step_name: str, command: Sequence[str], dry_run: b
 
 def _stage2_report_path(repo_root: Path, run_id: str) -> Path:
     return repo_root / "safe_rl_output" / "runs" / run_id / "reports" / "stage2_training_report.json"
+
+
+def _stage2_latest_snapshot_path(repo_root: Path, run_id: str) -> Path:
+    return repo_root / "safe_rl_output" / "runs" / run_id / "snapshots" / "stage2_healthy" / "latest_snapshot.json"
+
+
+def restore_stage2_latest_snapshot_for_stage5(repo_root: Path, run_id: str) -> Tuple[bool, str]:
+    latest_path = _stage2_latest_snapshot_path(repo_root, run_id)
+    if not latest_path.exists():
+        return False, f"latest_snapshot_not_found: {latest_path}"
+    try:
+        restore_stage2_snapshot(run_id=run_id, snapshot="latest", strict=True)
+        return True, ""
+    except SnapshotRestoreError as exc:
+        return False, f"snapshot_restore_failed: {exc}"
 
 
 def should_run_stage5_from_stage2_report_payload(payload: Dict[str, Any]) -> Tuple[bool, str, str]:
@@ -317,6 +334,12 @@ def main() -> int:
         return 0
 
     stage2_report_path = _stage2_report_path(repo_root, run_id)
+    restored, restore_reason = restore_stage2_latest_snapshot_for_stage5(repo_root, run_id)
+    if not restored:
+        print(f"[SAFE_RL] Stage5 skipped: snapshot restore precondition failed, reason={restore_reason}")
+        print("[SAFE_RL] Closed-loop revalidation completed (conditional Stage5 skipped).")
+        return 0
+
     stage2_report_payload: Dict[str, Any] = {}
     if stage2_report_path.exists():
         try:

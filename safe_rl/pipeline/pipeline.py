@@ -2,6 +2,7 @@
 import hashlib
 import inspect
 import math
+import random
 import datetime as dt
 import json
 import shutil
@@ -10,6 +11,8 @@ from collections import Counter
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence
+
+import numpy as np
 
 from safe_rl.buffer import InterventionBuffer
 from safe_rl.config import SafeRLConfig, load_safe_rl_config
@@ -77,6 +80,7 @@ class SafeRLPipeline:
         self.stage2_training_report_path: Optional[Path] = None
         self.stage2_healthy_snapshots_dir: Optional[Path] = None
         self.stage2_healthy_latest_snapshot_path: Optional[Path] = None
+        self.stage2_candidate_snapshots_dir: Optional[Path] = None
         self.pairs_stage1_probe_path: Optional[Path] = None
         self.pairs_stage4_path: Optional[Path] = None
         self.pairs_stage5_path: Optional[Path] = None
@@ -300,6 +304,7 @@ class SafeRLPipeline:
         self.stage2_training_report_path = self.reports_dir / "stage2_training_report.json"
         self.stage2_healthy_snapshots_dir = self.snapshots_dir / "stage2_healthy"
         self.stage2_healthy_latest_snapshot_path = self.stage2_healthy_snapshots_dir / "latest_snapshot.json"
+        self.stage2_candidate_snapshots_dir = self.snapshots_dir / "stage2_candidates"
         self.pairs_stage1_probe_path = self.datasets_dir / "pairs_stage1_probe.pkl"
         self.pairs_stage4_path = self.datasets_dir / "pairs_stage4.pkl"
         self.pairs_stage5_path = self.datasets_dir / "pairs_stage5.pkl"
@@ -351,6 +356,7 @@ class SafeRLPipeline:
                 "stage2_training_report": str(self.stage2_training_report_path),
                 "stage2_healthy_snapshots_dir": str(self.stage2_healthy_snapshots_dir),
                 "stage2_healthy_latest_snapshot": str(self.stage2_healthy_latest_snapshot_path),
+                "stage2_candidate_snapshots_dir": str(self.stage2_candidate_snapshots_dir),
                 "pairs_stage1_probe": str(self.pairs_stage1_probe_path),
                 "pairs_stage4": str(self.pairs_stage4_path),
                 "pairs_stage5": str(self.pairs_stage5_path),
@@ -1347,6 +1353,7 @@ class SafeRLPipeline:
         print("[Pipeline] stage2: train light risk and world model", flush=True)
         self._require_files("stage2", [self.train_pkl, self.val_pkl, self.test_pkl])
         train_samples, val_samples, test_samples = self._load_dataset_splits()
+        stage2_determinism = self._configure_stage2_determinism()
         pair_payload = self._build_pair_datasets_for_stage2()
         stage5_pairs_created = int(dict(pair_payload.get("generation_summary", {}).get("stage5", {})).get("pairs_created", 0))
         stage1_probe_pairs_created = int(dict(pair_payload.get("generation_summary", {}).get("stage1_probe", {})).get("pairs_created", 0))
@@ -1380,6 +1387,7 @@ class SafeRLPipeline:
             stage1_probe_pair_samples=pair_payload["stage1_probe_pairs"],
             stage4_pair_samples=pair_payload["stage4_pairs"],
         )
+        training_meta["stage2_determinism"] = dict(stage2_determinism)
         pair_finetune_applied = bool(training_meta.get("pair_finetune_applied", False))
         print(f"[Pipeline] stage2: pair_finetune_applied={pair_finetune_applied}", flush=True)
 
@@ -1466,6 +1474,7 @@ class SafeRLPipeline:
             "world_pair_ft_best_epoch": int(world_pair_ft_report.get("world_pair_ft_best_epoch", -1)),
             "world_pair_ft_best_metrics": dict(world_pair_ft_report.get("world_pair_ft_best_metrics", {})),
             "world_pair_ft_restored_best": bool(world_pair_ft_report.get("world_pair_ft_restored_best", False)),
+            "stage2_determinism": dict(training_meta.get("stage2_determinism", {})),
             "stage2_pair_source_health": stage2_pair_source_health,
         }
         stage2_report["stage2_pair_source_health"]["stage5_requirement_met"] = bool(stage2_report["stage5_requirement_met"])
@@ -1477,6 +1486,10 @@ class SafeRLPipeline:
         if bool(stage2_report["stage5_requirement_met"]):
             stage2_report["stage2_pair_source_health"]["status"] = "healthy"
         stage2_report["stage2_pair_source_health"]["model_quality"] = self._build_stage2_model_quality_health(stage2_report)
+        stage2_report["final_model_quality"] = dict(stage2_report["stage2_pair_source_health"]["model_quality"])
+        stage2_report["stage2_healthy_candidate"] = self._build_stage2_healthy_candidate_from_world_pair_ft(
+            dict(stage2_report.get("pair_finetune_metrics", {}).get("world", {}) or {})
+        )
         stage2_report["model_quality_aux_stage4"] = dict(
             stage2_report["stage2_pair_source_health"]["model_quality"].get("model_quality_aux_stage4", {})
         )
@@ -1485,6 +1498,7 @@ class SafeRLPipeline:
         stage2_report["stage2_healthy_snapshot"] = {
             "created": False,
             "reason": "snapshot_not_evaluated",
+            "source": "",
             "snapshot_dir": "",
             "world_model_snapshot": "",
             "light_model_snapshot": "",
@@ -1520,6 +1534,99 @@ class SafeRLPipeline:
     def _copy_file(self, src: Path, dst: Path):
         dst.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(src, dst)
+
+    def _configure_stage2_determinism(self) -> Dict[str, Any]:
+        seed = int(getattr(self.config.world_model, "pair_ft_random_seed", self.config.sim.random_seed) or 0)
+        deterministic = bool(getattr(self.config.world_model, "pair_ft_deterministic", True))
+        strict = bool(getattr(self.config.world_model, "pair_ft_strict_deterministic_algorithms", False))
+
+        random.seed(seed)
+        np.random.seed(seed)
+
+        torch_available = False
+        cudnn_deterministic = False
+        cudnn_benchmark = False
+        strict_applied = False
+        strict_error = ""
+        try:
+            import torch  # pylint: disable=import-outside-toplevel
+
+            torch_available = True
+            torch.manual_seed(seed)
+            if torch.cuda.is_available():
+                torch.cuda.manual_seed_all(seed)
+            if deterministic:
+                try:
+                    torch.backends.cudnn.deterministic = True
+                    torch.backends.cudnn.benchmark = False
+                    cudnn_deterministic = True
+                    cudnn_benchmark = False
+                except Exception:
+                    pass
+            if strict and hasattr(torch, "use_deterministic_algorithms"):
+                try:
+                    torch.use_deterministic_algorithms(True)
+                    strict_applied = True
+                except Exception as exc:
+                    strict_error = str(exc)
+            elif hasattr(torch, "use_deterministic_algorithms"):
+                try:
+                    torch.use_deterministic_algorithms(False)
+                except Exception:
+                    pass
+        except Exception:
+            pass
+
+        payload = {
+            "seed": int(seed),
+            "seed_source": "world_model.pair_ft_random_seed",
+            "deterministic_enabled": bool(deterministic),
+            "strict_deterministic_algorithms": bool(strict),
+            "strict_applied": bool(strict_applied),
+            "strict_error": str(strict_error),
+            "python_random_seed_set": True,
+            "numpy_seed_set": True,
+            "torch_seed_set": bool(torch_available),
+            "cuda_seed_set": bool(torch_available),
+            "cudnn_deterministic": bool(cudnn_deterministic),
+            "cudnn_benchmark": bool(cudnn_benchmark),
+        }
+        return payload
+
+    def _build_stage2_healthy_candidate_from_world_pair_ft(self, world_pair_ft: Dict[str, Any]) -> Dict[str, Any]:
+        candidate = {
+            "exists": False,
+            "count": 0,
+            "best_epoch": -1,
+            "world_model_candidate_path": "",
+            "ranking_acc_floor_mode": "relative_to_pre_pair_ft",
+            "ranking_acc_tolerance": 0.01,
+            "pre_pair_ft_stage1_acc": 0.0,
+            "best_metrics": {},
+            "promotion_eligible": False,
+        }
+        if not world_pair_ft:
+            return candidate
+        candidate["exists"] = bool(world_pair_ft.get("stage2_healthy_candidate_exists", False))
+        candidate["count"] = int(world_pair_ft.get("stage2_healthy_candidate_count", 0) or 0)
+        candidate["best_epoch"] = int(world_pair_ft.get("stage2_healthy_candidate_best_epoch", -1) or -1)
+        candidate["world_model_candidate_path"] = str(
+            world_pair_ft.get("stage2_healthy_candidate_best_world_model_path", "") or ""
+        )
+        candidate["ranking_acc_floor_mode"] = str(
+            world_pair_ft.get("stage2_healthy_candidate_ranking_acc_floor_mode", "relative_to_pre_pair_ft") or "relative_to_pre_pair_ft"
+        )
+        candidate["ranking_acc_tolerance"] = float(
+            world_pair_ft.get("stage2_healthy_candidate_ranking_acc_tolerance", 0.01) or 0.01
+        )
+        candidate["pre_pair_ft_stage1_acc"] = float(
+            world_pair_ft.get("stage2_healthy_candidate_pre_pair_ft_stage1_acc", 0.0) or 0.0
+        )
+        candidate["best_metrics"] = dict(world_pair_ft.get("stage2_healthy_candidate_best_metrics", {}) or {})
+        candidate["promotion_eligible"] = bool(candidate["exists"]) and bool(candidate["count"] > 0) and bool(
+            candidate["world_model_candidate_path"]
+        )
+        return candidate
 
     def _stage2_healthy_snapshot_eligibility(self, stage2_report: Dict[str, Any]) -> Dict[str, Any]:
         def _to_optional_float(value: Any) -> Optional[float]:
@@ -1588,6 +1695,7 @@ class SafeRLPipeline:
         return {
             "created": False,
             "reason": str(reason),
+            "source": "",
             "snapshot_dir": "",
             "world_model_snapshot": "",
             "light_model_snapshot": "",
@@ -1602,8 +1710,36 @@ class SafeRLPipeline:
         if self.stage2_training_report_path is None or self.models_dir is None:
             return self._stage2_healthy_snapshot_default_payload("missing_stage2_artifact_paths")
         eligibility = self._stage2_healthy_snapshot_eligibility(stage2_report)
+        snapshot_source = "final_healthy"
+        snapshot_reason = str(eligibility.get("reason", "model_quality_healthy"))
+        source_world_model_path = self.world_model_path
+        metrics_for_manifest = {
+            "status": str(eligibility.get("status", "")),
+            "world_unique_score_count": eligibility.get("world_unique_score_count"),
+            "world_score_spread": eligibility.get("world_score_spread"),
+            "world_same_state_score_gap": eligibility.get("world_same_state_score_gap"),
+        }
+
         if not bool(eligibility.get("eligible", False)):
-            return self._stage2_healthy_snapshot_default_payload(str(eligibility.get("reason", "not_eligible")))
+            can_promote = bool(getattr(self.config.world_model, "pair_ft_save_healthy_candidates", False))
+            candidate_payload = dict(stage2_report.get("stage2_healthy_candidate", {}) or {})
+            candidate_world_model = Path(str(candidate_payload.get("world_model_candidate_path", "") or "").strip())
+            if not can_promote:
+                return self._stage2_healthy_snapshot_default_payload(str(eligibility.get("reason", "not_eligible")))
+            if not bool(candidate_payload.get("promotion_eligible", False)):
+                return self._stage2_healthy_snapshot_default_payload("no_promotable_healthy_candidate")
+            if not candidate_world_model.exists():
+                return self._stage2_healthy_snapshot_default_payload("candidate_world_model_missing")
+            snapshot_source = "promoted_candidate"
+            snapshot_reason = "final_critical_but_candidate_healthy"
+            source_world_model_path = candidate_world_model
+            candidate_metrics = dict(candidate_payload.get("best_metrics", {}) or {})
+            metrics_for_manifest = {
+                "status": "promoted_candidate",
+                "world_unique_score_count": float(candidate_metrics.get("unique_score_count", 0.0) or 0.0),
+                "world_score_spread": float(candidate_metrics.get("score_spread", 0.0) or 0.0),
+                "world_same_state_score_gap": float(candidate_metrics.get("same_state_score_gap", 0.0) or 0.0),
+            }
 
         timestamp = dt.datetime.now().strftime("%Y%m%d_%H%M%S")
         snapshot_dir = self.stage2_healthy_snapshots_dir / timestamp
@@ -1623,7 +1759,7 @@ class SafeRLPipeline:
         try:
             required_artifacts = [
                 (self.stage2_training_report_path, stage2_report_snapshot_path, "stage2_training_report_missing"),
-                (self.world_model_path, world_model_snapshot_path, "world_model_missing"),
+                (source_world_model_path, world_model_snapshot_path, "world_model_missing"),
                 (self.light_model_path, light_model_snapshot_path, "light_model_missing"),
             ]
             for src, dst, error_code in required_artifacts:
@@ -1645,12 +1781,15 @@ class SafeRLPipeline:
                 "snapshot_type": "stage2_healthy",
                 "run_id": str(self.run_id or ""),
                 "created_at": dt.datetime.now().isoformat(timespec="seconds"),
+                "snapshot_source": str(snapshot_source),
+                "snapshot_reason": str(snapshot_reason),
                 "config_path": str(self.manifest.get("config_path", "") or ""),
-                "model_quality_status": str(eligibility.get("status", "")),
+                "model_quality_status": str(metrics_for_manifest.get("status", "")),
                 "model_quality_metric_source": str(stage2_report.get("model_quality_metric_source", "")),
-                "world_unique_score_count": eligibility.get("world_unique_score_count"),
-                "world_score_spread": eligibility.get("world_score_spread"),
-                "world_same_state_score_gap": eligibility.get("world_same_state_score_gap"),
+                "world_unique_score_count": metrics_for_manifest.get("world_unique_score_count"),
+                "world_score_spread": metrics_for_manifest.get("world_score_spread"),
+                "world_same_state_score_gap": metrics_for_manifest.get("world_same_state_score_gap"),
+                "source_world_model_path": str(source_world_model_path) if source_world_model_path else "",
                 "snapshot_dir": str(snapshot_dir),
                 "stage2_training_report_path": str(stage2_report_snapshot_path),
                 "world_model_path": str(world_model_snapshot_path),
@@ -1664,6 +1803,7 @@ class SafeRLPipeline:
                 "updated_at": dt.datetime.now().isoformat(timespec="seconds"),
                 "snapshot_dir": str(snapshot_dir),
                 "snapshot_manifest_path": str(manifest_path),
+                "snapshot_source": str(snapshot_source),
             }
             self._write_json(self.stage2_healthy_latest_snapshot_path, latest_snapshot)
             artifact_paths = self.manifest.setdefault("artifact_paths", {})
@@ -1672,7 +1812,8 @@ class SafeRLPipeline:
 
             return {
                 "created": True,
-                "reason": str(eligibility.get("reason", "model_quality_healthy")),
+                "reason": str(snapshot_reason),
+                "source": str(snapshot_source),
                 "snapshot_dir": str(snapshot_dir),
                 "world_model_snapshot": str(world_model_snapshot_path),
                 "light_model_snapshot": str(light_model_snapshot_path),
@@ -2672,8 +2813,16 @@ class SafeRLPipeline:
         stage1_probe_pair_samples = list(stage1_probe_pair_samples or [])
         stage4_pair_samples = list(stage4_pair_samples or [])
         all_pair_samples = stage5_pair_samples + stage1_probe_pair_samples + stage4_pair_samples
+        pair_ft_seed = int(getattr(self.config.world_model, "pair_ft_random_seed", self.config.sim.random_seed) or 0)
+        pair_ft_deterministic = bool(getattr(self.config.world_model, "pair_ft_deterministic", True))
+        pair_ft_strict = bool(getattr(self.config.world_model, "pair_ft_strict_deterministic_algorithms", False))
 
-        light_trainer = LightRiskTrainer(self.config.light_risk, seed=self.config.sim.random_seed)
+        light_trainer = LightRiskTrainer(
+            self.config.light_risk,
+            seed=pair_ft_seed,
+            deterministic=pair_ft_deterministic,
+            strict_deterministic_algorithms=pair_ft_strict,
+        )
         light_predictor = light_trainer.fit(train_samples, val_samples, tb_writer=tb_light_base_writer)
         light_pair_metrics = light_trainer.fine_tune_pairs(all_pair_samples, replay_samples=train_samples, tb_writer=tb_light_pair_writer)
         light_trainer.save(str(self.light_model_path))
@@ -2681,7 +2830,9 @@ class SafeRLPipeline:
         world_trainer = WorldModelTrainer(
             config=self.config.world_model,
             history_steps=self.config.sim.history_steps,
-            seed=self.config.sim.random_seed,
+            seed=pair_ft_seed,
+            deterministic=pair_ft_deterministic,
+            strict_deterministic_algorithms=pair_ft_strict,
         )
         world_predictor = world_trainer.fit(train_samples, val_samples, tb_writer=tb_world_base_writer)
         world_pair_finetune_skipped_reason = ""
@@ -2727,6 +2878,8 @@ class SafeRLPipeline:
                 "world_pair_ft_frozen_modules": [],
                 "world_pair_ft_trainable_modules": [],
                 "world_pair_ft_source_mix": {
+                    "rng_seed": int(pair_ft_seed),
+                    "deterministic_sampling": bool(pair_ft_deterministic),
                     "phase_a_epochs": 0,
                     "phase_b_epochs": 0,
                     "stage5_steps": 0,
@@ -2798,6 +2951,7 @@ class SafeRLPipeline:
                 stage5_pair_samples=stage5_pair_samples,
                 stage1_probe_pair_samples=stage1_probe_pair_samples,
                 stage4_pair_samples=stage4_pair_samples,
+                stage2_candidate_dir=self.stage2_candidate_snapshots_dir,
             )
         world_trainer.save(str(self.world_model_path))
 
@@ -2825,6 +2979,11 @@ class SafeRLPipeline:
             "world_pair_stage5_pairs_available": int(len(stage5_pair_samples)),
             "world_pair_total_pairs_available": int(len(all_pair_samples)),
             "world_pair_ft_source_mix": dict(world_pair_report.get("world_pair_ft_source_mix", {})),
+            "stage2_determinism": {
+                "seed": int(pair_ft_seed),
+                "deterministic_enabled": bool(pair_ft_deterministic),
+                "strict_deterministic_algorithms": bool(pair_ft_strict),
+            },
         }
         return light_predictor, world_predictor, training_meta
 

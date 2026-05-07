@@ -86,6 +86,8 @@ def restore_stage2_snapshot(
         "strict": bool(strict),
         "restored_at": dt.datetime.now().isoformat(timespec="seconds"),
         "status": "failed",
+        "snapshot_source": "",
+        "source_snapshot_dir": "",
         "resolved_snapshot_dir": "",
         "resolved_snapshot_manifest_path": "",
         "resolved_latest_pointer_path": "",
@@ -99,6 +101,7 @@ def restore_stage2_snapshot(
 
         snapshot_dir, latest_pointer_path = _resolve_snapshot_dir(run_root=run_root, snapshot=snapshot)
         audit["resolved_snapshot_dir"] = str(snapshot_dir)
+        audit["source_snapshot_dir"] = str(snapshot_dir)
         if str(latest_pointer_path):
             audit["resolved_latest_pointer_path"] = str(latest_pointer_path)
         if not snapshot_dir.exists():
@@ -107,6 +110,14 @@ def restore_stage2_snapshot(
         manifest_path = _resolve_snapshot_manifest_path(snapshot_dir)
         manifest = _read_json(manifest_path)
         audit["resolved_snapshot_manifest_path"] = str(manifest_path)
+        if str(latest_pointer_path):
+            try:
+                latest_payload = _read_json(latest_pointer_path)
+                audit["snapshot_source"] = str(latest_payload.get("snapshot_source", "") or "")
+            except Exception:
+                pass
+        if not audit["snapshot_source"]:
+            audit["snapshot_source"] = str(manifest.get("snapshot_source", "") or "")
 
         manifest_run_id = str(manifest.get("run_id", "") or "").strip()
         if manifest_run_id and manifest_run_id != run_id_text:
@@ -239,4 +250,3 @@ def main(argv: list[str] | None = None) -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-

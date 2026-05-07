@@ -141,6 +141,11 @@ class WorldModelConfig:
     pair_ft_stage1_softbin_temperature: float = 80.0
     pair_ft_stage1_softbin_apply_on: str = "stage1_probe"
     pair_ft_stage1_softbin_apply_trusted_only: bool = True
+    pair_ft_random_seed: int = 42
+    pair_ft_deterministic: bool = True
+    pair_ft_strict_deterministic_algorithms: bool = False
+    pair_ft_save_healthy_candidates: bool = True
+    pair_ft_max_healthy_candidates_to_keep: int = 3
     min_spread_eligible_pairs_for_gate_source: int = 128
     stage4_aux_min_high_gap_pairs: int = 128
     stage4_aux_unique_floor: int = 12

@@ -3236,6 +3236,62 @@ def test_stage2_healthy_snapshot_not_created_when_model_quality_not_healthy():
     assert not pipeline.stage2_healthy_snapshots_dir.exists()
 
 
+def test_stage2_healthy_snapshot_promotes_candidate_when_final_critical():
+    config = _tiny_config()
+    config.world_model.pair_ft_save_healthy_candidates = True
+    pipeline = SafeRLPipeline(config)
+    run_id = f"ut_stage2_snapshot_promote_{uuid.uuid4().hex[:8]}"
+    pipeline._prepare_run_context(stage="stage2", run_id=run_id)
+    pipeline.models_dir.mkdir(parents=True, exist_ok=True)
+    pipeline.reports_dir.mkdir(parents=True, exist_ok=True)
+
+    pipeline.world_model_path.write_text("world_final_critical", encoding="utf-8")
+    pipeline.light_model_path.write_text("light_final", encoding="utf-8")
+    pipeline._write_json(pipeline.stage2_training_report_path, {"stage": "stage2"})
+
+    candidate_dir = pipeline.run_root / "snapshots" / "stage2_candidates" / "fake_session" / "epoch_003"
+    candidate_dir.mkdir(parents=True, exist_ok=True)
+    candidate_world_model = candidate_dir / "world_model.pt"
+    candidate_world_model.write_text("world_candidate_healthy", encoding="utf-8")
+
+    stage2_report = {
+        "model_quality_metric_source": "stage1_probe",
+        "stage2_pair_source_health": {
+            "model_quality": {
+                "status": "critical",
+                "metrics": {
+                    "world_unique_score_count": 10,
+                    "world_score_spread": 0.012,
+                    "world_same_state_score_gap": 0.018,
+                },
+            }
+        },
+        "stage2_healthy_candidate": {
+            "exists": True,
+            "count": 1,
+            "best_epoch": 2,
+            "world_model_candidate_path": str(candidate_world_model),
+            "promotion_eligible": True,
+            "best_metrics": {
+                "unique_score_count": 18.0,
+                "score_spread": 0.012,
+                "same_state_score_gap": 0.017,
+                "pair_ranking_accuracy": 0.70,
+            },
+        },
+    }
+
+    payload = pipeline._maybe_create_stage2_healthy_snapshot(stage2_report)
+    assert payload["created"] is True
+    assert payload["source"] == "promoted_candidate"
+    snapshot_world = Path(payload["world_model_snapshot"])
+    assert snapshot_world.exists()
+    assert snapshot_world.read_text(encoding="utf-8") == "world_candidate_healthy"
+
+    latest_payload = json.loads(pipeline.stage2_healthy_latest_snapshot_path.read_text(encoding="utf-8"))
+    assert latest_payload["snapshot_source"] == "promoted_candidate"
+
+
 def test_stage5_gate_allows_after_restoring_healthy_stage2_snapshot():
     config = _tiny_config()
     pipeline = SafeRLPipeline(config)

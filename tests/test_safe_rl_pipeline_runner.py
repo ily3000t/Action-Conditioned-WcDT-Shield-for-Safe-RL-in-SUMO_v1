@@ -8,6 +8,7 @@ from run_safe_rl_v2_pipeline import main as runner_main
 from run_safe_rl_v2_pipeline import (
     print_stage2_resolution_progress,
     print_stage2_probe_progress,
+    restore_stage2_latest_snapshot_for_stage5,
     summarize_stage2_probe_progress,
     summarize_stage2_resolution_progress,
     should_run_stage5_from_stage2_report_path,
@@ -91,6 +92,63 @@ def test_should_run_stage5_from_report_path_reads_json():
     assert allowed is True
     assert status == "degraded"
     assert reason == ""
+
+
+def test_restore_stage2_latest_snapshot_for_stage5_missing_snapshot():
+    run_id = f"ut_runner_restore_missing_{uuid.uuid4().hex[:8]}"
+    repo_root = Path(".").resolve()
+    ok, reason = restore_stage2_latest_snapshot_for_stage5(repo_root, run_id)
+    assert ok is False
+    assert "latest_snapshot_not_found" in reason
+
+
+def test_restore_stage2_latest_snapshot_for_stage5_success():
+    run_id = f"ut_runner_restore_ok_{uuid.uuid4().hex[:8]}"
+    run_root = Path("safe_rl_output") / "runs" / run_id
+    reports_dir = run_root / "reports"
+    models_dir = run_root / "models"
+    snapshot_dir = run_root / "snapshots" / "stage2_healthy" / "20260507_000001"
+    reports_dir.mkdir(parents=True, exist_ok=True)
+    models_dir.mkdir(parents=True, exist_ok=True)
+    snapshot_dir.mkdir(parents=True, exist_ok=True)
+
+    (snapshot_dir / "stage2_training_report.json").write_text(
+        json.dumps({"stage2_pair_source_health": {"model_quality": {"status": "healthy"}}}),
+        encoding="utf-8",
+    )
+    (snapshot_dir / "world_model.pt").write_text("world_snapshot", encoding="utf-8")
+    (snapshot_dir / "light_risk.pt").write_text("light_snapshot", encoding="utf-8")
+    (snapshot_dir / "snapshot_manifest.json").write_text(
+        json.dumps(
+            {
+                "snapshot_type": "stage2_healthy",
+                "snapshot_source": "promoted_candidate",
+                "run_id": run_id,
+                "stage2_training_report_path": str(snapshot_dir / "stage2_training_report.json"),
+                "world_model_path": str(snapshot_dir / "world_model.pt"),
+                "light_model_path": str(snapshot_dir / "light_risk.pt"),
+            }
+        ),
+        encoding="utf-8",
+    )
+    latest = run_root / "snapshots" / "stage2_healthy" / "latest_snapshot.json"
+    latest.parent.mkdir(parents=True, exist_ok=True)
+    latest.write_text(
+        json.dumps(
+            {
+                "run_id": run_id,
+                "snapshot_source": "promoted_candidate",
+                "snapshot_dir": str(snapshot_dir),
+                "snapshot_manifest_path": str(snapshot_dir / "snapshot_manifest.json"),
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    ok, reason = restore_stage2_latest_snapshot_for_stage5(Path(".").resolve(), run_id)
+    assert ok is True
+    assert reason == ""
+    assert (models_dir / "world_model.pt").read_text(encoding="utf-8") == "world_snapshot"
 
 
 def test_summarize_stage2_resolution_progress_reports_ordered_checks(capsys):

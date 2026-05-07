@@ -1,6 +1,10 @@
 import math
 import random
+import json
+import shutil
+import datetime as dt
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
@@ -374,13 +378,22 @@ class WorldModelTrainer:
         history_steps: int,
         seed: int = 42,
         device: Optional[str] = None,
+        deterministic: bool = True,
+        strict_deterministic_algorithms: bool = False,
     ):
         self.config = config
+        self.seed = int(seed)
+        self.deterministic = bool(deterministic)
+        self.strict_deterministic_algorithms = bool(strict_deterministic_algorithms)
         if device:
             self.device = torch.device(device)
         else:
             self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-        self.rng = random.Random(seed)
+        self.rng = random.Random(self.seed)
+        self.py_rng = random.Random(self.seed)
+        self.np_rng = np.random.default_rng(self.seed)
+        self.torch_generator = torch.Generator(device="cpu")
+        self.torch_generator.manual_seed(self.seed)
         self.model = ActionConditionedWorldModel(config=config, history_steps=history_steps).to(self.device)
         self.tensorizer = SceneTensorizer(history_steps=history_steps, future_steps=config.future_steps)
         self.huber = nn.HuberLoss(reduction='none')
@@ -508,6 +521,7 @@ class WorldModelTrainer:
         stage5_pair_samples: Optional[Sequence[RiskPairSample]] = None,
         stage1_probe_pair_samples: Optional[Sequence[RiskPairSample]] = None,
         stage4_pair_samples: Optional[Sequence[RiskPairSample]] = None,
+        stage2_candidate_dir: Optional[Path] = None,
     ) -> Dict[str, float]:
         replay_samples = list(replay_samples or [])
         pair_samples = list(pair_samples or [])
@@ -589,6 +603,21 @@ class WorldModelTrainer:
             stage1_softbin_loss_weight_effective > 0.0
             and stage1_softbin_apply_on_effective == 'stage1_probe'
         )
+        save_healthy_candidates = bool(
+            getattr(self.config, 'pair_ft_save_healthy_candidates', False)
+        )
+        max_healthy_candidates_to_keep = max(
+            1,
+            int(getattr(self.config, 'pair_ft_max_healthy_candidates_to_keep', 3) or 3),
+        )
+        candidate_ranking_acc_floor_mode = 'relative_to_pre_pair_ft'
+        candidate_ranking_acc_tolerance = 0.01
+        candidate_root_dir = Path(stage2_candidate_dir) if stage2_candidate_dir is not None else None
+        candidate_session_dir: Optional[Path] = None
+        if save_healthy_candidates and candidate_root_dir is not None:
+            candidate_root_dir.mkdir(parents=True, exist_ok=True)
+            candidate_session_dir = candidate_root_dir / dt.datetime.now().strftime("%Y%m%d_%H%M%S")
+            candidate_session_dir.mkdir(parents=True, exist_ok=True)
         use_stage1_pair_ft_calibrated_scores = bool(stage1_calibration_enabled)
         stage1_tail_apply_trusted_only = bool(
             getattr(self.config, 'pair_ft_stage1_tail_apply_trusted_only', True)
@@ -721,6 +750,8 @@ class WorldModelTrainer:
             ),
         )
         source_mix = {
+            'rng_seed': int(self.seed),
+            'deterministic_sampling': bool(self.deterministic),
             'phase_a_epochs': 0,
             'phase_b_epochs': 0,
             'stage5_steps': 0,
@@ -1093,6 +1124,9 @@ class WorldModelTrainer:
         legacy_best_epoch = -1
         legacy_best_reason = 'legacy_initial_metrics'
         legacy_best_state = {name: tensor.detach().cpu().clone() for name, tensor in self.model.state_dict().items()}
+        pre_pair_ft_stage1_acc = float(initial_stage1_probe_metrics.get('pair_ranking_accuracy', 0.0))
+        healthy_candidate_records: List[Dict[str, Any]] = []
+        best_healthy_candidate: Optional[Dict[str, Any]] = None
         eligible_best_metrics: Optional[Dict[str, float]] = None
         eligible_best_stage1_probe_metrics: Optional[Dict[str, float]] = None
         eligible_best_epoch = -1
@@ -1707,10 +1741,41 @@ class WorldModelTrainer:
                             eval_stage1_probe_metrics.get('score_spread', 0.0)
                         ),
                         'stage1_probe_eval_unique_score_count': float(
-                            eval_stage1_probe_metrics.get('unique_score_count', 0.0)
-                        ),
+                                eval_stage1_probe_metrics.get('unique_score_count', 0.0)
+                            ),
                     }
                 )
+                candidate_passed, candidate_reject_reason = self._is_stage2_healthy_candidate_metrics(
+                    stage1_probe_metrics=eval_stage1_probe_metrics,
+                    pre_pair_ft_stage1_acc=pre_pair_ft_stage1_acc,
+                    ranking_acc_tolerance=float(candidate_ranking_acc_tolerance),
+                )
+                epoch_summary['stage2_healthy_candidate_passed'] = bool(candidate_passed)
+                epoch_summary['stage2_healthy_candidate_reject_reason'] = str(candidate_reject_reason)
+                epoch_summary['stage2_healthy_candidate_saved'] = False
+                epoch_summary['stage2_healthy_candidate_path'] = ""
+                if candidate_passed and save_healthy_candidates and candidate_session_dir is not None:
+                    candidate_record = self._save_stage2_healthy_candidate_checkpoint(
+                        candidate_session_dir=candidate_session_dir,
+                        epoch_idx=int(epoch_idx),
+                        stage1_probe_metrics=eval_stage1_probe_metrics,
+                        max_keep=int(max_healthy_candidates_to_keep),
+                        existing_records=healthy_candidate_records,
+                    )
+                    if candidate_record is not None:
+                        epoch_summary['stage2_healthy_candidate_saved'] = True
+                        epoch_summary['stage2_healthy_candidate_path'] = str(
+                            candidate_record.get('world_model_path', "")
+                        )
+                        if best_healthy_candidate is None:
+                            best_healthy_candidate = dict(candidate_record)
+                        else:
+                            cmp_value = self._compare_stage2_healthy_candidate_records(
+                                current_record=candidate_record,
+                                best_record=best_healthy_candidate,
+                            )
+                            if cmp_value > 0:
+                                best_healthy_candidate = dict(candidate_record)
                 epoch_metrics.append(epoch_summary)
                 print(
                     f"[WorldModel PairFT] epoch {epoch_idx + 1}/{total_epochs} ({phase_name}), "
@@ -2293,6 +2358,14 @@ class WorldModelTrainer:
         else:
             stage1_calibration_scale = 1.0
             stage1_calibration_bias = 0.0
+        stage2_healthy_candidate_exists = bool(best_healthy_candidate is not None)
+        stage2_healthy_candidate_best_epoch = int(best_healthy_candidate.get('epoch', -1)) if best_healthy_candidate else -1
+        stage2_healthy_candidate_best_world_model_path = str(
+            best_healthy_candidate.get('world_model_path', '') if best_healthy_candidate else ''
+        )
+        if stage2_healthy_candidate_exists and stage2_healthy_candidate_best_world_model_path:
+            stage2_healthy_candidate_exists = Path(stage2_healthy_candidate_best_world_model_path).exists()
+        stage2_healthy_candidate_best_metrics = dict(best_healthy_candidate.get('metrics', {})) if best_healthy_candidate else {}
         self.last_pair_metrics = after_pair_metrics
         self.last_pair_ft_report = {
             'enabled': True,
@@ -2444,6 +2517,15 @@ class WorldModelTrainer:
             'world_pair_ft_frozen_modules': frozen_modules,
             'world_pair_ft_trainable_modules': trainable_modules,
             'world_pair_ft_source_mix': dict(source_mix),
+            'stage2_healthy_candidate_capture_enabled': bool(save_healthy_candidates),
+            'stage2_healthy_candidate_count': int(len(healthy_candidate_records)),
+            'stage2_healthy_candidate_exists': bool(stage2_healthy_candidate_exists),
+            'stage2_healthy_candidate_best_epoch': int(stage2_healthy_candidate_best_epoch),
+            'stage2_healthy_candidate_best_world_model_path': str(stage2_healthy_candidate_best_world_model_path),
+            'stage2_healthy_candidate_best_metrics': dict(stage2_healthy_candidate_best_metrics),
+            'stage2_healthy_candidate_ranking_acc_floor_mode': str(candidate_ranking_acc_floor_mode),
+            'stage2_healthy_candidate_ranking_acc_tolerance': float(candidate_ranking_acc_tolerance),
+            'stage2_healthy_candidate_pre_pair_ft_stage1_acc': float(pre_pair_ft_stage1_acc),
             'stage5_pair_ranking_accuracy_before_after': self._metric_before_after(before_stage5_metrics, after_stage5_metrics, 'pair_ranking_accuracy'),
             'stage1_probe_pair_ranking_accuracy_before_after': self._metric_before_after(before_stage1_probe_metrics, after_stage1_probe_metrics, 'pair_ranking_accuracy'),
             'stage4_pair_ranking_accuracy_before_after': self._metric_before_after(before_stage4_metrics, after_stage4_metrics, 'pair_ranking_accuracy'),
@@ -2560,6 +2642,107 @@ class WorldModelTrainer:
             'before': float((before_metrics or {}).get(key, 0.0)),
             'after': float((after_metrics or {}).get(key, 0.0)),
         }
+
+    def _is_stage2_healthy_candidate_metrics(
+        self,
+        stage1_probe_metrics: Dict[str, float],
+        pre_pair_ft_stage1_acc: float,
+        ranking_acc_tolerance: float,
+    ) -> Tuple[bool, str]:
+        unique_score_count = float((stage1_probe_metrics or {}).get('unique_score_count', 0.0) or 0.0)
+        score_spread = float((stage1_probe_metrics or {}).get('score_spread', 0.0) or 0.0)
+        same_state_gap = float((stage1_probe_metrics or {}).get('same_state_score_gap', 0.0) or 0.0)
+        ranking_acc = float((stage1_probe_metrics or {}).get('pair_ranking_accuracy', 0.0) or 0.0)
+        ranking_floor = float(pre_pair_ft_stage1_acc) - float(ranking_acc_tolerance)
+        if unique_score_count < 16.0:
+            return False, 'candidate_unique_below_floor'
+        if score_spread < 0.01:
+            return False, 'candidate_spread_below_floor'
+        if same_state_gap < 0.01:
+            return False, 'candidate_gap_below_floor'
+        if ranking_acc < ranking_floor:
+            return False, 'candidate_ranking_below_floor'
+        return True, 'candidate_passed'
+
+    def _compare_stage2_healthy_candidate_records(
+        self,
+        current_record: Dict[str, Any],
+        best_record: Dict[str, Any],
+    ) -> int:
+        current_metrics = dict(current_record.get('metrics', {}) or {})
+        best_metrics = dict(best_record.get('metrics', {}) or {})
+        keys = [
+            'unique_score_count',
+            'score_spread',
+            'same_state_score_gap',
+            'pair_ranking_accuracy',
+        ]
+        for key in keys:
+            current_value = float(current_metrics.get(key, 0.0) or 0.0)
+            best_value = float(best_metrics.get(key, 0.0) or 0.0)
+            if current_value > best_value + 1e-9:
+                return 1
+            if current_value < best_value - 1e-9:
+                return -1
+        current_epoch = int(current_record.get('epoch', -1) or -1)
+        best_epoch = int(best_record.get('epoch', -1) or -1)
+        if current_epoch > best_epoch:
+            return 1
+        if current_epoch < best_epoch:
+            return -1
+        return 0
+
+    def _save_stage2_healthy_candidate_checkpoint(
+        self,
+        candidate_session_dir: Path,
+        epoch_idx: int,
+        stage1_probe_metrics: Dict[str, float],
+        max_keep: int,
+        existing_records: List[Dict[str, Any]],
+    ) -> Optional[Dict[str, Any]]:
+        candidate_dir = candidate_session_dir / f"epoch_{int(epoch_idx) + 1:03d}"
+        candidate_dir.mkdir(parents=True, exist_ok=True)
+        world_model_path = candidate_dir / "world_model.pt"
+        metrics_path = candidate_dir / "candidate_metrics.json"
+        manifest_path = candidate_dir / "candidate_manifest.json"
+        try:
+            torch.save(self.model.state_dict(), world_model_path)
+            metrics_payload = {
+                'epoch': int(epoch_idx),
+                'metrics': {
+                    'pair_ranking_accuracy': float((stage1_probe_metrics or {}).get('pair_ranking_accuracy', 0.0) or 0.0),
+                    'same_state_score_gap': float((stage1_probe_metrics or {}).get('same_state_score_gap', 0.0) or 0.0),
+                    'score_spread': float((stage1_probe_metrics or {}).get('score_spread', 0.0) or 0.0),
+                    'unique_score_count': float((stage1_probe_metrics or {}).get('unique_score_count', 0.0) or 0.0),
+                },
+            }
+            with metrics_path.open('w', encoding='utf-8') as f:
+                json.dump(metrics_payload, f, ensure_ascii=False, indent=2)
+            manifest_payload = {
+                'epoch': int(epoch_idx),
+                'created_at': dt.datetime.now().isoformat(timespec='seconds'),
+                'candidate_dir': str(candidate_dir),
+                'world_model_path': str(world_model_path),
+                'candidate_metrics_path': str(metrics_path),
+            }
+            with manifest_path.open('w', encoding='utf-8') as f:
+                json.dump(manifest_payload, f, ensure_ascii=False, indent=2)
+            record = {
+                'epoch': int(epoch_idx),
+                'candidate_dir': str(candidate_dir),
+                'world_model_path': str(world_model_path),
+                'metrics': dict(metrics_payload.get('metrics', {})),
+            }
+            existing_records.append(record)
+            existing_records.sort(key=lambda item: int(item.get('epoch', -1)))
+            while len(existing_records) > max(1, int(max_keep)):
+                drop = existing_records.pop(0)
+                drop_dir = Path(str(drop.get('candidate_dir', '') or '').strip())
+                if drop_dir.exists():
+                    shutil.rmtree(drop_dir, ignore_errors=True)
+            return record
+        except Exception:
+            return None
 
     def _filter_high_gap_pairs(self, pair_samples: Sequence[RiskPairSample]) -> List[RiskPairSample]:
         selected: List[RiskPairSample] = []
@@ -3391,6 +3574,7 @@ class WorldModelTrainer:
             shuffle=True,
             drop_last=False,
             collate_fn=collate_risk_pairs,
+            generator=self.torch_generator,
         )
 
     def _next_pair_batch(self, pair_iter, pair_loader):
@@ -3576,6 +3760,7 @@ class WorldModelTrainer:
             shuffle=True,
             drop_last=False,
             collate_fn=list,
+            generator=self.torch_generator,
         )
 
     def _next_replay_batch(self, replay_iter, replay_loader):
