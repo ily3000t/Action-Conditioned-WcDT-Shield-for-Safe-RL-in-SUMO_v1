@@ -150,6 +150,7 @@ def run_stage2_seed_sweep(
         "max_runs": int(max_runs),
         "attempt_count": int(len(attempts)),
         "attempts": attempts,
+        "results": attempts,
         "latest_snapshot_path": str(latest_snapshot_path),
         "successful_seed": successful_seed,
         "status": "success" if successful_seed is not None else "failed",

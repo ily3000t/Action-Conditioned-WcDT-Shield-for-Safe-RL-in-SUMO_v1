@@ -275,6 +275,18 @@ def test_risk_model_v2_defaults_enabled():
     assert config.world_model.pair_ft_stage1_softbin_temperature == pytest.approx(80.0)
     assert config.world_model.pair_ft_stage1_softbin_apply_on == "stage1_probe"
     assert config.world_model.pair_ft_stage1_softbin_apply_trusted_only is True
+    assert config.world_model.pair_ft_gate_head_enabled is False
+    assert config.world_model.pair_ft_gate_head_scope == "stage1_probe"
+    assert config.world_model.pair_ft_gate_head_type == "monotonic_affine"
+    assert config.world_model.pair_ft_gate_head_scale_init == pytest.approx(1.0)
+    assert config.world_model.pair_ft_gate_head_bias_init == pytest.approx(0.0)
+    assert config.world_model.pair_ft_gate_head_train_scope == "pair_ft_only"
+    assert config.world_model.pair_ft_gate_eval_uses_gate_score is True
+    assert config.world_model.pair_ft_gate_softbin_loss_weight == pytest.approx(0.006)
+    assert config.world_model.pair_ft_gate_softbin_num_bins == 16
+    assert config.world_model.pair_ft_gate_softbin_temperature == pytest.approx(80.0)
+    assert config.world_model.pair_ft_gate_softbin_apply_trusted_only is True
+    assert config.world_model.pair_ft_gate_resolution_loss_weight == pytest.approx(0.02)
     assert config.world_model.pair_ft_random_seed == 42
     assert config.world_model.pair_ft_deterministic is True
     assert config.world_model.pair_ft_strict_deterministic_algorithms is False
@@ -747,6 +759,45 @@ def test_stage2_stage1_calibration_softbin_w006_det_full6_config_loads():
         base_config.world_model.pair_ft_stage1_priority_mix_fraction
     )
     assert config.world_model.pair_ft_stage1_tail_epochs == base_config.world_model.pair_ft_stage1_tail_epochs
+
+
+def test_stage2_stage1_gate_head_calibration_config_loads():
+    base_config = load_safe_rl_config("safe_rl/config/advanced/stage2_stage1_calibration_softbin_w006_det_full6.yaml")
+    config = load_safe_rl_config("safe_rl/config/advanced/stage2_stage1_gate_head_calibration.yaml")
+    assert config.world_model.pair_ft_stage1_priority_mix_enabled is True
+    assert config.world_model.pair_ft_stage1_priority_mix_fraction == pytest.approx(0.35)
+    assert config.world_model.pair_ft_stage1_priority_trusted_only is True
+    assert config.world_model.pair_ft_stage1_tail_epochs == 0
+    assert config.world_model.pair_ft_stage1_resolution_loss_weight == pytest.approx(0.02)
+    assert config.world_model.pair_ft_stage1_resolution_mode == "adaptive"
+    assert config.world_model.pair_ft_stage1_resolution_min_score_gap == pytest.approx(0.018)
+    assert config.world_model.pair_ft_stage1_resolution_alpha == pytest.approx(0.2)
+    assert config.world_model.pair_ft_stage1_resolution_max_score_gap == pytest.approx(0.05)
+    assert config.world_model.pair_ft_selection_accuracy_tie_epsilon == pytest.approx(0.01)
+    assert config.world_model.pair_ft_stage1_phaseb_anticollapse_weight == pytest.approx(0.0)
+    assert config.world_model.pair_ft_stage1_calibration_enabled is False
+    assert config.world_model.pair_ft_stage1_softbin_loss_weight == pytest.approx(0.0)
+    assert config.world_model.pair_ft_gate_head_enabled is True
+    assert config.world_model.pair_ft_gate_head_scope == "stage1_probe"
+    assert config.world_model.pair_ft_gate_head_type == "monotonic_affine"
+    assert config.world_model.pair_ft_gate_head_scale_init == pytest.approx(1.0)
+    assert config.world_model.pair_ft_gate_head_bias_init == pytest.approx(0.0)
+    assert config.world_model.pair_ft_gate_head_train_scope == "pair_ft_only"
+    assert config.world_model.pair_ft_gate_eval_uses_gate_score is True
+    assert config.world_model.pair_ft_gate_softbin_loss_weight == pytest.approx(0.006)
+    assert config.world_model.pair_ft_gate_softbin_num_bins == 16
+    assert config.world_model.pair_ft_gate_softbin_temperature == pytest.approx(80.0)
+    assert config.world_model.pair_ft_gate_softbin_apply_trusted_only is True
+    assert config.world_model.pair_ft_gate_resolution_loss_weight == pytest.approx(0.02)
+    assert config.world_model.pair_ft_random_seed == base_config.world_model.pair_ft_random_seed
+    assert config.world_model.pair_ft_deterministic == base_config.world_model.pair_ft_deterministic
+    assert (
+        config.world_model.pair_ft_strict_deterministic_algorithms
+        == base_config.world_model.pair_ft_strict_deterministic_algorithms
+    )
+    assert config.world_model.pair_ft_save_healthy_candidates == base_config.world_model.pair_ft_save_healthy_candidates
+    assert config.world_model.pair_ft_max_healthy_candidates_to_keep == base_config.world_model.pair_ft_max_healthy_candidates_to_keep
+    assert config.world_model.pair_ft_early_stop_enabled is False
 
 
 def test_stage1_probe_recovery_config_loads():

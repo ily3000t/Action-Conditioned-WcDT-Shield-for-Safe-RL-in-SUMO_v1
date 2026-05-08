@@ -2470,6 +2470,27 @@ def test_stage2_report_includes_pair_finetune_metadata(monkeypatch):
                 "stage1_calibration_enabled": True,
                 "stage1_calibration_scale": 1.01,
                 "stage1_calibration_bias": 0.002,
+                "stage15_gate_head": {
+                    "enabled": True,
+                    "scope": "stage1_probe",
+                    "type": "monotonic_affine",
+                    "train_scope": "pair_ft_only",
+                    "eval_uses_gate_score": True,
+                    "scale": 1.02,
+                    "bias": 0.001,
+                },
+                "stage1_probe_metrics_raw": {
+                    "pair_ranking_accuracy": 0.67,
+                    "same_state_score_gap": 0.015,
+                    "score_spread": 0.013,
+                    "unique_score_count": 14.0,
+                },
+                "stage1_probe_metrics_gate": {
+                    "pair_ranking_accuracy": 0.68,
+                    "same_state_score_gap": 0.021,
+                    "score_spread": 0.016,
+                    "unique_score_count": 16.0,
+                },
                 "stage1_softbin_loss": -2.3401,
                 "stage1_softbin_entropy": 2.3401,
                 "stage1_softbin_effective_bins": 10.3825,
@@ -2501,12 +2522,20 @@ def test_stage2_report_includes_pair_finetune_metadata(monkeypatch):
                 "world_pair_ft_trainable_modules": ["fusion", "risk_score_head"],
                 "stage5_pair_ranking_accuracy_before_after": {"before": 0.55, "after": 0.75},
                 "stage4_pair_ranking_accuracy_before_after": {"before": 0.45, "after": 0.65},
+                "stage1_probe_pair_ranking_accuracy_before_after_raw": {"before": 0.62, "after": 0.67},
+                "stage1_probe_pair_ranking_accuracy_before_after_gate": {"before": 0.63, "after": 0.68},
                 "stage5_same_state_score_gap_before_after": {"before": 0.02, "after": 0.05},
                 "stage4_same_state_score_gap_before_after": {"before": 0.01, "after": 0.03},
+                "stage1_probe_same_state_score_gap_before_after_raw": {"before": 0.012, "after": 0.015},
+                "stage1_probe_same_state_score_gap_before_after_gate": {"before": 0.013, "after": 0.021},
                 "stage5_score_spread_before_after": {"before": 0.02, "after": 0.06},
                 "stage4_score_spread_before_after": {"before": 0.01, "after": 0.04},
+                "stage1_probe_score_spread_before_after_raw": {"before": 0.011, "after": 0.013},
+                "stage1_probe_score_spread_before_after_gate": {"before": 0.012, "after": 0.016},
                 "stage5_unique_score_count_before_after": {"before": 8.0, "after": 22.0},
                 "stage1_probe_unique_score_count_before_after": {"before": 8.0, "after": 17.0},
+                "stage1_probe_unique_score_count_before_after_raw": {"before": 8.0, "after": 14.0},
+                "stage1_probe_unique_score_count_before_after_gate": {"before": 8.0, "after": 16.0},
                 "stage5_spread_eligible_pair_count": 2,
                 "stage4_spread_eligible_pair_count": 0,
                 "world_pair_ft_best_epoch": 1,
@@ -2829,6 +2858,23 @@ def test_stage2_report_includes_pair_finetune_metadata(monkeypatch):
     assert report["pair_finetune_metrics"]["world"]["stage1_tail_stage1_probe_score_spread_before_after"]["after"] == pytest.approx(0.016)
     assert report["pair_finetune_metrics"]["world"]["stage1_tail_stage1_probe_same_state_gap_before_after"]["after"] == pytest.approx(0.021)
     assert report["pair_finetune_metrics"]["world"]["stage1_tail_stage1_probe_pair_ranking_accuracy_before_after"]["after"] == pytest.approx(0.68)
+    assert report["pair_finetune_metrics"]["world"]["stage15_gate_head"]["enabled"] is True
+    assert report["pair_finetune_metrics"]["world"]["stage15_gate_head"]["scope"] == "stage1_probe"
+    assert report["pair_finetune_metrics"]["world"]["stage15_gate_head"]["type"] == "monotonic_affine"
+    assert report["pair_finetune_metrics"]["world"]["stage15_gate_head"]["train_scope"] == "pair_ft_only"
+    assert report["pair_finetune_metrics"]["world"]["stage15_gate_head"]["eval_uses_gate_score"] is True
+    assert report["pair_finetune_metrics"]["world"]["stage15_gate_head"]["scale"] == pytest.approx(1.02)
+    assert report["pair_finetune_metrics"]["world"]["stage15_gate_head"]["bias"] == pytest.approx(0.001)
+    assert report["pair_finetune_metrics"]["world"]["stage1_probe_metrics_raw"]["unique_score_count"] == pytest.approx(14.0)
+    assert report["pair_finetune_metrics"]["world"]["stage1_probe_metrics_gate"]["unique_score_count"] == pytest.approx(16.0)
+    assert report["pair_finetune_metrics"]["world"]["stage1_probe_pair_ranking_accuracy_before_after_raw"]["after"] == pytest.approx(0.67)
+    assert report["pair_finetune_metrics"]["world"]["stage1_probe_pair_ranking_accuracy_before_after_gate"]["after"] == pytest.approx(0.68)
+    assert report["pair_finetune_metrics"]["world"]["stage1_probe_same_state_score_gap_before_after_raw"]["after"] == pytest.approx(0.015)
+    assert report["pair_finetune_metrics"]["world"]["stage1_probe_same_state_score_gap_before_after_gate"]["after"] == pytest.approx(0.021)
+    assert report["pair_finetune_metrics"]["world"]["stage1_probe_score_spread_before_after_raw"]["after"] == pytest.approx(0.013)
+    assert report["pair_finetune_metrics"]["world"]["stage1_probe_score_spread_before_after_gate"]["after"] == pytest.approx(0.016)
+    assert report["pair_finetune_metrics"]["world"]["stage1_probe_unique_score_count_before_after_raw"]["after"] == pytest.approx(14.0)
+    assert report["pair_finetune_metrics"]["world"]["stage1_probe_unique_score_count_before_after_gate"]["after"] == pytest.approx(16.0)
     assert report["pair_finetune_metrics"]["world"]["world_pair_ft_early_stop"]["enabled"] is True
     assert report["pair_finetune_metrics"]["world"]["world_pair_ft_early_stop"]["patience"] == 2
     assert report["pair_finetune_metrics"]["world"]["world_pair_ft_early_stop"]["epochs_configured"] == 6
@@ -3244,7 +3290,7 @@ def test_stage2_healthy_snapshot_not_created_when_model_quality_not_healthy():
 
     payload = pipeline._maybe_create_stage2_healthy_snapshot(stage2_report)
     assert payload["created"] is False
-    assert "not_healthy_or_degraded" in payload["reason"]
+    assert "no_promotable_healthy_candidate" == payload["reason"]
     assert not pipeline.stage2_healthy_snapshots_dir.exists()
 
 

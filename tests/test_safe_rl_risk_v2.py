@@ -1546,6 +1546,93 @@ def test_world_stage1_pair_ft_calibration_scale_positive_and_monotonic():
     assert torch.all(diffs > 0).item() is True
 
 
+def test_world_stage15_gate_head_scale_positive_and_monotonic():
+    from safe_rl.models.world_model import WorldModelTrainer
+
+    trainer = WorldModelTrainer(
+        config=WorldModelConfig(
+            hidden_dim=64,
+            future_steps=2,
+            multimodal=2,
+            pair_ft_gate_head_enabled=True,
+            pair_ft_gate_head_scope="stage1_probe",
+            pair_ft_gate_head_type="monotonic_affine",
+            pair_ft_gate_head_scale_init=1.0,
+            pair_ft_gate_head_bias_init=0.0,
+            pair_ft_gate_head_train_scope="pair_ft_only",
+        ),
+        history_steps=2,
+        device="cpu",
+    )
+    scale, _ = trainer._stage1_pair_ft_gate_head_scale_bias()
+    assert float(scale.detach().item()) > 0.0
+    logits = torch.tensor([-2.0, -1.0, 0.0, 1.0], dtype=torch.float32, device=trainer.device)
+    _, gate_scores = trainer._apply_stage1_pair_ft_gate_head(logits)
+    diffs = gate_scores[1:] - gate_scores[:-1]
+    assert torch.all(diffs > 0).item() is True
+
+
+def test_world_stage15_gate_head_routes_stage1_resolution_without_affecting_ranking():
+    from safe_rl.models.world_model import WorldModelTrainer
+
+    trainer = WorldModelTrainer(
+        config=WorldModelConfig(
+            hidden_dim=64,
+            future_steps=2,
+            multimodal=2,
+            pair_ft_stage1_resolution_mode="fixed",
+            pair_ft_stage1_resolution_min_score_gap=0.20,
+            pair_ft_stage1_resolution_apply_trusted_only=True,
+        ),
+        history_steps=2,
+        device="cpu",
+        seed=7,
+    )
+    pair = RiskPairSample(
+        history_scene=_history_scene()[:2],
+        action_a=4,
+        action_b=3,
+        preferred_action=4,
+        source="stage1_probe_same_state",
+        weight=1.0,
+        meta={"target_risk_a": 0.30, "target_risk_b": 0.80, "target_gap": 0.50, "trusted_for_spread": True},
+    )
+    ranking_raw, _, resolution_raw, diag_raw = trainer._compute_pair_losses(
+        [pair],
+        enable_resolution=False,
+        enable_stage1_resolution=True,
+        enable_stage1_gate_head=False,
+        enable_stage1_softbin=True,
+        stage1_softbin_num_bins=16,
+        stage1_softbin_temperature=80.0,
+        stage1_softbin_apply_trusted_only=True,
+    )
+
+    def _constant_gate(score_logit, score=None):
+        gate_score = torch.full_like(score_logit, 0.5)
+        if score is None:
+            return score_logit, gate_score
+        return score_logit, gate_score
+
+    trainer._apply_stage1_pair_ft_gate_head = _constant_gate  # type: ignore[method-assign]
+
+    ranking_gate, _, resolution_gate, diag_gate = trainer._compute_pair_losses(
+        [pair],
+        enable_resolution=False,
+        enable_stage1_resolution=True,
+        enable_stage1_gate_head=True,
+        enable_stage1_softbin=True,
+        stage1_softbin_num_bins=16,
+        stage1_softbin_temperature=80.0,
+        stage1_softbin_apply_trusted_only=True,
+    )
+
+    assert float(ranking_gate.detach().item()) == pytest.approx(float(ranking_raw.detach().item()), abs=1e-6)
+    assert float(resolution_gate.detach().item()) > float(resolution_raw.detach().item())
+    assert diag_gate["stage15_gate_head_enabled"] is True
+    assert diag_raw["stage15_gate_head_enabled"] is False
+
+
 def test_world_stage1_softbin_entropy_tracks_distribution_dispersion():
     from safe_rl.models.world_model import WorldModelTrainer
 
@@ -1642,6 +1729,31 @@ def test_world_stage1_softbin_active_and_zero_paths():
     )
     assert diag_stage4["stage1_softbin_active_count"] == 0
     assert diag_stage4["stage1_softbin_loss"] == pytest.approx(0.0, abs=1e-9)
+
+
+def test_world_stage2_candidate_uses_raw_ranking_floor_with_gate_metrics():
+    from safe_rl.models.world_model import WorldModelTrainer
+
+    trainer = WorldModelTrainer(
+        config=WorldModelConfig(hidden_dim=64, future_steps=2, multimodal=2),
+        history_steps=2,
+        device="cpu",
+    )
+    passed, reason = trainer._is_stage2_healthy_candidate_metrics(
+        stage1_probe_metrics={
+            "unique_score_count": 20.0,
+            "score_spread": 0.02,
+            "same_state_score_gap": 0.02,
+            "pair_ranking_accuracy": 0.95,
+        },
+        stage1_probe_raw_metrics_for_ranking={
+            "pair_ranking_accuracy": 0.50,
+        },
+        pre_pair_ft_stage1_acc=0.70,
+        ranking_acc_tolerance=0.01,
+    )
+    assert passed is False
+    assert reason == "candidate_ranking_below_floor"
 
 
 def test_world_stage1_tail_anticollapse_loss_positive_when_range_below_floor():

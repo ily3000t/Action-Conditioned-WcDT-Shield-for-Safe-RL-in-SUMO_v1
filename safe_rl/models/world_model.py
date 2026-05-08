@@ -293,6 +293,17 @@ class ActionConditionedWorldModel(nn.Module):
         self.pair_ft_stage1_calibration_bias = nn.Parameter(
             torch.tensor(stage1_bias_init, dtype=torch.float32)
         )
+        stage1_gate_eps = 1e-6
+        stage1_gate_scale_init = float(getattr(config, 'pair_ft_gate_head_scale_init', 1.0) or 1.0)
+        stage1_gate_scale_init = max(stage1_gate_eps * 2.0, stage1_gate_scale_init)
+        stage1_gate_raw_scale_init = math.log(math.expm1(stage1_gate_scale_init - stage1_gate_eps))
+        stage1_gate_bias_init = float(getattr(config, 'pair_ft_gate_head_bias_init', 0.0) or 0.0)
+        self.pair_ft_stage1_gate_head_raw_scale = nn.Parameter(
+            torch.tensor(stage1_gate_raw_scale_init, dtype=torch.float32)
+        )
+        self.pair_ft_stage1_gate_head_bias = nn.Parameter(
+            torch.tensor(stage1_gate_bias_init, dtype=torch.float32)
+        )
 
     def forward(self, batch: Dict[str, torch.Tensor]) -> Dict[str, torch.Tensor]:
         scene_feature = self.scene_encoder(
@@ -579,6 +590,40 @@ class WorldModelTrainer:
         if phaseb_stage1_anticollapse_apply_on not in {'priority_only', 'all_stage1'}:
             phaseb_stage1_anticollapse_apply_on = 'priority_only'
         stage1_calibration_enabled = self._stage1_pair_ft_calibration_enabled()
+        stage15_gate_head_enabled = self._stage1_pair_ft_gate_head_enabled()
+        stage15_gate_head_eval_uses_gate_score = bool(
+            getattr(self.config, 'pair_ft_gate_eval_uses_gate_score', True)
+        )
+        if not stage15_gate_head_enabled:
+            stage15_gate_head_eval_uses_gate_score = False
+        stage15_gate_head_scope = str(
+            getattr(self.config, 'pair_ft_gate_head_scope', 'stage1_probe') or 'stage1_probe'
+        ).strip().lower()
+        if stage15_gate_head_scope not in {'stage1_probe'}:
+            stage15_gate_head_scope = 'stage1_probe'
+        stage15_gate_head_type = str(
+            getattr(self.config, 'pair_ft_gate_head_type', 'monotonic_affine') or 'monotonic_affine'
+        ).strip().lower()
+        if stage15_gate_head_type not in {'monotonic_affine'}:
+            stage15_gate_head_type = 'monotonic_affine'
+        stage15_gate_head_train_scope = str(
+            getattr(self.config, 'pair_ft_gate_head_train_scope', 'pair_ft_only') or 'pair_ft_only'
+        ).strip().lower()
+        if stage15_gate_head_train_scope not in {'pair_ft_only'}:
+            stage15_gate_head_train_scope = 'pair_ft_only'
+
+        stage1_resolution_loss_weight_raw = float(
+            getattr(self.config, 'pair_ft_stage1_resolution_loss_weight', 0.0) or 0.0
+        )
+        gate_resolution_loss_weight_effective = float(
+            getattr(self.config, 'pair_ft_gate_resolution_loss_weight', stage1_resolution_loss_weight_raw)
+            or stage1_resolution_loss_weight_raw
+        )
+        stage1_resolution_loss_weight_effective = float(
+            gate_resolution_loss_weight_effective
+            if stage15_gate_head_enabled
+            else stage1_resolution_loss_weight_raw
+        )
         stage1_softbin_loss_weight_effective = float(
             getattr(self.config, 'pair_ft_stage1_softbin_loss_weight', 0.0) or 0.0
         )
@@ -599,6 +644,23 @@ class WorldModelTrainer:
         stage1_softbin_apply_trusted_only_effective = bool(
             getattr(self.config, 'pair_ft_stage1_softbin_apply_trusted_only', True)
         )
+        if stage15_gate_head_enabled:
+            stage1_softbin_loss_weight_effective = float(
+                getattr(self.config, 'pair_ft_gate_softbin_loss_weight', stage1_softbin_loss_weight_effective)
+                or stage1_softbin_loss_weight_effective
+            )
+            stage1_softbin_num_bins_effective = max(
+                2,
+                int(getattr(self.config, 'pair_ft_gate_softbin_num_bins', stage1_softbin_num_bins_effective) or stage1_softbin_num_bins_effective),
+            )
+            stage1_softbin_temperature_effective = max(
+                1e-6,
+                float(getattr(self.config, 'pair_ft_gate_softbin_temperature', stage1_softbin_temperature_effective) or stage1_softbin_temperature_effective),
+            )
+            stage1_softbin_apply_trusted_only_effective = bool(
+                getattr(self.config, 'pair_ft_gate_softbin_apply_trusted_only', stage1_softbin_apply_trusted_only_effective)
+            )
+            stage1_softbin_apply_on_effective = 'stage1_probe'
         stage1_softbin_enabled = bool(
             stage1_softbin_loss_weight_effective > 0.0
             and stage1_softbin_apply_on_effective == 'stage1_probe'
@@ -619,6 +681,9 @@ class WorldModelTrainer:
             candidate_session_dir = candidate_root_dir / dt.datetime.now().strftime("%Y%m%d_%H%M%S")
             candidate_session_dir.mkdir(parents=True, exist_ok=True)
         use_stage1_pair_ft_calibrated_scores = bool(stage1_calibration_enabled)
+        use_stage1_gate_head_for_gate_metrics = bool(
+            stage15_gate_head_enabled and stage15_gate_head_eval_uses_gate_score
+        )
         stage1_tail_apply_trusted_only = bool(
             getattr(self.config, 'pair_ft_stage1_tail_apply_trusted_only', True)
         )
@@ -702,33 +767,49 @@ class WorldModelTrainer:
         before_pair_metrics = self.evaluate_pairs(
             pair_samples,
             use_stage1_pair_ft_calibration=use_stage1_pair_ft_calibrated_scores,
+            use_stage1_gate_head_for_stage1_probe=use_stage1_gate_head_for_gate_metrics,
         )
         before_stage5_metrics = self.evaluate_pairs(
             stage5_pair_samples,
             use_stage1_pair_ft_calibration=use_stage1_pair_ft_calibrated_scores,
+            use_stage1_gate_head_for_stage1_probe=use_stage1_gate_head_for_gate_metrics,
         )
-        before_stage1_probe_metrics = self.evaluate_pairs(
+        before_stage1_probe_metrics_raw = self.evaluate_pairs(
             stage1_probe_pair_samples,
             use_stage1_pair_ft_calibration=use_stage1_pair_ft_calibrated_scores,
+        )
+        before_stage1_probe_metrics_gate = self.evaluate_pairs(
+            stage1_probe_pair_samples,
+            use_stage1_pair_ft_calibration=use_stage1_pair_ft_calibrated_scores,
+            use_stage1_gate_head_for_stage1_probe=use_stage1_gate_head_for_gate_metrics,
+        )
+        before_stage1_probe_metrics = dict(
+            before_stage1_probe_metrics_gate
+            if use_stage1_gate_head_for_gate_metrics
+            else before_stage1_probe_metrics_raw
         )
         before_stage4_metrics = self.evaluate_pairs(
             stage4_pair_samples,
             use_stage1_pair_ft_calibration=use_stage1_pair_ft_calibrated_scores,
+            use_stage1_gate_head_for_stage1_probe=use_stage1_gate_head_for_gate_metrics,
         )
         stage4_high_gap_pair_samples = self._filter_high_gap_pairs(stage4_pair_samples)
         before_stage4_high_gap_metrics = self.evaluate_pairs(
             stage4_high_gap_pair_samples,
             use_stage1_pair_ft_calibration=use_stage1_pair_ft_calibrated_scores,
+            use_stage1_gate_head_for_stage1_probe=use_stage1_gate_head_for_gate_metrics,
         )
         stage4_aux_pair_samples = self._filter_stage4_aux_pairs(stage4_pair_samples)
         before_stage4_aux_metrics = self.evaluate_pairs(
             stage4_aux_pair_samples,
             use_stage1_pair_ft_calibration=use_stage1_pair_ft_calibrated_scores,
+            use_stage1_gate_head_for_stage1_probe=use_stage1_gate_head_for_gate_metrics,
         )
         before_stage4_aux_logit_gap_metrics = self._evaluate_pair_logit_gap_metrics(stage4_aux_pair_samples)
         before_stage1_softbin_stats = self._evaluate_stage1_softbin_stats(
             pair_samples=stage1_probe_pair_samples,
             use_stage1_pair_ft_calibration=use_stage1_pair_ft_calibrated_scores,
+            use_stage1_gate_head_for_stage1_probe=use_stage1_gate_head_for_gate_metrics,
             num_bins=stage1_softbin_num_bins_effective,
             temperature=stage1_softbin_temperature_effective,
             apply_trusted_only=stage1_softbin_apply_trusted_only_effective,
@@ -781,6 +862,13 @@ class WorldModelTrainer:
             'phase_b_stage1_anticollapse_steps': 0,
             'phase_b_stage1_anticollapse_active_pair_count': 0,
             'phase_b_stage1_score_range_below_floor_fraction': 0.0,
+            'stage15_gate_head_enabled': bool(stage15_gate_head_enabled),
+            'stage15_gate_head_scope': str(stage15_gate_head_scope),
+            'stage15_gate_head_type': str(stage15_gate_head_type),
+            'stage15_gate_head_train_scope': str(stage15_gate_head_train_scope),
+            'stage15_gate_head_eval_uses_gate_score': bool(stage15_gate_head_eval_uses_gate_score),
+            'stage15_gate_resolution_loss_weight_effective': float(stage1_resolution_loss_weight_effective),
+            'stage15_gate_softbin_loss_weight_effective': float(stage1_softbin_loss_weight_effective),
             'stage1_tail_sampling_mode_effective': str(stage1_tail_sampling_mode),
             'stage1_tail_ranking_loss_weight_effective': float(tail_ranking_loss_weight_effective),
             'stage1_tail_resolution_loss_weight_effective': float(tail_resolution_loss_weight_effective),
@@ -823,7 +911,7 @@ class WorldModelTrainer:
                     getattr(self.config, 'pair_ft_stage1_resolution_min_score_gap', 0.015) or 0.015
                 ),
                 'pair_ft_stage1_resolution_loss_weight': float(
-                    getattr(self.config, 'pair_ft_stage1_resolution_loss_weight', 0.0) or 0.0
+                    stage1_resolution_loss_weight_effective
                 ),
                 'stage1_resolution_mode': str(
                     getattr(self.config, 'pair_ft_stage1_resolution_mode', 'fixed') or 'fixed'
@@ -848,6 +936,25 @@ class WorldModelTrainer:
                     if stage1_calibration_enabled
                     else 0.0
                 ),
+                'stage15_gate_head': {
+                    'enabled': bool(stage15_gate_head_enabled),
+                    'scope': str(stage15_gate_head_scope),
+                    'type': str(stage15_gate_head_type),
+                    'train_scope': str(stage15_gate_head_train_scope),
+                    'eval_uses_gate_score': bool(stage15_gate_head_eval_uses_gate_score),
+                    'scale': float(
+                        self._stage1_pair_ft_gate_head_scale_bias()[0].detach().item()
+                        if stage15_gate_head_enabled
+                        else 1.0
+                    ),
+                    'bias': float(
+                        self._stage1_pair_ft_gate_head_scale_bias()[1].detach().item()
+                        if stage15_gate_head_enabled
+                        else 0.0
+                    ),
+                },
+                'stage1_probe_metrics_raw': dict(before_stage1_probe_metrics_raw),
+                'stage1_probe_metrics_gate': dict(before_stage1_probe_metrics_gate),
                 'stage1_softbin_loss': 0.0,
                 'stage1_softbin_entropy': float(before_stage1_softbin_stats.get('entropy', 0.0)),
                 'stage1_softbin_effective_bins': float(before_stage1_softbin_stats.get('effective_bins', 0.0)),
@@ -886,15 +993,23 @@ class WorldModelTrainer:
                 'world_pair_ft_source_mix': dict(source_mix),
                 'stage5_pair_ranking_accuracy_before_after': self._metric_before_after(before_stage5_metrics, before_stage5_metrics, 'pair_ranking_accuracy'),
                 'stage1_probe_pair_ranking_accuracy_before_after': self._metric_before_after(before_stage1_probe_metrics, before_stage1_probe_metrics, 'pair_ranking_accuracy'),
+                'stage1_probe_pair_ranking_accuracy_before_after_raw': self._metric_before_after(before_stage1_probe_metrics_raw, before_stage1_probe_metrics_raw, 'pair_ranking_accuracy'),
+                'stage1_probe_pair_ranking_accuracy_before_after_gate': self._metric_before_after(before_stage1_probe_metrics_gate, before_stage1_probe_metrics_gate, 'pair_ranking_accuracy'),
                 'stage4_pair_ranking_accuracy_before_after': self._metric_before_after(before_stage4_metrics, before_stage4_metrics, 'pair_ranking_accuracy'),
                 'stage5_same_state_score_gap_before_after': self._metric_before_after(before_stage5_metrics, before_stage5_metrics, 'same_state_score_gap'),
                 'stage1_probe_same_state_score_gap_before_after': self._metric_before_after(before_stage1_probe_metrics, before_stage1_probe_metrics, 'same_state_score_gap'),
+                'stage1_probe_same_state_score_gap_before_after_raw': self._metric_before_after(before_stage1_probe_metrics_raw, before_stage1_probe_metrics_raw, 'same_state_score_gap'),
+                'stage1_probe_same_state_score_gap_before_after_gate': self._metric_before_after(before_stage1_probe_metrics_gate, before_stage1_probe_metrics_gate, 'same_state_score_gap'),
                 'stage4_same_state_score_gap_before_after': self._metric_before_after(before_stage4_metrics, before_stage4_metrics, 'same_state_score_gap'),
                 'stage5_score_spread_before_after': self._metric_before_after(before_stage5_metrics, before_stage5_metrics, 'score_spread'),
                 'stage1_probe_score_spread_before_after': self._metric_before_after(before_stage1_probe_metrics, before_stage1_probe_metrics, 'score_spread'),
+                'stage1_probe_score_spread_before_after_raw': self._metric_before_after(before_stage1_probe_metrics_raw, before_stage1_probe_metrics_raw, 'score_spread'),
+                'stage1_probe_score_spread_before_after_gate': self._metric_before_after(before_stage1_probe_metrics_gate, before_stage1_probe_metrics_gate, 'score_spread'),
                 'stage4_score_spread_before_after': self._metric_before_after(before_stage4_metrics, before_stage4_metrics, 'score_spread'),
                 'stage5_unique_score_count_before_after': self._metric_before_after(before_stage5_metrics, before_stage5_metrics, 'unique_score_count'),
                 'stage1_probe_unique_score_count_before_after': self._metric_before_after(before_stage1_probe_metrics, before_stage1_probe_metrics, 'unique_score_count'),
+                'stage1_probe_unique_score_count_before_after_raw': self._metric_before_after(before_stage1_probe_metrics_raw, before_stage1_probe_metrics_raw, 'unique_score_count'),
+                'stage1_probe_unique_score_count_before_after_gate': self._metric_before_after(before_stage1_probe_metrics_gate, before_stage1_probe_metrics_gate, 'unique_score_count'),
                 'stage4_unique_score_count_before_after': self._metric_before_after(before_stage4_metrics, before_stage4_metrics, 'unique_score_count'),
                 'stage4_high_gap_pair_count': int(len(stage4_high_gap_pair_samples)),
                 'stage4_high_gap_unique_score_count_before_after': self._metric_before_after(
@@ -1005,9 +1120,7 @@ class WorldModelTrainer:
         stage1_resolution_min_score_gap = float(
             getattr(self.config, 'pair_ft_stage1_resolution_min_score_gap', 0.015) or 0.015
         )
-        stage1_resolution_loss_weight = float(
-            getattr(self.config, 'pair_ft_stage1_resolution_loss_weight', 0.0) or 0.0
-        )
+        stage1_resolution_loss_weight = float(stage1_resolution_loss_weight_effective)
         tail_ranking_loss_weight_effective = float(
             tail_ranking_loss_weight_cfg
             if tail_ranking_loss_weight_cfg is not None
@@ -1073,6 +1186,12 @@ class WorldModelTrainer:
             f"scope=pair_ft_only"
         )
         print(
+            f"[WorldModel PairFT] stage15_gate_head: enabled={bool(stage15_gate_head_enabled)}, "
+            f"scope={stage15_gate_head_scope}, type={stage15_gate_head_type}, "
+            f"train_scope={stage15_gate_head_train_scope}, "
+            f"eval_uses_gate_score={bool(stage15_gate_head_eval_uses_gate_score)}"
+        )
+        print(
             f"[WorldModel PairFT] stage1_softbin: weight={stage1_softbin_loss_weight_effective:.4f}, "
             f"bins={int(stage1_softbin_num_bins_effective)}, "
             f"temperature={stage1_softbin_temperature_effective:.4f}, "
@@ -1111,20 +1230,33 @@ class WorldModelTrainer:
             self.evaluate_pairs(
                 best_eval_pairs,
                 use_stage1_pair_ft_calibration=use_stage1_pair_ft_calibrated_scores,
+                use_stage1_gate_head_for_stage1_probe=use_stage1_gate_head_for_gate_metrics,
             )
         )
-        initial_stage1_probe_metrics = dict(
+        initial_stage1_probe_metrics_raw = dict(
             self.evaluate_pairs(
                 stage1_probe_pair_samples,
                 use_stage1_pair_ft_calibration=use_stage1_pair_ft_calibrated_scores,
             )
+        )
+        initial_stage1_probe_metrics_gate = dict(
+            self.evaluate_pairs(
+                stage1_probe_pair_samples,
+                use_stage1_pair_ft_calibration=use_stage1_pair_ft_calibrated_scores,
+                use_stage1_gate_head_for_stage1_probe=use_stage1_gate_head_for_gate_metrics,
+            )
+        )
+        initial_stage1_probe_metrics = dict(
+            initial_stage1_probe_metrics_gate
+            if use_stage1_gate_head_for_gate_metrics
+            else initial_stage1_probe_metrics_raw
         )
         legacy_best_metrics = dict(initial_metrics)
         legacy_best_stage1_probe_metrics = dict(initial_stage1_probe_metrics)
         legacy_best_epoch = -1
         legacy_best_reason = 'legacy_initial_metrics'
         legacy_best_state = {name: tensor.detach().cpu().clone() for name, tensor in self.model.state_dict().items()}
-        pre_pair_ft_stage1_acc = float(initial_stage1_probe_metrics.get('pair_ranking_accuracy', 0.0))
+        pre_pair_ft_stage1_acc = float(initial_stage1_probe_metrics_raw.get('pair_ranking_accuracy', 0.0))
         healthy_candidate_records: List[Dict[str, Any]] = []
         best_healthy_candidate: Optional[Dict[str, Any]] = None
         eligible_best_metrics: Optional[Dict[str, float]] = None
@@ -1247,6 +1379,7 @@ class WorldModelTrainer:
                             enable_resolution=False,
                             enable_stage1_resolution=True,
                             enable_stage1_pair_ft_calibration=stage1_calibration_enabled,
+                            enable_stage1_gate_head=stage15_gate_head_enabled,
                             enable_stage1_softbin=stage1_softbin_enabled,
                             stage1_softbin_num_bins=stage1_softbin_num_bins_effective,
                             stage1_softbin_temperature=stage1_softbin_temperature_effective,
@@ -1371,6 +1504,7 @@ class WorldModelTrainer:
                             enable_resolution=False,
                             enable_stage1_resolution=True,
                             enable_stage1_pair_ft_calibration=stage1_calibration_enabled,
+                            enable_stage1_gate_head=stage15_gate_head_enabled,
                             enable_stage1_softbin=stage1_softbin_enabled,
                             stage1_softbin_num_bins=stage1_softbin_num_bins_effective,
                             stage1_softbin_temperature=stage1_softbin_temperature_effective,
@@ -1724,10 +1858,21 @@ class WorldModelTrainer:
                 eval_metrics = self.evaluate_pairs(
                     best_eval_pairs,
                     use_stage1_pair_ft_calibration=use_stage1_pair_ft_calibrated_scores,
+                    use_stage1_gate_head_for_stage1_probe=use_stage1_gate_head_for_gate_metrics,
                 )
-                eval_stage1_probe_metrics = self.evaluate_pairs(
+                eval_stage1_probe_metrics_raw = self.evaluate_pairs(
                     stage1_probe_pair_samples,
                     use_stage1_pair_ft_calibration=use_stage1_pair_ft_calibrated_scores,
+                )
+                eval_stage1_probe_metrics_gate = self.evaluate_pairs(
+                    stage1_probe_pair_samples,
+                    use_stage1_pair_ft_calibration=use_stage1_pair_ft_calibrated_scores,
+                    use_stage1_gate_head_for_stage1_probe=use_stage1_gate_head_for_gate_metrics,
+                )
+                eval_stage1_probe_metrics = (
+                    eval_stage1_probe_metrics_gate
+                    if use_stage1_gate_head_for_gate_metrics
+                    else eval_stage1_probe_metrics_raw
                 )
                 epoch_summary.update(
                     {
@@ -1747,10 +1892,35 @@ class WorldModelTrainer:
                         'stage1_probe_eval_unique_score_count': float(
                                 eval_stage1_probe_metrics.get('unique_score_count', 0.0)
                             ),
+                        'stage1_probe_eval_pair_ranking_accuracy_raw': float(
+                            eval_stage1_probe_metrics_raw.get('pair_ranking_accuracy', 0.0)
+                        ),
+                        'stage1_probe_eval_same_state_score_gap_raw': float(
+                            eval_stage1_probe_metrics_raw.get('same_state_score_gap', 0.0)
+                        ),
+                        'stage1_probe_eval_score_spread_raw': float(
+                            eval_stage1_probe_metrics_raw.get('score_spread', 0.0)
+                        ),
+                        'stage1_probe_eval_unique_score_count_raw': float(
+                            eval_stage1_probe_metrics_raw.get('unique_score_count', 0.0)
+                        ),
+                        'stage1_probe_eval_pair_ranking_accuracy_gate': float(
+                            eval_stage1_probe_metrics_gate.get('pair_ranking_accuracy', 0.0)
+                        ),
+                        'stage1_probe_eval_same_state_score_gap_gate': float(
+                            eval_stage1_probe_metrics_gate.get('same_state_score_gap', 0.0)
+                        ),
+                        'stage1_probe_eval_score_spread_gate': float(
+                            eval_stage1_probe_metrics_gate.get('score_spread', 0.0)
+                        ),
+                        'stage1_probe_eval_unique_score_count_gate': float(
+                            eval_stage1_probe_metrics_gate.get('unique_score_count', 0.0)
+                        ),
                     }
                 )
                 candidate_passed, candidate_reject_reason = self._is_stage2_healthy_candidate_metrics(
-                    stage1_probe_metrics=eval_stage1_probe_metrics,
+                    stage1_probe_metrics=eval_stage1_probe_metrics_gate,
+                    stage1_probe_raw_metrics_for_ranking=eval_stage1_probe_metrics_raw,
                     pre_pair_ft_stage1_acc=pre_pair_ft_stage1_acc,
                     ranking_acc_tolerance=float(candidate_ranking_acc_tolerance),
                 )
@@ -1762,7 +1932,7 @@ class WorldModelTrainer:
                     candidate_record = self._save_stage2_healthy_candidate_checkpoint(
                         candidate_session_dir=candidate_session_dir,
                         epoch_idx=int(epoch_idx),
-                        stage1_probe_metrics=eval_stage1_probe_metrics,
+                        stage1_probe_metrics=eval_stage1_probe_metrics_gate,
                         max_keep=int(max_healthy_candidates_to_keep),
                         existing_records=healthy_candidate_records,
                     )
@@ -1965,10 +2135,12 @@ class WorldModelTrainer:
         stage1_tail_stage1_probe_metrics_before = self.evaluate_pairs(
             stage1_probe_pair_samples,
             use_stage1_pair_ft_calibration=use_stage1_pair_ft_calibrated_scores,
+            use_stage1_gate_head_for_stage1_probe=use_stage1_gate_head_for_gate_metrics,
         )
         stage1_tail_eval_metrics_before = self.evaluate_pairs(
             best_eval_pairs,
             use_stage1_pair_ft_calibration=use_stage1_pair_ft_calibrated_scores,
+            use_stage1_gate_head_for_stage1_probe=use_stage1_gate_head_for_gate_metrics,
         )
         stage1_tail_stage1_probe_metrics_after = dict(stage1_tail_stage1_probe_metrics_before)
         stage1_tail_eval_metrics_after = dict(stage1_tail_eval_metrics_before)
@@ -2036,6 +2208,7 @@ class WorldModelTrainer:
                         stage1_tail_batch,
                         enable_resolution=False,
                         enable_stage1_resolution=True,
+                        enable_stage1_gate_head=stage15_gate_head_enabled,
                         enable_stage1_tail_anticollapse=True,
                         stage1_tail_score_range_floor=stage1_tail_score_range_floor_effective,
                         stage1_tail_score_range_quantile_low=stage1_tail_score_range_quantile_low_effective,
@@ -2200,10 +2373,12 @@ class WorldModelTrainer:
                     eval_metrics = self.evaluate_pairs(
                         best_eval_pairs,
                         use_stage1_pair_ft_calibration=use_stage1_pair_ft_calibrated_scores,
+                        use_stage1_gate_head_for_stage1_probe=use_stage1_gate_head_for_gate_metrics,
                     )
                     eval_stage1_probe_metrics = self.evaluate_pairs(
                         stage1_probe_pair_samples,
                         use_stage1_pair_ft_calibration=use_stage1_pair_ft_calibrated_scores,
+                        use_stage1_gate_head_for_stage1_probe=use_stage1_gate_head_for_gate_metrics,
                     )
                     epoch_summary.update(
                         {
@@ -2278,12 +2453,14 @@ class WorldModelTrainer:
                 tail_internal_best_stage1_probe_metrics or self.evaluate_pairs(
                     stage1_probe_pair_samples,
                     use_stage1_pair_ft_calibration=use_stage1_pair_ft_calibrated_scores,
+                    use_stage1_gate_head_for_stage1_probe=use_stage1_gate_head_for_gate_metrics,
                 )
             )
             stage1_tail_eval_metrics_after = dict(
                 tail_internal_best_eval_metrics or self.evaluate_pairs(
                     best_eval_pairs,
                     use_stage1_pair_ft_calibration=use_stage1_pair_ft_calibrated_scores,
+                    use_stage1_gate_head_for_stage1_probe=use_stage1_gate_head_for_gate_metrics,
                 )
             )
             stage1_tail_accepted, stage1_tail_acceptance_reason = self._evaluate_stage1_tail_acceptance(
@@ -2315,31 +2492,47 @@ class WorldModelTrainer:
         after_pair_metrics = self.evaluate_pairs(
             pair_samples,
             use_stage1_pair_ft_calibration=use_stage1_pair_ft_calibrated_scores,
+            use_stage1_gate_head_for_stage1_probe=use_stage1_gate_head_for_gate_metrics,
         )
         after_stage5_metrics = self.evaluate_pairs(
             stage5_pair_samples,
             use_stage1_pair_ft_calibration=use_stage1_pair_ft_calibrated_scores,
+            use_stage1_gate_head_for_stage1_probe=use_stage1_gate_head_for_gate_metrics,
         )
-        after_stage1_probe_metrics = self.evaluate_pairs(
+        after_stage1_probe_metrics_raw = self.evaluate_pairs(
             stage1_probe_pair_samples,
             use_stage1_pair_ft_calibration=use_stage1_pair_ft_calibrated_scores,
+        )
+        after_stage1_probe_metrics_gate = self.evaluate_pairs(
+            stage1_probe_pair_samples,
+            use_stage1_pair_ft_calibration=use_stage1_pair_ft_calibrated_scores,
+            use_stage1_gate_head_for_stage1_probe=use_stage1_gate_head_for_gate_metrics,
+        )
+        after_stage1_probe_metrics = dict(
+            after_stage1_probe_metrics_gate
+            if use_stage1_gate_head_for_gate_metrics
+            else after_stage1_probe_metrics_raw
         )
         after_stage4_metrics = self.evaluate_pairs(
             stage4_pair_samples,
             use_stage1_pair_ft_calibration=use_stage1_pair_ft_calibrated_scores,
+            use_stage1_gate_head_for_stage1_probe=use_stage1_gate_head_for_gate_metrics,
         )
         after_stage4_high_gap_metrics = self.evaluate_pairs(
             stage4_high_gap_pair_samples,
             use_stage1_pair_ft_calibration=use_stage1_pair_ft_calibrated_scores,
+            use_stage1_gate_head_for_stage1_probe=use_stage1_gate_head_for_gate_metrics,
         )
         after_stage4_aux_metrics = self.evaluate_pairs(
             stage4_aux_pair_samples,
             use_stage1_pair_ft_calibration=use_stage1_pair_ft_calibrated_scores,
+            use_stage1_gate_head_for_stage1_probe=use_stage1_gate_head_for_gate_metrics,
         )
         after_stage4_aux_logit_gap_metrics = self._evaluate_pair_logit_gap_metrics(stage4_aux_pair_samples)
         after_stage1_softbin_stats = self._evaluate_stage1_softbin_stats(
             pair_samples=stage1_probe_pair_samples,
             use_stage1_pair_ft_calibration=use_stage1_pair_ft_calibrated_scores,
+            use_stage1_gate_head_for_stage1_probe=use_stage1_gate_head_for_gate_metrics,
             num_bins=stage1_softbin_num_bins_effective,
             temperature=stage1_softbin_temperature_effective,
             apply_trusted_only=stage1_softbin_apply_trusted_only_effective,
@@ -2363,6 +2556,13 @@ class WorldModelTrainer:
         else:
             stage1_calibration_scale = 1.0
             stage1_calibration_bias = 0.0
+        if stage15_gate_head_enabled:
+            stage15_gate_head_scale_value, stage15_gate_head_bias_value = self._stage1_pair_ft_gate_head_scale_bias()
+            stage15_gate_head_scale = float(stage15_gate_head_scale_value.detach().item())
+            stage15_gate_head_bias = float(stage15_gate_head_bias_value.detach().item())
+        else:
+            stage15_gate_head_scale = 1.0
+            stage15_gate_head_bias = 0.0
         stage2_healthy_candidate_exists = bool(best_healthy_candidate is not None)
         stage2_healthy_candidate_best_epoch = int(best_healthy_candidate.get('epoch', -1)) if best_healthy_candidate else -1
         stage2_healthy_candidate_best_world_model_path = str(
@@ -2396,6 +2596,17 @@ class WorldModelTrainer:
             'stage1_calibration_enabled': bool(stage1_calibration_enabled),
             'stage1_calibration_scale': float(stage1_calibration_scale),
             'stage1_calibration_bias': float(stage1_calibration_bias),
+            'stage15_gate_head': {
+                'enabled': bool(stage15_gate_head_enabled),
+                'scope': str(stage15_gate_head_scope),
+                'type': str(stage15_gate_head_type),
+                'train_scope': str(stage15_gate_head_train_scope),
+                'eval_uses_gate_score': bool(stage15_gate_head_eval_uses_gate_score),
+                'scale': float(stage15_gate_head_scale),
+                'bias': float(stage15_gate_head_bias),
+            },
+            'stage1_probe_metrics_raw': dict(after_stage1_probe_metrics_raw),
+            'stage1_probe_metrics_gate': dict(after_stage1_probe_metrics_gate),
             'stage1_softbin_loss': (
                 float(stage1_softbin_loss_total) / float(stage1_softbin_steps)
                 if stage1_softbin_steps > 0
@@ -2540,15 +2751,55 @@ class WorldModelTrainer:
             'stage2_healthy_candidate_pre_pair_ft_stage1_acc': float(pre_pair_ft_stage1_acc),
             'stage5_pair_ranking_accuracy_before_after': self._metric_before_after(before_stage5_metrics, after_stage5_metrics, 'pair_ranking_accuracy'),
             'stage1_probe_pair_ranking_accuracy_before_after': self._metric_before_after(before_stage1_probe_metrics, after_stage1_probe_metrics, 'pair_ranking_accuracy'),
+            'stage1_probe_pair_ranking_accuracy_before_after_raw': self._metric_before_after(
+                before_stage1_probe_metrics_raw,
+                after_stage1_probe_metrics_raw,
+                'pair_ranking_accuracy',
+            ),
+            'stage1_probe_pair_ranking_accuracy_before_after_gate': self._metric_before_after(
+                before_stage1_probe_metrics_gate,
+                after_stage1_probe_metrics_gate,
+                'pair_ranking_accuracy',
+            ),
             'stage4_pair_ranking_accuracy_before_after': self._metric_before_after(before_stage4_metrics, after_stage4_metrics, 'pair_ranking_accuracy'),
             'stage5_same_state_score_gap_before_after': self._metric_before_after(before_stage5_metrics, after_stage5_metrics, 'same_state_score_gap'),
             'stage1_probe_same_state_score_gap_before_after': self._metric_before_after(before_stage1_probe_metrics, after_stage1_probe_metrics, 'same_state_score_gap'),
+            'stage1_probe_same_state_score_gap_before_after_raw': self._metric_before_after(
+                before_stage1_probe_metrics_raw,
+                after_stage1_probe_metrics_raw,
+                'same_state_score_gap',
+            ),
+            'stage1_probe_same_state_score_gap_before_after_gate': self._metric_before_after(
+                before_stage1_probe_metrics_gate,
+                after_stage1_probe_metrics_gate,
+                'same_state_score_gap',
+            ),
             'stage4_same_state_score_gap_before_after': self._metric_before_after(before_stage4_metrics, after_stage4_metrics, 'same_state_score_gap'),
             'stage5_score_spread_before_after': self._metric_before_after(before_stage5_metrics, after_stage5_metrics, 'score_spread'),
             'stage1_probe_score_spread_before_after': self._metric_before_after(before_stage1_probe_metrics, after_stage1_probe_metrics, 'score_spread'),
+            'stage1_probe_score_spread_before_after_raw': self._metric_before_after(
+                before_stage1_probe_metrics_raw,
+                after_stage1_probe_metrics_raw,
+                'score_spread',
+            ),
+            'stage1_probe_score_spread_before_after_gate': self._metric_before_after(
+                before_stage1_probe_metrics_gate,
+                after_stage1_probe_metrics_gate,
+                'score_spread',
+            ),
             'stage4_score_spread_before_after': self._metric_before_after(before_stage4_metrics, after_stage4_metrics, 'score_spread'),
             'stage5_unique_score_count_before_after': self._metric_before_after(before_stage5_metrics, after_stage5_metrics, 'unique_score_count'),
             'stage1_probe_unique_score_count_before_after': self._metric_before_after(before_stage1_probe_metrics, after_stage1_probe_metrics, 'unique_score_count'),
+            'stage1_probe_unique_score_count_before_after_raw': self._metric_before_after(
+                before_stage1_probe_metrics_raw,
+                after_stage1_probe_metrics_raw,
+                'unique_score_count',
+            ),
+            'stage1_probe_unique_score_count_before_after_gate': self._metric_before_after(
+                before_stage1_probe_metrics_gate,
+                after_stage1_probe_metrics_gate,
+                'unique_score_count',
+            ),
             'stage4_unique_score_count_before_after': self._metric_before_after(before_stage4_metrics, after_stage4_metrics, 'unique_score_count'),
             'stage4_high_gap_pair_count': int(len(stage4_high_gap_pair_samples)),
             'stage4_high_gap_unique_score_count_before_after': self._metric_before_after(
@@ -2658,13 +2909,14 @@ class WorldModelTrainer:
     def _is_stage2_healthy_candidate_metrics(
         self,
         stage1_probe_metrics: Dict[str, float],
+        stage1_probe_raw_metrics_for_ranking: Optional[Dict[str, float]],
         pre_pair_ft_stage1_acc: float,
         ranking_acc_tolerance: float,
     ) -> Tuple[bool, str]:
         unique_score_count = float((stage1_probe_metrics or {}).get('unique_score_count', 0.0) or 0.0)
         score_spread = float((stage1_probe_metrics or {}).get('score_spread', 0.0) or 0.0)
         same_state_gap = float((stage1_probe_metrics or {}).get('same_state_score_gap', 0.0) or 0.0)
-        ranking_acc = float((stage1_probe_metrics or {}).get('pair_ranking_accuracy', 0.0) or 0.0)
+        ranking_acc = float((stage1_probe_raw_metrics_for_ranking or {}).get('pair_ranking_accuracy', 0.0) or 0.0)
         ranking_floor = float(pre_pair_ft_stage1_acc) - float(ranking_acc_tolerance)
         if unique_score_count < 16.0:
             return False, 'candidate_unique_below_floor'
@@ -3071,6 +3323,7 @@ class WorldModelTrainer:
         self,
         pair_samples: Sequence[RiskPairSample],
         use_stage1_pair_ft_calibration: bool = False,
+        use_stage1_gate_head_for_stage1_probe: bool = False,
     ) -> Dict[str, float]:
         if len(pair_samples) == 0:
             return self._empty_pair_metrics()
@@ -3094,7 +3347,18 @@ class WorldModelTrainer:
         self.model.eval()
         try:
             for batch in loader:
-                batch_a, batch_b, preferred_a, target_a, target_b, _, hard_negative, _, _, _ = self._tensorize_pair_batch(batch)
+                (
+                    batch_a,
+                    batch_b,
+                    preferred_a,
+                    target_a,
+                    target_b,
+                    _,
+                    hard_negative,
+                    _,
+                    _,
+                    stage1_probe_mask,
+                ) = self._tensorize_pair_batch(batch)
                 out_a = self.model(batch_a)
                 out_b = self.model(batch_b)
                 score_a = out_a['risk_score']
@@ -3108,6 +3372,12 @@ class WorldModelTrainer:
                 if use_stage1_pair_ft_calibration:
                     _, score_a = self._apply_stage1_pair_ft_calibration(score_a_logit, score_a)
                     _, score_b = self._apply_stage1_pair_ft_calibration(score_b_logit, score_b)
+                if use_stage1_gate_head_for_stage1_probe:
+                    _, gate_score_a = self._apply_stage1_pair_ft_gate_head(score_a_logit, score_a)
+                    _, gate_score_b = self._apply_stage1_pair_ft_gate_head(score_b_logit, score_b)
+                    stage1_probe_mask = stage1_probe_mask.to(torch.bool)
+                    score_a = torch.where(stage1_probe_mask, gate_score_a, score_a)
+                    score_b = torch.where(stage1_probe_mask, gate_score_b, score_b)
                 pred_pref_a = score_a <= score_b
                 correct += int(torch.sum(pred_pref_a == preferred_a).item())
                 if hard_negative.any():
@@ -3211,6 +3481,7 @@ class WorldModelTrainer:
         enable_resolution: bool = False,
         enable_stage1_resolution: bool = False,
         enable_stage1_pair_ft_calibration: bool = False,
+        enable_stage1_gate_head: bool = False,
         enable_stage1_softbin: bool = False,
         stage1_softbin_num_bins: int = 16,
         stage1_softbin_temperature: float = 80.0,
@@ -3245,6 +3516,19 @@ class WorldModelTrainer:
         if enable_stage1_pair_ft_calibration:
             score_a_logit, score_a = self._apply_stage1_pair_ft_calibration(score_a_logit, score_a)
             score_b_logit, score_b = self._apply_stage1_pair_ft_calibration(score_b_logit, score_b)
+        stage1_score_a = score_a
+        stage1_score_b = score_b
+        stage1_gate_head_scale = 1.0
+        stage1_gate_head_bias = 0.0
+        if enable_stage1_gate_head:
+            _, gate_score_a = self._apply_stage1_pair_ft_gate_head(score_a_logit, score_a)
+            _, gate_score_b = self._apply_stage1_pair_ft_gate_head(score_b_logit, score_b)
+            stage1_probe_mask_bool = stage1_probe_mask.to(torch.bool)
+            stage1_score_a = torch.where(stage1_probe_mask_bool, gate_score_a, stage1_score_a)
+            stage1_score_b = torch.where(stage1_probe_mask_bool, gate_score_b, stage1_score_b)
+            stage1_gate_scale_tensor, stage1_gate_bias_tensor = self._stage1_pair_ft_gate_head_scale_bias()
+            stage1_gate_head_scale = float(stage1_gate_scale_tensor.detach().item())
+            stage1_gate_head_bias = float(stage1_gate_bias_tensor.detach().item())
 
         safer = torch.where(preferred_a, score_a_logit, score_b_logit)
         riskier = torch.where(preferred_a, score_b_logit, score_a_logit)
@@ -3289,6 +3573,7 @@ class WorldModelTrainer:
             else torch.zeros_like(weight)
         )
         resolution_score_gap = torch.abs(score_a - score_b)
+        stage1_resolution_score_gap = torch.abs(stage1_score_a - stage1_score_b)
         resolution_logit_gap = torch.abs(score_a_logit - score_b_logit)
         min_score_gap = float(getattr(self.config, 'pair_ft_resolution_min_score_gap', 0.03) or 0.03)
         stage1_min_score_gap = float(getattr(self.config, 'pair_ft_stage1_resolution_min_score_gap', 0.015) or 0.015)
@@ -3312,7 +3597,7 @@ class WorldModelTrainer:
             )
         else:
             stage1_margins = torch.full_like(resolution_score_gap, fill_value=stage1_min_score_gap)
-        stage1_resolution_terms = torch.relu(stage1_margins - resolution_score_gap)
+        stage1_resolution_terms = torch.relu(stage1_margins - stage1_resolution_score_gap)
         stage4_active_resolution_mask = stage4_resolution_mask > 0.0
         stage4_active_resolution_count = int(torch.sum(stage4_resolution_mask).item())
         stage1_active_resolution_mask = stage1_resolution_mask > 0.0
@@ -3357,7 +3642,7 @@ class WorldModelTrainer:
             stage1_resolution_loss = torch.sum(stage1_resolution_terms * stage1_resolution_mask) / torch.clamp(
                 torch.sum(stage1_resolution_mask), min=1.0
             )
-            stage1_active_score_gap = resolution_score_gap[stage1_active_resolution_mask]
+            stage1_active_score_gap = stage1_resolution_score_gap[stage1_active_resolution_mask]
             stage1_active_margins = stage1_margins[stage1_active_resolution_mask]
             stage1_probe_score_gap_values = (
                 stage1_active_score_gap.detach().cpu().numpy().astype(float).tolist()
@@ -3411,8 +3696,8 @@ class WorldModelTrainer:
         stage1_softbin_loss = self._zero_loss()
         stage1_softbin_occupancy_values: List[float] = []
         if enable_stage1_softbin and stage1_softbin_active_count > 0:
-            stage1_softbin_score_a = score_a[stage1_softbin_active_mask]
-            stage1_softbin_score_b = score_b[stage1_softbin_active_mask]
+            stage1_softbin_score_a = stage1_score_a[stage1_softbin_active_mask]
+            stage1_softbin_score_b = stage1_score_b[stage1_softbin_active_mask]
             stage1_softbin_scores = torch.cat([stage1_softbin_score_a, stage1_softbin_score_b], dim=0)
             (
                 stage1_softbin_loss,
@@ -3431,8 +3716,8 @@ class WorldModelTrainer:
         stage1_tail_q90 = 0.0
         stage1_tail_score_range = 0.0
         if enable_stage1_tail_anticollapse and stage1_active_resolution_count > 0:
-            active_score_a = score_a[stage1_active_resolution_mask]
-            active_score_b = score_b[stage1_active_resolution_mask]
+            active_score_a = stage1_score_a[stage1_active_resolution_mask]
+            active_score_b = stage1_score_b[stage1_active_resolution_mask]
             active_scores = torch.cat([active_score_a, active_score_b], dim=0)
             if active_scores.numel() > 0:
                 q_low = torch.quantile(active_scores, stage1_tail_score_range_quantile_low)
@@ -3505,6 +3790,9 @@ class WorldModelTrainer:
             'stage1_calibration_enabled': bool(enable_stage1_pair_ft_calibration),
             'stage1_calibration_scale': float(stage1_calib_scale),
             'stage1_calibration_bias': float(stage1_calib_bias),
+            'stage15_gate_head_enabled': bool(enable_stage1_gate_head),
+            'stage15_gate_head_scale': float(stage1_gate_head_scale),
+            'stage15_gate_head_bias': float(stage1_gate_head_bias),
             'stage1_softbin_loss': float(stage1_softbin_loss.detach().item()),
             'stage1_softbin_entropy': float(stage1_softbin_entropy.detach().item()),
             'stage1_softbin_effective_bins': float(stage1_softbin_effective_bins.detach().item()),
@@ -3638,6 +3926,22 @@ class WorldModelTrainer:
             return False
         return enabled
 
+    def _stage1_pair_ft_gate_head_enabled(self) -> bool:
+        enabled = bool(getattr(self.config, 'pair_ft_gate_head_enabled', False))
+        scope = str(getattr(self.config, 'pair_ft_gate_head_scope', 'stage1_probe') or 'stage1_probe').strip().lower()
+        head_type = str(getattr(self.config, 'pair_ft_gate_head_type', 'monotonic_affine') or 'monotonic_affine').strip().lower()
+        train_scope = str(
+            getattr(self.config, 'pair_ft_gate_head_train_scope', 'pair_ft_only')
+            or 'pair_ft_only'
+        ).strip().lower()
+        if scope not in {'stage1_probe'}:
+            return False
+        if head_type not in {'monotonic_affine'}:
+            return False
+        if train_scope not in {'pair_ft_only'}:
+            return False
+        return enabled
+
     def _stage1_pair_ft_calibration_scale_bias(self) -> Tuple[torch.Tensor, torch.Tensor]:
         raw_scale = getattr(self.model, 'pair_ft_stage1_calibration_raw_scale')
         bias = getattr(self.model, 'pair_ft_stage1_calibration_bias')
@@ -3650,6 +3954,24 @@ class WorldModelTrainer:
         score: Optional[torch.Tensor] = None,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         scale, bias = self._stage1_pair_ft_calibration_scale_bias()
+        calibrated_logit = scale * score_logit + bias
+        calibrated_score = torch.sigmoid(calibrated_logit)
+        if score is None:
+            return calibrated_logit, calibrated_score
+        return calibrated_logit, calibrated_score
+
+    def _stage1_pair_ft_gate_head_scale_bias(self) -> Tuple[torch.Tensor, torch.Tensor]:
+        raw_scale = getattr(self.model, 'pair_ft_stage1_gate_head_raw_scale')
+        bias = getattr(self.model, 'pair_ft_stage1_gate_head_bias')
+        scale = torch.nn.functional.softplus(raw_scale) + 1e-6
+        return scale, bias
+
+    def _apply_stage1_pair_ft_gate_head(
+        self,
+        score_logit: torch.Tensor,
+        score: Optional[torch.Tensor] = None,
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        scale, bias = self._stage1_pair_ft_gate_head_scale_bias()
         calibrated_logit = scale * score_logit + bias
         calibrated_score = torch.sigmoid(calibrated_logit)
         if score is None:
@@ -3683,6 +4005,7 @@ class WorldModelTrainer:
         self,
         pair_samples: Sequence[RiskPairSample],
         use_stage1_pair_ft_calibration: bool,
+        use_stage1_gate_head_for_stage1_probe: bool,
         num_bins: int,
         temperature: float,
         apply_trusted_only: bool,
@@ -3733,6 +4056,9 @@ class WorldModelTrainer:
                 if use_stage1_pair_ft_calibration:
                     _, score_a = self._apply_stage1_pair_ft_calibration(score_a_logit, score_a)
                     _, score_b = self._apply_stage1_pair_ft_calibration(score_b_logit, score_b)
+                if use_stage1_gate_head_for_stage1_probe:
+                    _, score_a = self._apply_stage1_pair_ft_gate_head(score_a_logit, score_a)
+                    _, score_b = self._apply_stage1_pair_ft_gate_head(score_b_logit, score_b)
                 collected.append(score_a.detach())
                 collected.append(score_b.detach())
         finally:
