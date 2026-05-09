@@ -276,6 +276,7 @@ class ActionConditionedWorldModel(nn.Module):
             nn.ReLU(inplace=True),
             nn.Linear(128, 1),
         )
+        self.pair_ft_stage1_gate_head_linear = nn.Linear(256, 1)
         self.uncertainty_head = nn.Sequential(
             nn.Linear(256, 64),
             nn.ReLU(inplace=True),
@@ -326,6 +327,8 @@ class ActionConditionedWorldModel(nn.Module):
         risk_type_logits = self.risk_type_head(pooled)
         risk_score_logit = self.risk_score_head(pooled).squeeze(-1)
         risk_score = torch.sigmoid(risk_score_logit)
+        gate_score_logit = self.pair_ft_stage1_gate_head_linear(pooled).squeeze(-1)
+        gate_score = torch.sigmoid(gate_score_logit)
         uncertainty = self.uncertainty_head(pooled).squeeze(-1)
         return {
             'traj': traj,
@@ -333,6 +336,8 @@ class ActionConditionedWorldModel(nn.Module):
             'risk_type_logits': risk_type_logits,
             'risk_score_logit': risk_score_logit,
             'risk_score': risk_score,
+            'gate_score_logit': gate_score_logit,
+            'gate_score': gate_score,
             'uncertainty': uncertainty,
         }
 
@@ -601,11 +606,7 @@ class WorldModelTrainer:
         ).strip().lower()
         if stage15_gate_head_scope not in {'stage1_probe'}:
             stage15_gate_head_scope = 'stage1_probe'
-        stage15_gate_head_type = str(
-            getattr(self.config, 'pair_ft_gate_head_type', 'monotonic_affine') or 'monotonic_affine'
-        ).strip().lower()
-        if stage15_gate_head_type not in {'monotonic_affine'}:
-            stage15_gate_head_type = 'monotonic_affine'
+        stage15_gate_head_type = self._stage15_gate_head_type()
         stage15_gate_head_train_scope = str(
             getattr(self.config, 'pair_ft_gate_head_train_scope', 'pair_ft_only') or 'pair_ft_only'
         ).strip().lower()
@@ -891,12 +892,21 @@ class WorldModelTrainer:
         ]
         stage15_gate_head_param_count = int(len(stage15_gate_head_param_names))
         if stage15_gate_head_enabled:
-            stage15_gate_scale_before_tensor, stage15_gate_bias_before_tensor = self._stage1_pair_ft_gate_head_scale_bias()
-            stage15_gate_head_scale_before = float(stage15_gate_scale_before_tensor.detach().item())
-            stage15_gate_head_bias_before = float(stage15_gate_bias_before_tensor.detach().item())
+            if stage15_gate_head_type == 'monotonic_affine':
+                stage15_gate_scale_before_tensor, stage15_gate_bias_before_tensor = self._stage1_pair_ft_gate_head_scale_bias()
+                stage15_gate_head_scale_before = float(stage15_gate_scale_before_tensor.detach().item())
+                stage15_gate_head_bias_before = float(stage15_gate_bias_before_tensor.detach().item())
+            else:
+                stage15_gate_head_scale_before = 1.0
+                stage15_gate_head_bias_before = 0.0
+            stage15_gate_head_weight_norm_before, stage15_gate_head_bias_norm_before = (
+                self._stage15_gate_head_weight_bias_norms()
+            )
         else:
             stage15_gate_head_scale_before = 1.0
             stage15_gate_head_bias_before = 0.0
+            stage15_gate_head_weight_norm_before = 0.0
+            stage15_gate_head_bias_norm_before = 0.0
         stage15_gate_head_param_in_optimizer = False
         stage15_gate_head_scale_grad_norm_total = 0.0
         stage15_gate_head_bias_grad_norm_total = 0.0
@@ -967,14 +977,16 @@ class WorldModelTrainer:
                     'eval_uses_gate_score': bool(stage15_gate_head_eval_uses_gate_score),
                     'scale': float(
                         self._stage1_pair_ft_gate_head_scale_bias()[0].detach().item()
-                        if stage15_gate_head_enabled
+                        if (stage15_gate_head_enabled and stage15_gate_head_type == 'monotonic_affine')
                         else 1.0
                     ),
                     'bias': float(
                         self._stage1_pair_ft_gate_head_scale_bias()[1].detach().item()
-                        if stage15_gate_head_enabled
+                        if (stage15_gate_head_enabled and stage15_gate_head_type == 'monotonic_affine')
                         else 0.0
                     ),
+                    'gate_head_weight_norm': float(stage15_gate_head_weight_norm_before),
+                    'gate_head_bias_norm': float(stage15_gate_head_bias_norm_before),
                 },
                 'stage15_gate_head_audit': {
                     'gate_head_param_in_optimizer': False,
@@ -991,6 +1003,9 @@ class WorldModelTrainer:
                     'gate_head_scale_grad_norm': 0.0,
                     'gate_head_bias_grad_norm': 0.0,
                     'gate_head_total_grad_norm': 0.0,
+                    'gate_head_grad_norm': 0.0,
+                    'gate_head_weight_norm': float(stage15_gate_head_weight_norm_before if stage15_gate_head_enabled else 0.0),
+                    'gate_head_bias_norm': float(stage15_gate_head_bias_norm_before if stage15_gate_head_enabled else 0.0),
                     'gate_softbin_loss_mean': 0.0,
                     'gate_resolution_loss_mean': 0.0,
                 },
@@ -1892,10 +1907,10 @@ class WorldModelTrainer:
                     'stage1_softbin_active_count': float(epoch_stage1_softbin_active_count),
                     'stage15_gate_head_scale': float(
                         self._stage1_pair_ft_gate_head_scale_bias()[0].detach().item()
-                    ) if stage15_gate_head_enabled else 0.0,
+                    ) if (stage15_gate_head_enabled and stage15_gate_head_type == 'monotonic_affine') else 1.0 if stage15_gate_head_enabled else 0.0,
                     'stage15_gate_head_bias': float(
                         self._stage1_pair_ft_gate_head_scale_bias()[1].detach().item()
-                    ) if stage15_gate_head_enabled else 0.0,
+                    ) if (stage15_gate_head_enabled and stage15_gate_head_type == 'monotonic_affine') else 0.0,
                     'stage15_gate_head_scale_grad_norm': (
                         float(epoch_stage15_gate_head_scale_grad_norm_total)
                         / float(epoch_stage15_gate_head_grad_norm_steps)
@@ -2481,10 +2496,10 @@ class WorldModelTrainer:
                         ),
                         'stage15_gate_head_scale': float(
                             self._stage1_pair_ft_gate_head_scale_bias()[0].detach().item()
-                        ) if stage15_gate_head_enabled else 0.0,
+                        ) if (stage15_gate_head_enabled and stage15_gate_head_type == 'monotonic_affine') else 1.0 if stage15_gate_head_enabled else 0.0,
                         'stage15_gate_head_bias': float(
                             self._stage1_pair_ft_gate_head_scale_bias()[1].detach().item()
-                        ) if stage15_gate_head_enabled else 0.0,
+                        ) if (stage15_gate_head_enabled and stage15_gate_head_type == 'monotonic_affine') else 0.0,
                         'stage15_gate_head_scale_grad_norm': 0.0,
                         'stage15_gate_head_bias_grad_norm': 0.0,
                         'stage15_gate_head_total_grad_norm': 0.0,
@@ -2688,12 +2703,19 @@ class WorldModelTrainer:
             stage1_calibration_scale = 1.0
             stage1_calibration_bias = 0.0
         if stage15_gate_head_enabled:
-            stage15_gate_head_scale_value, stage15_gate_head_bias_value = self._stage1_pair_ft_gate_head_scale_bias()
-            stage15_gate_head_scale = float(stage15_gate_head_scale_value.detach().item())
-            stage15_gate_head_bias = float(stage15_gate_head_bias_value.detach().item())
+            if stage15_gate_head_type == 'monotonic_affine':
+                stage15_gate_head_scale_value, stage15_gate_head_bias_value = self._stage1_pair_ft_gate_head_scale_bias()
+                stage15_gate_head_scale = float(stage15_gate_head_scale_value.detach().item())
+                stage15_gate_head_bias = float(stage15_gate_head_bias_value.detach().item())
+            else:
+                stage15_gate_head_scale = 1.0
+                stage15_gate_head_bias = 0.0
+            stage15_gate_head_weight_norm, stage15_gate_head_bias_norm = self._stage15_gate_head_weight_bias_norms()
         else:
             stage15_gate_head_scale = 1.0
             stage15_gate_head_bias = 0.0
+            stage15_gate_head_weight_norm = 0.0
+            stage15_gate_head_bias_norm = 0.0
         stage2_healthy_candidate_exists = bool(best_healthy_candidate is not None)
         stage2_healthy_candidate_best_epoch = int(best_healthy_candidate.get('epoch', -1)) if best_healthy_candidate else -1
         stage2_healthy_candidate_best_world_model_path = str(
@@ -2735,6 +2757,8 @@ class WorldModelTrainer:
                 'eval_uses_gate_score': bool(stage15_gate_head_eval_uses_gate_score),
                 'scale': float(stage15_gate_head_scale),
                 'bias': float(stage15_gate_head_bias),
+                'gate_head_weight_norm': float(stage15_gate_head_weight_norm),
+                'gate_head_bias_norm': float(stage15_gate_head_bias_norm),
             },
             'stage15_gate_head_audit': {
                 'gate_head_param_in_optimizer': bool(stage15_gate_head_param_in_optimizer)
@@ -2769,6 +2793,17 @@ class WorldModelTrainer:
                     if (stage15_gate_head_enabled and stage15_gate_head_grad_norm_steps > 0)
                     else 0.0
                 ),
+                'gate_head_grad_norm': (
+                    float(stage15_gate_head_total_grad_norm_total) / float(stage15_gate_head_grad_norm_steps)
+                    if (stage15_gate_head_enabled and stage15_gate_head_grad_norm_steps > 0)
+                    else 0.0
+                ),
+                'gate_head_weight_norm': float(stage15_gate_head_weight_norm)
+                if stage15_gate_head_enabled
+                else 0.0,
+                'gate_head_bias_norm': float(stage15_gate_head_bias_norm)
+                if stage15_gate_head_enabled
+                else 0.0,
                 'gate_softbin_loss_mean': (
                     float(stage15_gate_softbin_loss_total) / float(stage15_gate_softbin_loss_steps)
                     if (stage15_gate_head_enabled and stage15_gate_softbin_loss_steps > 0)
@@ -3548,8 +3583,15 @@ class WorldModelTrainer:
                     _, score_a = self._apply_stage1_pair_ft_calibration(score_a_logit, score_a)
                     _, score_b = self._apply_stage1_pair_ft_calibration(score_b_logit, score_b)
                 if use_stage1_gate_head_for_stage1_probe:
-                    _, gate_score_a = self._apply_stage1_pair_ft_gate_head(score_a_logit, score_a)
-                    _, gate_score_b = self._apply_stage1_pair_ft_gate_head(score_b_logit, score_b)
+                    if self._stage15_gate_head_type() == 'dual_head_linear':
+                        gate_score_a = out_a.get('gate_score')
+                        gate_score_b = out_b.get('gate_score')
+                        if gate_score_a is None or gate_score_b is None:
+                            _, gate_score_a = self._apply_stage1_pair_ft_gate_head(score_a_logit, score_a)
+                            _, gate_score_b = self._apply_stage1_pair_ft_gate_head(score_b_logit, score_b)
+                    else:
+                        _, gate_score_a = self._apply_stage1_pair_ft_gate_head(score_a_logit, score_a)
+                        _, gate_score_b = self._apply_stage1_pair_ft_gate_head(score_b_logit, score_b)
                     stage1_probe_mask = stage1_probe_mask.to(torch.bool)
                     score_a = torch.where(stage1_probe_mask, gate_score_a, score_a)
                     score_b = torch.where(stage1_probe_mask, gate_score_b, score_b)
@@ -3695,15 +3737,26 @@ class WorldModelTrainer:
         stage1_score_b = score_b
         stage1_gate_head_scale = 1.0
         stage1_gate_head_bias = 0.0
+        stage1_gate_head_weight_norm = 0.0
+        stage1_gate_head_bias_norm = 0.0
         if enable_stage1_gate_head:
-            _, gate_score_a = self._apply_stage1_pair_ft_gate_head(score_a_logit, score_a)
-            _, gate_score_b = self._apply_stage1_pair_ft_gate_head(score_b_logit, score_b)
+            if self._stage15_gate_head_type() == 'dual_head_linear':
+                gate_score_a = out_a.get('gate_score')
+                gate_score_b = out_b.get('gate_score')
+                if gate_score_a is None or gate_score_b is None:
+                    _, gate_score_a = self._apply_stage1_pair_ft_gate_head(score_a_logit, score_a)
+                    _, gate_score_b = self._apply_stage1_pair_ft_gate_head(score_b_logit, score_b)
+            else:
+                _, gate_score_a = self._apply_stage1_pair_ft_gate_head(score_a_logit, score_a)
+                _, gate_score_b = self._apply_stage1_pair_ft_gate_head(score_b_logit, score_b)
             stage1_probe_mask_bool = stage1_probe_mask.to(torch.bool)
             stage1_score_a = torch.where(stage1_probe_mask_bool, gate_score_a, stage1_score_a)
             stage1_score_b = torch.where(stage1_probe_mask_bool, gate_score_b, stage1_score_b)
-            stage1_gate_scale_tensor, stage1_gate_bias_tensor = self._stage1_pair_ft_gate_head_scale_bias()
-            stage1_gate_head_scale = float(stage1_gate_scale_tensor.detach().item())
-            stage1_gate_head_bias = float(stage1_gate_bias_tensor.detach().item())
+            if self._stage15_gate_head_type() == 'monotonic_affine':
+                stage1_gate_scale_tensor, stage1_gate_bias_tensor = self._stage1_pair_ft_gate_head_scale_bias()
+                stage1_gate_head_scale = float(stage1_gate_scale_tensor.detach().item())
+                stage1_gate_head_bias = float(stage1_gate_bias_tensor.detach().item())
+            stage1_gate_head_weight_norm, stage1_gate_head_bias_norm = self._stage15_gate_head_weight_bias_norms()
 
         safer = torch.where(preferred_a, score_a_logit, score_b_logit)
         riskier = torch.where(preferred_a, score_b_logit, score_a_logit)
@@ -3968,6 +4021,8 @@ class WorldModelTrainer:
             'stage15_gate_head_enabled': bool(enable_stage1_gate_head),
             'stage15_gate_head_scale': float(stage1_gate_head_scale),
             'stage15_gate_head_bias': float(stage1_gate_head_bias),
+            'stage15_gate_head_weight_norm': float(stage1_gate_head_weight_norm),
+            'stage15_gate_head_bias_norm': float(stage1_gate_head_bias_norm),
             'stage1_softbin_loss': float(stage1_softbin_loss.detach().item()),
             'stage1_softbin_entropy': float(stage1_softbin_entropy.detach().item()),
             'stage1_softbin_effective_bins': float(stage1_softbin_effective_bins.detach().item()),
@@ -4101,17 +4156,26 @@ class WorldModelTrainer:
             return False
         return enabled
 
+    def _stage15_gate_head_type(self) -> str:
+        head_type = str(
+            getattr(self.config, 'pair_ft_gate_head_type', 'monotonic_affine')
+            or 'monotonic_affine'
+        ).strip().lower()
+        if head_type not in {'monotonic_affine', 'dual_head_linear'}:
+            return 'monotonic_affine'
+        return head_type
+
     def _stage1_pair_ft_gate_head_enabled(self) -> bool:
         enabled = bool(getattr(self.config, 'pair_ft_gate_head_enabled', False))
         scope = str(getattr(self.config, 'pair_ft_gate_head_scope', 'stage1_probe') or 'stage1_probe').strip().lower()
-        head_type = str(getattr(self.config, 'pair_ft_gate_head_type', 'monotonic_affine') or 'monotonic_affine').strip().lower()
+        head_type = self._stage15_gate_head_type()
         train_scope = str(
             getattr(self.config, 'pair_ft_gate_head_train_scope', 'pair_ft_only')
             or 'pair_ft_only'
         ).strip().lower()
         if scope not in {'stage1_probe'}:
             return False
-        if head_type not in {'monotonic_affine'}:
+        if head_type not in {'monotonic_affine', 'dual_head_linear'}:
             return False
         if train_scope not in {'pair_ft_only'}:
             return False
@@ -4146,15 +4210,51 @@ class WorldModelTrainer:
         score_logit: torch.Tensor,
         score: Optional[torch.Tensor] = None,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
-        scale, bias = self._stage1_pair_ft_gate_head_scale_bias()
-        calibrated_logit = scale * score_logit + bias
-        calibrated_score = torch.sigmoid(calibrated_logit)
+        head_type = self._stage15_gate_head_type()
+        if head_type == 'dual_head_linear':
+            # Fallback path: dual head should read gate logits directly from model outputs.
+            calibrated_logit = score_logit
+            calibrated_score = torch.sigmoid(calibrated_logit)
+        else:
+            scale, bias = self._stage1_pair_ft_gate_head_scale_bias()
+            calibrated_logit = scale * score_logit + bias
+            calibrated_score = torch.sigmoid(calibrated_logit)
         if score is None:
             return calibrated_logit, calibrated_score
         return calibrated_logit, calibrated_score
 
+    @staticmethod
+    def _safe_param_norm(parameter: Optional[nn.Parameter]) -> float:
+        if parameter is None:
+            return 0.0
+        try:
+            return float(parameter.detach().norm().item())
+        except Exception:
+            return 0.0
+
+    def _stage15_gate_head_weight_bias_norms(self) -> Tuple[float, float]:
+        head_type = self._stage15_gate_head_type()
+        if head_type == 'dual_head_linear':
+            linear_head = getattr(self.model, 'pair_ft_stage1_gate_head_linear', None)
+            if isinstance(linear_head, nn.Linear):
+                weight_norm = self._safe_param_norm(linear_head.weight)
+                bias_norm = self._safe_param_norm(linear_head.bias)
+                return weight_norm, bias_norm
+            return 0.0, 0.0
+        scale, bias = self._stage1_pair_ft_gate_head_scale_bias()
+        return float(torch.abs(scale).detach().item()), float(torch.abs(bias).detach().item())
+
     def _stage15_gate_head_param_items(self) -> List[Tuple[str, nn.Parameter]]:
         items: List[Tuple[str, nn.Parameter]] = []
+        head_type = self._stage15_gate_head_type()
+        if head_type == 'dual_head_linear':
+            linear_head = getattr(self.model, 'pair_ft_stage1_gate_head_linear', None)
+            if isinstance(linear_head, nn.Linear):
+                if isinstance(linear_head.weight, nn.Parameter):
+                    items.append(('pair_ft_stage1_gate_head_linear.weight', linear_head.weight))
+                if isinstance(linear_head.bias, nn.Parameter):
+                    items.append(('pair_ft_stage1_gate_head_linear.bias', linear_head.bias))
+            return items
         raw_scale = getattr(self.model, 'pair_ft_stage1_gate_head_raw_scale', None)
         bias = getattr(self.model, 'pair_ft_stage1_gate_head_bias', None)
         if isinstance(raw_scale, nn.Parameter):
@@ -4189,6 +4289,9 @@ class WorldModelTrainer:
         }
         scale_grad_norm = float(grad_norm_map.get('pair_ft_stage1_gate_head_raw_scale', 0.0))
         bias_grad_norm = float(grad_norm_map.get('pair_ft_stage1_gate_head_bias', 0.0))
+        if not grad_norm_map.get('pair_ft_stage1_gate_head_raw_scale') and not grad_norm_map.get('pair_ft_stage1_gate_head_bias'):
+            scale_grad_norm = float(grad_norm_map.get('pair_ft_stage1_gate_head_linear.weight', 0.0))
+            bias_grad_norm = float(grad_norm_map.get('pair_ft_stage1_gate_head_linear.bias', 0.0))
         total_grad_norm = float(math.sqrt(sum(value * value for value in grad_norm_map.values())))
         return scale_grad_norm, bias_grad_norm, total_grad_norm
 
@@ -4271,8 +4374,15 @@ class WorldModelTrainer:
                     _, score_a = self._apply_stage1_pair_ft_calibration(score_a_logit, score_a)
                     _, score_b = self._apply_stage1_pair_ft_calibration(score_b_logit, score_b)
                 if use_stage1_gate_head_for_stage1_probe:
-                    _, score_a = self._apply_stage1_pair_ft_gate_head(score_a_logit, score_a)
-                    _, score_b = self._apply_stage1_pair_ft_gate_head(score_b_logit, score_b)
+                    if self._stage15_gate_head_type() == 'dual_head_linear':
+                        score_a = out_a.get('gate_score')
+                        score_b = out_b.get('gate_score')
+                        if score_a is None or score_b is None:
+                            _, score_a = self._apply_stage1_pair_ft_gate_head(score_a_logit, score_a)
+                            _, score_b = self._apply_stage1_pair_ft_gate_head(score_b_logit, score_b)
+                    else:
+                        _, score_a = self._apply_stage1_pair_ft_gate_head(score_a_logit, score_a)
+                        _, score_b = self._apply_stage1_pair_ft_gate_head(score_b_logit, score_b)
                 collected.append(score_a.detach())
                 collected.append(score_b.detach())
         finally:

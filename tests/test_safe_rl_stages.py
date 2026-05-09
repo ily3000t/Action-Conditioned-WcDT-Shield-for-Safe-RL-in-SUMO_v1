@@ -2485,6 +2485,8 @@ def test_stage2_report_includes_pair_finetune_metadata(monkeypatch):
                     "eval_uses_gate_score": True,
                     "scale": 1.02,
                     "bias": 0.001,
+                    "gate_head_weight_norm": 1.02,
+                    "gate_head_bias_norm": 0.001,
                 },
                 "stage15_gate_head_audit": {
                     "gate_head_param_in_optimizer": True,
@@ -2498,6 +2500,9 @@ def test_stage2_report_includes_pair_finetune_metadata(monkeypatch):
                     "gate_head_scale_grad_norm": 0.12,
                     "gate_head_bias_grad_norm": 0.08,
                     "gate_head_total_grad_norm": 0.144222,
+                    "gate_head_grad_norm": 0.144222,
+                    "gate_head_weight_norm": 1.02,
+                    "gate_head_bias_norm": 0.001,
                     "gate_softbin_loss_mean": -2.20,
                     "gate_resolution_loss_mean": 0.011,
                 },
@@ -2887,6 +2892,8 @@ def test_stage2_report_includes_pair_finetune_metadata(monkeypatch):
     assert report["pair_finetune_metrics"]["world"]["stage15_gate_head"]["eval_uses_gate_score"] is True
     assert report["pair_finetune_metrics"]["world"]["stage15_gate_head"]["scale"] == pytest.approx(1.02)
     assert report["pair_finetune_metrics"]["world"]["stage15_gate_head"]["bias"] == pytest.approx(0.001)
+    assert report["pair_finetune_metrics"]["world"]["stage15_gate_head"]["gate_head_weight_norm"] == pytest.approx(1.02)
+    assert report["pair_finetune_metrics"]["world"]["stage15_gate_head"]["gate_head_bias_norm"] == pytest.approx(0.001)
     assert report["pair_finetune_metrics"]["world"]["stage15_gate_head_audit"]["gate_head_param_in_optimizer"] is True
     assert report["pair_finetune_metrics"]["world"]["stage15_gate_head_audit"]["gate_head_param_names"] == [
         "pair_ft_stage1_gate_head_raw_scale",
@@ -2900,6 +2907,9 @@ def test_stage2_report_includes_pair_finetune_metadata(monkeypatch):
     assert report["pair_finetune_metrics"]["world"]["stage15_gate_head_audit"]["gate_head_scale_grad_norm"] == pytest.approx(0.12)
     assert report["pair_finetune_metrics"]["world"]["stage15_gate_head_audit"]["gate_head_bias_grad_norm"] == pytest.approx(0.08)
     assert report["pair_finetune_metrics"]["world"]["stage15_gate_head_audit"]["gate_head_total_grad_norm"] == pytest.approx(0.144222)
+    assert report["pair_finetune_metrics"]["world"]["stage15_gate_head_audit"]["gate_head_grad_norm"] == pytest.approx(0.144222)
+    assert report["pair_finetune_metrics"]["world"]["stage15_gate_head_audit"]["gate_head_weight_norm"] == pytest.approx(1.02)
+    assert report["pair_finetune_metrics"]["world"]["stage15_gate_head_audit"]["gate_head_bias_norm"] == pytest.approx(0.001)
     assert report["pair_finetune_metrics"]["world"]["stage15_gate_head_audit"]["gate_softbin_loss_mean"] == pytest.approx(-2.20)
     assert report["pair_finetune_metrics"]["world"]["stage15_gate_head_audit"]["gate_resolution_loss_mean"] == pytest.approx(0.011)
     assert any("stage15_gate_head_scale" in item for item in report["pair_finetune_metrics"]["world"]["epoch_metrics"])

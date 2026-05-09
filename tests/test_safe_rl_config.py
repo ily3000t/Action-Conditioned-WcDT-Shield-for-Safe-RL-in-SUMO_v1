@@ -800,6 +800,34 @@ def test_stage2_stage1_gate_head_calibration_config_loads():
     assert config.world_model.pair_ft_early_stop_enabled is False
 
 
+def test_stage2_stage1_gate_dual_head_calibration_config_loads():
+    base_config = load_safe_rl_config("safe_rl/config/advanced/stage2_stage1_gate_head_calibration.yaml")
+    config = load_safe_rl_config("safe_rl/config/advanced/stage2_stage1_gate_dual_head_calibration.yaml")
+    assert config.world_model.pair_ft_gate_head_enabled is True
+    assert config.world_model.pair_ft_gate_head_scope == "stage1_probe"
+    assert config.world_model.pair_ft_gate_head_type == "dual_head_linear"
+    assert config.world_model.pair_ft_gate_head_train_scope == "pair_ft_only"
+    assert config.world_model.pair_ft_gate_eval_uses_gate_score is True
+    assert config.world_model.pair_ft_stage1_calibration_enabled is False
+    assert config.world_model.pair_ft_stage1_softbin_loss_weight == pytest.approx(0.0)
+    assert config.world_model.pair_ft_random_seed == base_config.world_model.pair_ft_random_seed
+    assert config.world_model.pair_ft_deterministic == base_config.world_model.pair_ft_deterministic
+    assert (
+        config.world_model.pair_ft_strict_deterministic_algorithms
+        == base_config.world_model.pair_ft_strict_deterministic_algorithms
+    )
+    assert config.world_model.pair_ft_save_healthy_candidates == base_config.world_model.pair_ft_save_healthy_candidates
+    assert config.world_model.pair_ft_max_healthy_candidates_to_keep == base_config.world_model.pair_ft_max_healthy_candidates_to_keep
+    assert config.world_model.pair_ft_early_stop_enabled is False
+    assert config.world_model.pair_ft_stage1_priority_mix_enabled == base_config.world_model.pair_ft_stage1_priority_mix_enabled
+    assert config.world_model.pair_ft_stage1_priority_mix_fraction == pytest.approx(
+        base_config.world_model.pair_ft_stage1_priority_mix_fraction
+    )
+    assert config.world_model.pair_ft_stage1_resolution_loss_weight == pytest.approx(
+        base_config.world_model.pair_ft_stage1_resolution_loss_weight
+    )
+
+
 def test_stage1_probe_recovery_config_loads():
     default_config = load_safe_rl_config("safe_rl/config/default_safe_rl.yaml")
     config = load_safe_rl_config("safe_rl/config/advanced/stage1_probe_recovery.yaml")

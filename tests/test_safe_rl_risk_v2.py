@@ -1609,6 +1609,94 @@ def test_world_stage15_gate_head_param_binding_and_grad_norms():
     assert total_grad_norm > 0.0
 
 
+def test_world_stage15_dual_head_param_binding_and_grad_norms():
+    from safe_rl.models.world_model import WorldModelTrainer
+
+    trainer = WorldModelTrainer(
+        config=WorldModelConfig(
+            hidden_dim=64,
+            future_steps=2,
+            multimodal=2,
+            pair_ft_gate_head_enabled=True,
+            pair_ft_gate_head_scope="stage1_probe",
+            pair_ft_gate_head_type="dual_head_linear",
+            pair_ft_gate_head_train_scope="pair_ft_only",
+        ),
+        history_steps=2,
+        device="cpu",
+    )
+    gate_items = trainer._stage15_gate_head_param_items()
+    assert [name for name, _ in gate_items] == [
+        "pair_ft_stage1_gate_head_linear.weight",
+        "pair_ft_stage1_gate_head_linear.bias",
+    ]
+    optimizer = torch.optim.Adam(
+        [parameter for parameter in trainer.model.parameters() if parameter.requires_grad],
+        lr=trainer.config.learning_rate,
+    )
+    assert trainer._stage15_gate_head_param_in_optimizer(gate_items, optimizer) is True
+    optimizer.zero_grad()
+    fake_loss = sum((parameter ** 2).sum() for _, parameter in gate_items)
+    fake_loss.backward()
+    scale_grad_norm, bias_grad_norm, total_grad_norm = trainer._stage15_gate_head_grad_norms(gate_items)
+    assert scale_grad_norm > 0.0
+    assert bias_grad_norm > 0.0
+    assert total_grad_norm > 0.0
+    weight_norm, bias_norm = trainer._stage15_gate_head_weight_bias_norms()
+    assert weight_norm > 0.0
+    assert bias_norm > 0.0
+
+
+def test_world_stage15_dual_head_uses_gate_outputs_without_affine_fallback():
+    from safe_rl.models.world_model import WorldModelTrainer
+
+    trainer = WorldModelTrainer(
+        config=WorldModelConfig(
+            hidden_dim=64,
+            future_steps=2,
+            multimodal=2,
+            pair_ft_stage1_resolution_mode="fixed",
+            pair_ft_stage1_resolution_min_score_gap=0.20,
+            pair_ft_stage1_resolution_apply_trusted_only=True,
+            pair_ft_gate_head_enabled=True,
+            pair_ft_gate_head_scope="stage1_probe",
+            pair_ft_gate_head_type="dual_head_linear",
+            pair_ft_gate_head_train_scope="pair_ft_only",
+        ),
+        history_steps=2,
+        device="cpu",
+        seed=7,
+    )
+    pair = RiskPairSample(
+        history_scene=_history_scene()[:2],
+        action_a=4,
+        action_b=3,
+        preferred_action=4,
+        source="stage1_probe_same_state",
+        weight=1.0,
+        meta={"target_risk_a": 0.30, "target_risk_b": 0.80, "target_gap": 0.50, "trusted_for_spread": True},
+    )
+
+    def _should_not_be_called(score_logit, score=None):
+        raise AssertionError("dual_head_linear should consume gate outputs directly without affine fallback")
+
+    trainer._apply_stage1_pair_ft_gate_head = _should_not_be_called  # type: ignore[method-assign]
+    _, _, resolution_gate, diag_gate = trainer._compute_pair_losses(
+        [pair],
+        enable_resolution=False,
+        enable_stage1_resolution=True,
+        enable_stage1_gate_head=True,
+        enable_stage1_softbin=True,
+        stage1_softbin_num_bins=16,
+        stage1_softbin_temperature=80.0,
+        stage1_softbin_apply_trusted_only=True,
+    )
+    assert float(resolution_gate.detach().item()) >= 0.0
+    assert diag_gate["stage15_gate_head_enabled"] is True
+    assert float(diag_gate.get("stage15_gate_head_weight_norm", 0.0) or 0.0) > 0.0
+    assert float(diag_gate.get("stage15_gate_head_bias_norm", 0.0) or 0.0) > 0.0
+
+
 def test_world_stage15_gate_head_routes_stage1_resolution_without_affecting_ranking():
     from safe_rl.models.world_model import WorldModelTrainer
 
