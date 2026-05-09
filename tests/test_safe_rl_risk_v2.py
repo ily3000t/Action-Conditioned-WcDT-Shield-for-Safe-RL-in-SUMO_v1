@@ -1572,6 +1572,43 @@ def test_world_stage15_gate_head_scale_positive_and_monotonic():
     assert torch.all(diffs > 0).item() is True
 
 
+def test_world_stage15_gate_head_param_binding_and_grad_norms():
+    from safe_rl.models.world_model import WorldModelTrainer
+
+    trainer = WorldModelTrainer(
+        config=WorldModelConfig(
+            hidden_dim=64,
+            future_steps=2,
+            multimodal=2,
+            pair_ft_gate_head_enabled=True,
+            pair_ft_gate_head_scope="stage1_probe",
+            pair_ft_gate_head_type="monotonic_affine",
+            pair_ft_gate_head_scale_init=1.0,
+            pair_ft_gate_head_bias_init=0.0,
+            pair_ft_gate_head_train_scope="pair_ft_only",
+        ),
+        history_steps=2,
+        device="cpu",
+    )
+    gate_items = trainer._stage15_gate_head_param_items()
+    assert [name for name, _ in gate_items] == [
+        "pair_ft_stage1_gate_head_raw_scale",
+        "pair_ft_stage1_gate_head_bias",
+    ]
+    optimizer = torch.optim.Adam(
+        [parameter for parameter in trainer.model.parameters() if parameter.requires_grad],
+        lr=trainer.config.learning_rate,
+    )
+    assert trainer._stage15_gate_head_param_in_optimizer(gate_items, optimizer) is True
+    optimizer.zero_grad()
+    fake_loss = sum((parameter ** 2).sum() for _, parameter in gate_items)
+    fake_loss.backward()
+    scale_grad_norm, bias_grad_norm, total_grad_norm = trainer._stage15_gate_head_grad_norms(gate_items)
+    assert scale_grad_norm > 0.0
+    assert bias_grad_norm > 0.0
+    assert total_grad_norm > 0.0
+
+
 def test_world_stage15_gate_head_routes_stage1_resolution_without_affecting_ranking():
     from safe_rl.models.world_model import WorldModelTrainer
 
@@ -1631,6 +1668,77 @@ def test_world_stage15_gate_head_routes_stage1_resolution_without_affecting_rank
     assert float(resolution_gate.detach().item()) > float(resolution_raw.detach().item())
     assert diag_gate["stage15_gate_head_enabled"] is True
     assert diag_raw["stage15_gate_head_enabled"] is False
+
+
+def test_world_stage15_gate_head_zero_active_paths_keep_gate_losses_zero():
+    from safe_rl.models.world_model import WorldModelTrainer
+
+    trainer = WorldModelTrainer(
+        config=WorldModelConfig(
+            hidden_dim=64,
+            future_steps=2,
+            multimodal=2,
+            pair_ft_stage1_resolution_mode="fixed",
+            pair_ft_stage1_resolution_min_score_gap=0.02,
+            pair_ft_stage1_resolution_apply_trusted_only=True,
+        ),
+        history_steps=2,
+        device="cpu",
+    )
+    stage4_pair = RiskPairSample(
+        history_scene=_history_scene()[:2],
+        action_a=4,
+        action_b=3,
+        preferred_action=4,
+        source="stage4_candidate_rank",
+        weight=1.0,
+        meta={"target_risk_a": 0.30, "target_risk_b": 0.80, "target_gap": 0.50, "trusted_for_spread": True},
+    )
+    _, _, _, diag = trainer._compute_pair_losses(
+        [stage4_pair],
+        enable_stage1_resolution=True,
+        enable_stage1_gate_head=True,
+        enable_stage1_softbin=True,
+        stage1_softbin_num_bins=16,
+        stage1_softbin_temperature=80.0,
+        stage1_softbin_apply_trusted_only=True,
+    )
+    assert diag["stage1_probe_active_pair_count"] == 0
+    assert diag["stage1_probe_resolution_loss"] == pytest.approx(0.0, abs=1e-9)
+    assert diag["stage1_softbin_active_count"] == 0
+    assert diag["stage1_softbin_loss"] == pytest.approx(0.0, abs=1e-9)
+
+
+def test_world_stage15_gate_head_audit_zeros_when_gate_disabled():
+    from safe_rl.models.world_model import WorldModelTrainer
+
+    trainer = WorldModelTrainer(
+        config=WorldModelConfig(
+            hidden_dim=64,
+            future_steps=2,
+            multimodal=2,
+            pair_finetune=False,
+            pair_ft_gate_head_enabled=False,
+        ),
+        history_steps=2,
+        device="cpu",
+    )
+    trainer.fine_tune_pairs(
+        pair_samples=[],
+        replay_samples=[],
+        stage5_pair_samples=[],
+        stage1_probe_pair_samples=[],
+        stage4_pair_samples=[],
+    )
+    audit = dict((trainer.last_pair_ft_report or {}).get("stage15_gate_head_audit", {}))
+    assert audit.get("gate_head_param_in_optimizer") is False
+    assert audit.get("gate_head_param_names") == []
+    assert int(audit.get("gate_head_param_count", 0) or 0) == 0
+    assert float(audit.get("gate_head_scale_grad_norm", 0.0) or 0.0) == pytest.approx(0.0, abs=1e-9)
+    assert float(audit.get("gate_head_bias_grad_norm", 0.0) or 0.0) == pytest.approx(0.0, abs=1e-9)
+    assert float(audit.get("gate_head_total_grad_norm", 0.0) or 0.0) == pytest.approx(0.0, abs=1e-9)
+    assert float(audit.get("gate_softbin_loss_mean", 0.0) or 0.0) == pytest.approx(0.0, abs=1e-9)
+    assert float(audit.get("gate_resolution_loss_mean", 0.0) or 0.0) == pytest.approx(0.0, abs=1e-9)
 
 
 def test_world_stage1_softbin_entropy_tracks_distribution_dispersion():

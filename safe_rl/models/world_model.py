@@ -883,6 +883,29 @@ class WorldModelTrainer:
             'stage5_pair_seen_counts': {pair_id: 0 for pair_id in stage5_pair_ids},
             'stage5_cap_reached_pairs': 0,
         }
+        stage15_gate_head_param_items: List[Tuple[str, nn.Parameter]] = (
+            self._stage15_gate_head_param_items() if stage15_gate_head_enabled else []
+        )
+        stage15_gate_head_param_names: List[str] = [
+            str(name) for name, _ in stage15_gate_head_param_items
+        ]
+        stage15_gate_head_param_count = int(len(stage15_gate_head_param_names))
+        if stage15_gate_head_enabled:
+            stage15_gate_scale_before_tensor, stage15_gate_bias_before_tensor = self._stage1_pair_ft_gate_head_scale_bias()
+            stage15_gate_head_scale_before = float(stage15_gate_scale_before_tensor.detach().item())
+            stage15_gate_head_bias_before = float(stage15_gate_bias_before_tensor.detach().item())
+        else:
+            stage15_gate_head_scale_before = 1.0
+            stage15_gate_head_bias_before = 0.0
+        stage15_gate_head_param_in_optimizer = False
+        stage15_gate_head_scale_grad_norm_total = 0.0
+        stage15_gate_head_bias_grad_norm_total = 0.0
+        stage15_gate_head_total_grad_norm_total = 0.0
+        stage15_gate_head_grad_norm_steps = 0
+        stage15_gate_softbin_loss_total = 0.0
+        stage15_gate_softbin_loss_steps = 0
+        stage15_gate_resolution_loss_total = 0.0
+        stage15_gate_resolution_loss_steps = 0
 
         if not self.config.pair_finetune or len(pair_samples) == 0:
             print(
@@ -952,6 +975,24 @@ class WorldModelTrainer:
                         if stage15_gate_head_enabled
                         else 0.0
                     ),
+                },
+                'stage15_gate_head_audit': {
+                    'gate_head_param_in_optimizer': False,
+                    'gate_head_param_names': list(stage15_gate_head_param_names) if stage15_gate_head_enabled else [],
+                    'gate_head_param_count': int(stage15_gate_head_param_count) if stage15_gate_head_enabled else 0,
+                    'gate_head_scale_before_after': {
+                        'before': float(stage15_gate_head_scale_before if stage15_gate_head_enabled else 0.0),
+                        'after': float(stage15_gate_head_scale_before if stage15_gate_head_enabled else 0.0),
+                    },
+                    'gate_head_bias_before_after': {
+                        'before': float(stage15_gate_head_bias_before if stage15_gate_head_enabled else 0.0),
+                        'after': float(stage15_gate_head_bias_before if stage15_gate_head_enabled else 0.0),
+                    },
+                    'gate_head_scale_grad_norm': 0.0,
+                    'gate_head_bias_grad_norm': 0.0,
+                    'gate_head_total_grad_norm': 0.0,
+                    'gate_softbin_loss_mean': 0.0,
+                    'gate_resolution_loss_mean': 0.0,
                 },
                 'stage1_probe_metrics_raw': dict(before_stage1_probe_metrics_raw),
                 'stage1_probe_metrics_gate': dict(before_stage1_probe_metrics_gate),
@@ -1204,6 +1245,16 @@ class WorldModelTrainer:
         stage4_iter = iter(stage4_loader) if stage4_loader is not None else None
         grad_state, frozen_modules, trainable_modules = self._apply_pair_ft_freeze_policy()
         optimizer = torch.optim.Adam([parameter for parameter in self.model.parameters() if parameter.requires_grad], lr=self.config.learning_rate)
+        if stage15_gate_head_enabled:
+            stage15_gate_head_param_in_optimizer = self._stage15_gate_head_param_in_optimizer(
+                stage15_gate_head_param_items,
+                optimizer,
+            )
+            if not stage15_gate_head_param_in_optimizer:
+                print(
+                    "[WorldModel PairFT][Warning] stage15 gate head parameters are not in optimizer param groups: "
+                    f"{stage15_gate_head_param_names}"
+                )
 
         self.model.train()
         global_step = 0
@@ -1328,6 +1379,14 @@ class WorldModelTrainer:
             epoch_stage1_softbin_loss_total = 0.0
             epoch_stage1_softbin_entropy_total = 0.0
             epoch_stage1_softbin_effective_bins_total = 0.0
+            epoch_stage15_gate_head_scale_grad_norm_total = 0.0
+            epoch_stage15_gate_head_bias_grad_norm_total = 0.0
+            epoch_stage15_gate_head_total_grad_norm_total = 0.0
+            epoch_stage15_gate_head_grad_norm_steps = 0
+            epoch_stage15_gate_softbin_loss_total = 0.0
+            epoch_stage15_gate_softbin_loss_steps = 0
+            epoch_stage15_gate_resolution_loss_total = 0.0
+            epoch_stage15_gate_resolution_loss_steps = 0
             step_targets = [1]
             if stage5_pair_samples and stage5_batch_size > 0:
                 step_targets.append(int(np.ceil(len(stage5_pair_samples) / float(stage5_batch_size))))
@@ -1663,6 +1722,31 @@ class WorldModelTrainer:
 
                 optimizer.zero_grad()
                 total_loss.backward()
+                if stage15_gate_head_enabled:
+                    (
+                        stage15_gate_scale_grad_norm,
+                        stage15_gate_bias_grad_norm,
+                        stage15_gate_total_grad_norm,
+                    ) = self._stage15_gate_head_grad_norms(stage15_gate_head_param_items)
+                    epoch_stage15_gate_head_scale_grad_norm_total += float(stage15_gate_scale_grad_norm)
+                    epoch_stage15_gate_head_bias_grad_norm_total += float(stage15_gate_bias_grad_norm)
+                    epoch_stage15_gate_head_total_grad_norm_total += float(stage15_gate_total_grad_norm)
+                    epoch_stage15_gate_head_grad_norm_steps += 1
+                    stage15_gate_head_scale_grad_norm_total += float(stage15_gate_scale_grad_norm)
+                    stage15_gate_head_bias_grad_norm_total += float(stage15_gate_bias_grad_norm)
+                    stage15_gate_head_total_grad_norm_total += float(stage15_gate_total_grad_norm)
+                    stage15_gate_head_grad_norm_steps += 1
+
+                    gate_softbin_loss_value = float(stage1_softbin_loss.detach().item())
+                    gate_resolution_loss_value = float(stage1_resolution_loss.detach().item())
+                    epoch_stage15_gate_softbin_loss_total += gate_softbin_loss_value
+                    epoch_stage15_gate_softbin_loss_steps += 1
+                    epoch_stage15_gate_resolution_loss_total += gate_resolution_loss_value
+                    epoch_stage15_gate_resolution_loss_steps += 1
+                    stage15_gate_softbin_loss_total += gate_softbin_loss_value
+                    stage15_gate_softbin_loss_steps += 1
+                    stage15_gate_resolution_loss_total += gate_resolution_loss_value
+                    stage15_gate_resolution_loss_steps += 1
                 optimizer.step()
 
                 step_total = float(total_loss.item())
@@ -1806,6 +1890,42 @@ class WorldModelTrainer:
                         else 0.0
                     ),
                     'stage1_softbin_active_count': float(epoch_stage1_softbin_active_count),
+                    'stage15_gate_head_scale': float(
+                        self._stage1_pair_ft_gate_head_scale_bias()[0].detach().item()
+                    ) if stage15_gate_head_enabled else 0.0,
+                    'stage15_gate_head_bias': float(
+                        self._stage1_pair_ft_gate_head_scale_bias()[1].detach().item()
+                    ) if stage15_gate_head_enabled else 0.0,
+                    'stage15_gate_head_scale_grad_norm': (
+                        float(epoch_stage15_gate_head_scale_grad_norm_total)
+                        / float(epoch_stage15_gate_head_grad_norm_steps)
+                        if (stage15_gate_head_enabled and epoch_stage15_gate_head_grad_norm_steps > 0)
+                        else 0.0
+                    ),
+                    'stage15_gate_head_bias_grad_norm': (
+                        float(epoch_stage15_gate_head_bias_grad_norm_total)
+                        / float(epoch_stage15_gate_head_grad_norm_steps)
+                        if (stage15_gate_head_enabled and epoch_stage15_gate_head_grad_norm_steps > 0)
+                        else 0.0
+                    ),
+                    'stage15_gate_head_total_grad_norm': (
+                        float(epoch_stage15_gate_head_total_grad_norm_total)
+                        / float(epoch_stage15_gate_head_grad_norm_steps)
+                        if (stage15_gate_head_enabled and epoch_stage15_gate_head_grad_norm_steps > 0)
+                        else 0.0
+                    ),
+                    'stage15_gate_softbin_loss': (
+                        float(epoch_stage15_gate_softbin_loss_total)
+                        / float(epoch_stage15_gate_softbin_loss_steps)
+                        if (stage15_gate_head_enabled and epoch_stage15_gate_softbin_loss_steps > 0)
+                        else 0.0
+                    ),
+                    'stage15_gate_resolution_loss': (
+                        float(epoch_stage15_gate_resolution_loss_total)
+                        / float(epoch_stage15_gate_resolution_loss_steps)
+                        if (stage15_gate_head_enabled and epoch_stage15_gate_resolution_loss_steps > 0)
+                        else 0.0
+                    ),
                     'phase_b_stage1_anticollapse_loss': (
                         float(epoch_phaseb_stage1_anticollapse_loss_total)
                         / float(epoch_phaseb_stage1_anticollapse_steps)
@@ -2359,6 +2479,17 @@ class WorldModelTrainer:
                             if epoch_stage1_probe_active_pairs > 0
                             else 0.0
                         ),
+                        'stage15_gate_head_scale': float(
+                            self._stage1_pair_ft_gate_head_scale_bias()[0].detach().item()
+                        ) if stage15_gate_head_enabled else 0.0,
+                        'stage15_gate_head_bias': float(
+                            self._stage1_pair_ft_gate_head_scale_bias()[1].detach().item()
+                        ) if stage15_gate_head_enabled else 0.0,
+                        'stage15_gate_head_scale_grad_norm': 0.0,
+                        'stage15_gate_head_bias_grad_norm': 0.0,
+                        'stage15_gate_head_total_grad_norm': 0.0,
+                        'stage15_gate_softbin_loss': 0.0,
+                        'stage15_gate_resolution_loss': 0.0,
                         'phase_b_stage1_anticollapse_loss': 0.0,
                         'phase_b_stage1_score_range_q10': 0.0,
                         'phase_b_stage1_score_range_q90': 0.0,
@@ -2604,6 +2735,50 @@ class WorldModelTrainer:
                 'eval_uses_gate_score': bool(stage15_gate_head_eval_uses_gate_score),
                 'scale': float(stage15_gate_head_scale),
                 'bias': float(stage15_gate_head_bias),
+            },
+            'stage15_gate_head_audit': {
+                'gate_head_param_in_optimizer': bool(stage15_gate_head_param_in_optimizer)
+                if stage15_gate_head_enabled
+                else False,
+                'gate_head_param_names': list(stage15_gate_head_param_names)
+                if stage15_gate_head_enabled
+                else [],
+                'gate_head_param_count': int(stage15_gate_head_param_count)
+                if stage15_gate_head_enabled
+                else 0,
+                'gate_head_scale_before_after': {
+                    'before': float(stage15_gate_head_scale_before if stage15_gate_head_enabled else 0.0),
+                    'after': float(stage15_gate_head_scale if stage15_gate_head_enabled else 0.0),
+                },
+                'gate_head_bias_before_after': {
+                    'before': float(stage15_gate_head_bias_before if stage15_gate_head_enabled else 0.0),
+                    'after': float(stage15_gate_head_bias if stage15_gate_head_enabled else 0.0),
+                },
+                'gate_head_scale_grad_norm': (
+                    float(stage15_gate_head_scale_grad_norm_total) / float(stage15_gate_head_grad_norm_steps)
+                    if (stage15_gate_head_enabled and stage15_gate_head_grad_norm_steps > 0)
+                    else 0.0
+                ),
+                'gate_head_bias_grad_norm': (
+                    float(stage15_gate_head_bias_grad_norm_total) / float(stage15_gate_head_grad_norm_steps)
+                    if (stage15_gate_head_enabled and stage15_gate_head_grad_norm_steps > 0)
+                    else 0.0
+                ),
+                'gate_head_total_grad_norm': (
+                    float(stage15_gate_head_total_grad_norm_total) / float(stage15_gate_head_grad_norm_steps)
+                    if (stage15_gate_head_enabled and stage15_gate_head_grad_norm_steps > 0)
+                    else 0.0
+                ),
+                'gate_softbin_loss_mean': (
+                    float(stage15_gate_softbin_loss_total) / float(stage15_gate_softbin_loss_steps)
+                    if (stage15_gate_head_enabled and stage15_gate_softbin_loss_steps > 0)
+                    else 0.0
+                ),
+                'gate_resolution_loss_mean': (
+                    float(stage15_gate_resolution_loss_total) / float(stage15_gate_resolution_loss_steps)
+                    if (stage15_gate_head_enabled and stage15_gate_resolution_loss_steps > 0)
+                    else 0.0
+                ),
             },
             'stage1_probe_metrics_raw': dict(after_stage1_probe_metrics_raw),
             'stage1_probe_metrics_gate': dict(after_stage1_probe_metrics_gate),
@@ -3977,6 +4152,45 @@ class WorldModelTrainer:
         if score is None:
             return calibrated_logit, calibrated_score
         return calibrated_logit, calibrated_score
+
+    def _stage15_gate_head_param_items(self) -> List[Tuple[str, nn.Parameter]]:
+        items: List[Tuple[str, nn.Parameter]] = []
+        raw_scale = getattr(self.model, 'pair_ft_stage1_gate_head_raw_scale', None)
+        bias = getattr(self.model, 'pair_ft_stage1_gate_head_bias', None)
+        if isinstance(raw_scale, nn.Parameter):
+            items.append(('pair_ft_stage1_gate_head_raw_scale', raw_scale))
+        if isinstance(bias, nn.Parameter):
+            items.append(('pair_ft_stage1_gate_head_bias', bias))
+        return items
+
+    @staticmethod
+    def _stage15_gate_head_param_in_optimizer(
+        gate_head_param_items: Sequence[Tuple[str, nn.Parameter]],
+        optimizer: torch.optim.Optimizer,
+    ) -> bool:
+        if not gate_head_param_items:
+            return False
+        optimizer_param_ids = {
+            id(parameter)
+            for group in optimizer.param_groups
+            for parameter in list(group.get('params', []) or [])
+        }
+        return all(id(parameter) in optimizer_param_ids for _, parameter in gate_head_param_items)
+
+    @staticmethod
+    def _stage15_gate_head_grad_norms(
+        gate_head_param_items: Sequence[Tuple[str, nn.Parameter]],
+    ) -> Tuple[float, float, float]:
+        grad_norm_map = {
+            name: float(parameter.grad.detach().norm().item())
+            if parameter.grad is not None
+            else 0.0
+            for name, parameter in gate_head_param_items
+        }
+        scale_grad_norm = float(grad_norm_map.get('pair_ft_stage1_gate_head_raw_scale', 0.0))
+        bias_grad_norm = float(grad_norm_map.get('pair_ft_stage1_gate_head_bias', 0.0))
+        total_grad_norm = float(math.sqrt(sum(value * value for value in grad_norm_map.values())))
+        return scale_grad_norm, bias_grad_norm, total_grad_norm
 
     def _compute_softbin_stats_from_scores(
         self,
