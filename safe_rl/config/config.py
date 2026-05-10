@@ -145,6 +145,8 @@ class WorldModelConfig:
     pair_ft_gate_head_enabled: bool = False
     pair_ft_gate_head_scope: str = "stage1_probe"
     pair_ft_gate_head_type: str = "monotonic_affine"
+    pair_ft_gate_head_hidden_dim: int = 128
+    pair_ft_gate_head_dropout: float = 0.0
     pair_ft_gate_head_scale_init: float = 1.0
     pair_ft_gate_head_bias_init: float = 0.0
     pair_ft_gate_head_train_scope: str = "pair_ft_only"
@@ -154,6 +156,8 @@ class WorldModelConfig:
     pair_ft_gate_softbin_temperature: float = 80.0
     pair_ft_gate_softbin_apply_trusted_only: bool = True
     pair_ft_gate_resolution_loss_weight: float = 0.02
+    pair_ft_gate_ranking_anchor_weight: float = 0.0
+    pair_ft_gate_ranking_anchor_apply_trusted_only: bool = True
     pair_ft_random_seed: int = 42
     pair_ft_deterministic: bool = True
     pair_ft_strict_deterministic_algorithms: bool = False

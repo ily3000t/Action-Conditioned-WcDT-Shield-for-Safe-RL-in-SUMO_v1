@@ -1,0 +1,47 @@
+# Stage15C dual-head MLP calibration:
+# keep deterministic/full-epoch recovery baseline and add gate ranking anchor.
+
+world_model:
+  pair_ft_stage1_priority_mix_enabled: true
+  pair_ft_stage1_priority_mix_fraction: 0.35
+  pair_ft_stage1_priority_trusted_only: true
+  pair_ft_stage1_tail_epochs: 0
+  pair_ft_stage1_resolution_loss_weight: 0.02
+  pair_ft_stage1_resolution_mode: "adaptive"
+  pair_ft_stage1_resolution_min_score_gap: 0.018
+  pair_ft_stage1_resolution_alpha: 0.2
+  pair_ft_stage1_resolution_max_score_gap: 0.05
+  pair_ft_selection_accuracy_tie_epsilon: 0.01
+  pair_ft_stage1_phaseb_anticollapse_weight: 0.0
+
+  # Disable Stage14 legacy stage1 calibration/softbin route.
+  pair_ft_stage1_calibration_enabled: false
+  pair_ft_stage1_softbin_loss_weight: 0.0
+
+  # Enable Stage15C true dual-head MLP gate route + ranking anchor.
+  pair_ft_gate_head_enabled: true
+  pair_ft_gate_head_scope: "stage1_probe"
+  pair_ft_gate_head_type: "dual_head_mlp"
+  pair_ft_gate_head_hidden_dim: 128
+  pair_ft_gate_head_dropout: 0.0
+  pair_ft_gate_head_scale_init: 1.0
+  pair_ft_gate_head_bias_init: 0.0
+  pair_ft_gate_head_train_scope: "pair_ft_only"
+  pair_ft_gate_eval_uses_gate_score: true
+  pair_ft_gate_softbin_loss_weight: 0.006
+  pair_ft_gate_softbin_num_bins: 16
+  pair_ft_gate_softbin_temperature: 80.0
+  pair_ft_gate_softbin_apply_trusted_only: true
+  pair_ft_gate_resolution_loss_weight: 0.02
+  pair_ft_gate_ranking_anchor_weight: 0.02
+  pair_ft_gate_ranking_anchor_apply_trusted_only: true
+
+  pair_ft_random_seed: 42
+  pair_ft_deterministic: true
+  pair_ft_strict_deterministic_algorithms: false
+  pair_ft_save_healthy_candidates: true
+  pair_ft_max_healthy_candidates_to_keep: 3
+  pair_ft_early_stop_enabled: false
+
+tensorboard:
+  run_name: "stage2_stage1_gate_dual_head_mlp_calibration"

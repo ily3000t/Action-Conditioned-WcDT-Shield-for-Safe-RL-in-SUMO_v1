@@ -1647,6 +1647,47 @@ def test_world_stage15_dual_head_param_binding_and_grad_norms():
     assert bias_norm > 0.0
 
 
+def test_world_stage15_dual_head_mlp_param_binding_and_grad_norms():
+    from safe_rl.models.world_model import WorldModelTrainer
+
+    trainer = WorldModelTrainer(
+        config=WorldModelConfig(
+            hidden_dim=64,
+            future_steps=2,
+            multimodal=2,
+            pair_ft_gate_head_enabled=True,
+            pair_ft_gate_head_scope="stage1_probe",
+            pair_ft_gate_head_type="dual_head_mlp",
+            pair_ft_gate_head_hidden_dim=32,
+            pair_ft_gate_head_dropout=0.0,
+            pair_ft_gate_head_train_scope="pair_ft_only",
+        ),
+        history_steps=2,
+        device="cpu",
+    )
+    gate_items = trainer._stage15_gate_head_param_items()
+    gate_item_names = [name for name, _ in gate_items]
+    assert "pair_ft_stage1_gate_head_mlp.0.weight" in gate_item_names
+    assert "pair_ft_stage1_gate_head_mlp.0.bias" in gate_item_names
+    assert "pair_ft_stage1_gate_head_mlp.2.weight" in gate_item_names
+    assert "pair_ft_stage1_gate_head_mlp.2.bias" in gate_item_names
+    optimizer = torch.optim.Adam(
+        [parameter for parameter in trainer.model.parameters() if parameter.requires_grad],
+        lr=trainer.config.learning_rate,
+    )
+    assert trainer._stage15_gate_head_param_in_optimizer(gate_items, optimizer) is True
+    optimizer.zero_grad()
+    fake_loss = sum((parameter ** 2).sum() for _, parameter in gate_items)
+    fake_loss.backward()
+    scale_grad_norm, bias_grad_norm, total_grad_norm = trainer._stage15_gate_head_grad_norms(gate_items)
+    assert scale_grad_norm > 0.0
+    assert bias_grad_norm > 0.0
+    assert total_grad_norm > 0.0
+    weight_norm, bias_norm = trainer._stage15_gate_head_weight_bias_norms()
+    assert weight_norm > 0.0
+    assert bias_norm > 0.0
+
+
 def test_world_stage15_dual_head_uses_gate_outputs_without_affine_fallback():
     from safe_rl.models.world_model import WorldModelTrainer
 
@@ -1695,6 +1736,44 @@ def test_world_stage15_dual_head_uses_gate_outputs_without_affine_fallback():
     assert diag_gate["stage15_gate_head_enabled"] is True
     assert float(diag_gate.get("stage15_gate_head_weight_norm", 0.0) or 0.0) > 0.0
     assert float(diag_gate.get("stage15_gate_head_bias_norm", 0.0) or 0.0) > 0.0
+
+
+def test_world_stage15_gate_ranking_anchor_loss_activates_on_stage1_probe():
+    from safe_rl.models.world_model import WorldModelTrainer
+
+    trainer = WorldModelTrainer(
+        config=WorldModelConfig(
+            hidden_dim=64,
+            future_steps=2,
+            multimodal=2,
+            pair_ft_gate_head_enabled=True,
+            pair_ft_gate_head_scope="stage1_probe",
+            pair_ft_gate_head_type="dual_head_linear",
+            pair_ft_gate_head_train_scope="pair_ft_only",
+        ),
+        history_steps=2,
+        device="cpu",
+        seed=7,
+    )
+    pair = RiskPairSample(
+        history_scene=_history_scene()[:2],
+        action_a=4,
+        action_b=3,
+        preferred_action=4,
+        source="stage1_probe_same_state",
+        weight=1.0,
+        meta={"target_risk_a": 0.30, "target_risk_b": 0.80, "target_gap": 0.50, "trusted_for_spread": True},
+    )
+    _, _, _, diag = trainer._compute_pair_losses(
+        [pair],
+        enable_stage1_gate_head=True,
+        enable_stage1_gate_ranking_anchor=True,
+        stage1_gate_ranking_anchor_apply_trusted_only=True,
+    )
+    assert diag["stage15_gate_ranking_anchor_enabled"] is True
+    assert diag["stage15_gate_ranking_anchor_apply_trusted_only"] is True
+    assert int(diag["stage15_gate_ranking_anchor_active_pair_count"]) == 1
+    assert float(diag["stage15_gate_ranking_anchor_loss"]) >= 0.0
 
 
 def test_world_stage15_gate_head_routes_stage1_resolution_without_affecting_ranking():
@@ -1786,6 +1865,8 @@ def test_world_stage15_gate_head_zero_active_paths_keep_gate_losses_zero():
         [stage4_pair],
         enable_stage1_resolution=True,
         enable_stage1_gate_head=True,
+        enable_stage1_gate_ranking_anchor=True,
+        stage1_gate_ranking_anchor_apply_trusted_only=True,
         enable_stage1_softbin=True,
         stage1_softbin_num_bins=16,
         stage1_softbin_temperature=80.0,
@@ -1795,6 +1876,8 @@ def test_world_stage15_gate_head_zero_active_paths_keep_gate_losses_zero():
     assert diag["stage1_probe_resolution_loss"] == pytest.approx(0.0, abs=1e-9)
     assert diag["stage1_softbin_active_count"] == 0
     assert diag["stage1_softbin_loss"] == pytest.approx(0.0, abs=1e-9)
+    assert diag["stage15_gate_ranking_anchor_active_pair_count"] == 0
+    assert diag["stage15_gate_ranking_anchor_loss"] == pytest.approx(0.0, abs=1e-9)
 
 
 def test_world_stage15_gate_head_audit_zeros_when_gate_disabled():
@@ -1827,6 +1910,7 @@ def test_world_stage15_gate_head_audit_zeros_when_gate_disabled():
     assert float(audit.get("gate_head_total_grad_norm", 0.0) or 0.0) == pytest.approx(0.0, abs=1e-9)
     assert float(audit.get("gate_softbin_loss_mean", 0.0) or 0.0) == pytest.approx(0.0, abs=1e-9)
     assert float(audit.get("gate_resolution_loss_mean", 0.0) or 0.0) == pytest.approx(0.0, abs=1e-9)
+    assert float(audit.get("gate_ranking_anchor_loss_mean", 0.0) or 0.0) == pytest.approx(0.0, abs=1e-9)
 
 
 def test_world_stage1_softbin_entropy_tracks_distribution_dispersion():

@@ -105,6 +105,8 @@ world_model:
   pair_ft_gate_head_enabled: false
   pair_ft_gate_head_scope: "stage1_probe"
   pair_ft_gate_head_type: "monotonic_affine"
+  pair_ft_gate_head_hidden_dim: 128
+  pair_ft_gate_head_dropout: 0.0
   pair_ft_gate_head_scale_init: 1.0
   pair_ft_gate_head_bias_init: 0.0
   pair_ft_gate_head_train_scope: "pair_ft_only"
@@ -114,6 +116,8 @@ world_model:
   pair_ft_gate_softbin_temperature: 80.0
   pair_ft_gate_softbin_apply_trusted_only: true
   pair_ft_gate_resolution_loss_weight: 0.02
+  pair_ft_gate_ranking_anchor_weight: 0.0
+  pair_ft_gate_ranking_anchor_apply_trusted_only: true
   pair_ft_random_seed: 42
   pair_ft_deterministic: true
   pair_ft_strict_deterministic_algorithms: false
