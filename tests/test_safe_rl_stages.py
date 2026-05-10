@@ -2512,6 +2512,21 @@ def test_stage2_report_includes_pair_finetune_metadata(monkeypatch):
                     "gate_resolution_loss_mean": 0.011,
                     "gate_ranking_anchor_loss_mean": 0.012,
                 },
+                "stage15_gate_histogram": {
+                    "enabled": True,
+                    "bin_count": 16,
+                    "score_mode": "expectation",
+                    "target_source": "target_risk",
+                    "apply_trusted_only": True,
+                    "bin_ce_loss_mean": 0.021,
+                    "bin_occupancy_loss_mean": -2.05,
+                    "bin_entropy": 2.05,
+                    "bin_effective_count": 7.77,
+                    "bin_nonempty_count": 8.0,
+                    "missing_target_risk_count": 0,
+                    "missing_target_risk_count_mean": 0.0,
+                    "bin_occupancy": [0.0625] * 16,
+                },
                 "stage1_probe_metrics_raw": {
                     "pair_ranking_accuracy": 0.67,
                     "same_state_score_gap": 0.015,
@@ -2926,6 +2941,19 @@ def test_stage2_report_includes_pair_finetune_metadata(monkeypatch):
     assert report["pair_finetune_metrics"]["world"]["stage15_gate_head_audit"]["gate_softbin_loss_mean"] == pytest.approx(-2.20)
     assert report["pair_finetune_metrics"]["world"]["stage15_gate_head_audit"]["gate_resolution_loss_mean"] == pytest.approx(0.011)
     assert report["pair_finetune_metrics"]["world"]["stage15_gate_head_audit"]["gate_ranking_anchor_loss_mean"] == pytest.approx(0.012)
+    assert report["pair_finetune_metrics"]["world"]["stage15_gate_histogram"]["enabled"] is True
+    assert report["pair_finetune_metrics"]["world"]["stage15_gate_histogram"]["bin_count"] == 16
+    assert report["pair_finetune_metrics"]["world"]["stage15_gate_histogram"]["score_mode"] == "expectation"
+    assert report["pair_finetune_metrics"]["world"]["stage15_gate_histogram"]["target_source"] == "target_risk"
+    assert report["pair_finetune_metrics"]["world"]["stage15_gate_histogram"]["apply_trusted_only"] is True
+    assert report["pair_finetune_metrics"]["world"]["stage15_gate_histogram"]["bin_ce_loss_mean"] == pytest.approx(0.021)
+    assert report["pair_finetune_metrics"]["world"]["stage15_gate_histogram"]["bin_occupancy_loss_mean"] == pytest.approx(-2.05)
+    assert report["pair_finetune_metrics"]["world"]["stage15_gate_histogram"]["bin_entropy"] == pytest.approx(2.05)
+    assert report["pair_finetune_metrics"]["world"]["stage15_gate_histogram"]["bin_effective_count"] == pytest.approx(7.77)
+    assert report["pair_finetune_metrics"]["world"]["stage15_gate_histogram"]["bin_nonempty_count"] == pytest.approx(8.0)
+    assert report["pair_finetune_metrics"]["world"]["stage15_gate_histogram"]["missing_target_risk_count"] == 0
+    assert report["pair_finetune_metrics"]["world"]["stage15_gate_histogram"]["missing_target_risk_count_mean"] == pytest.approx(0.0)
+    assert len(report["pair_finetune_metrics"]["world"]["stage15_gate_histogram"]["bin_occupancy"]) == 16
     assert any("stage15_gate_head_scale" in item for item in report["pair_finetune_metrics"]["world"]["epoch_metrics"])
     assert any("stage15_gate_head_bias" in item for item in report["pair_finetune_metrics"]["world"]["epoch_metrics"])
     assert any("stage15_gate_head_scale_grad_norm" in item for item in report["pair_finetune_metrics"]["world"]["epoch_metrics"])

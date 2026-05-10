@@ -291,6 +291,18 @@ class ActionConditionedWorldModel(nn.Module):
             gate_head_layers.append(nn.Dropout(p=gate_head_dropout))
         gate_head_layers.append(nn.Linear(gate_head_hidden_dim, 1))
         self.pair_ft_stage1_gate_head_mlp = nn.Sequential(*gate_head_layers)
+        histogram_feature_layers: List[nn.Module] = [
+            nn.Linear(256, gate_head_hidden_dim),
+            nn.ReLU(inplace=True),
+        ]
+        if gate_head_dropout > 0.0:
+            histogram_feature_layers.append(nn.Dropout(p=gate_head_dropout))
+        self.pair_ft_stage1_gate_head_hist_feature = nn.Sequential(*histogram_feature_layers)
+        self.pair_ft_stage1_gate_head_hist_logit = nn.Linear(gate_head_hidden_dim, 1)
+        gate_bin_count = max(2, int(getattr(config, 'pair_ft_gate_bin_count', 16) or 16))
+        self.pair_ft_stage1_gate_head_hist_bin = nn.Linear(gate_head_hidden_dim, gate_bin_count)
+        bin_centers = (torch.arange(gate_bin_count, dtype=torch.float32) + 0.5) / float(gate_bin_count)
+        self.register_buffer('pair_ft_stage1_gate_hist_bin_centers', bin_centers)
         self.uncertainty_head = nn.Sequential(
             nn.Linear(256, 64),
             nn.ReLU(inplace=True),
@@ -345,11 +357,32 @@ class ActionConditionedWorldModel(nn.Module):
             getattr(self.config, 'pair_ft_gate_head_type', 'monotonic_affine')
             or 'monotonic_affine'
         ).strip().lower()
+        gate_score_bin = None
+        gate_bin_logits = None
+        gate_bin_probs = None
+        gate_score_continuous = None
         if gate_head_type == 'dual_head_mlp':
             gate_score_logit = self.pair_ft_stage1_gate_head_mlp(pooled).squeeze(-1)
+            gate_score = torch.sigmoid(gate_score_logit)
+            gate_score_bin = gate_score
+            gate_score_continuous = gate_score
+        elif gate_head_type == 'dual_head_histogram':
+            gate_feature = self.pair_ft_stage1_gate_head_hist_feature(pooled)
+            gate_score_logit = self.pair_ft_stage1_gate_head_hist_logit(gate_feature).squeeze(-1)
+            gate_bin_logits = self.pair_ft_stage1_gate_head_hist_bin(gate_feature)
+            gate_bin_probs = torch.softmax(gate_bin_logits, dim=-1)
+            bin_centers = self.pair_ft_stage1_gate_hist_bin_centers.to(
+                dtype=gate_bin_probs.dtype,
+                device=gate_bin_probs.device,
+            )
+            gate_score_bin = torch.sum(gate_bin_probs * bin_centers.unsqueeze(0), dim=-1)
+            gate_score_continuous = torch.sigmoid(gate_score_logit)
+            gate_score = gate_score_bin
         else:
             gate_score_logit = self.pair_ft_stage1_gate_head_linear(pooled).squeeze(-1)
-        gate_score = torch.sigmoid(gate_score_logit)
+            gate_score = torch.sigmoid(gate_score_logit)
+            gate_score_bin = gate_score
+            gate_score_continuous = gate_score
         uncertainty = self.uncertainty_head(pooled).squeeze(-1)
         return {
             'traj': traj,
@@ -359,6 +392,10 @@ class ActionConditionedWorldModel(nn.Module):
             'risk_score': risk_score,
             'gate_score_logit': gate_score_logit,
             'gate_score': gate_score,
+            'gate_score_continuous': gate_score_continuous,
+            'gate_score_bin': gate_score_bin,
+            'gate_bin_logits': gate_bin_logits,
+            'gate_bin_probs': gate_bin_probs,
             'uncertainty': uncertainty,
         }
 
@@ -649,6 +686,37 @@ class WorldModelTrainer:
         stage15_gate_ranking_anchor_apply_trusted_only = bool(
             getattr(self.config, 'pair_ft_gate_ranking_anchor_apply_trusted_only', True)
         )
+        stage15_gate_bin_count_effective = max(
+            2,
+            int(getattr(self.config, 'pair_ft_gate_bin_count', 16) or 16),
+        )
+        stage15_gate_bin_score_mode = str(
+            getattr(self.config, 'pair_ft_gate_bin_score_mode', 'expectation')
+            or 'expectation'
+        ).strip().lower()
+        if stage15_gate_bin_score_mode not in {'expectation'}:
+            stage15_gate_bin_score_mode = 'expectation'
+        stage15_gate_bin_target_source = str(
+            getattr(self.config, 'pair_ft_gate_bin_target_source', 'target_risk')
+            or 'target_risk'
+        ).strip().lower()
+        if stage15_gate_bin_target_source not in {'target_risk'}:
+            stage15_gate_bin_target_source = 'target_risk'
+        stage15_gate_bin_apply_trusted_only = bool(
+            getattr(self.config, 'pair_ft_gate_bin_apply_trusted_only', True)
+        )
+        stage15_gate_bin_ce_weight_effective = float(
+            getattr(self.config, 'pair_ft_gate_bin_ce_loss_weight', 0.0) or 0.0
+        )
+        stage15_gate_bin_occupancy_weight_effective = float(
+            getattr(self.config, 'pair_ft_gate_bin_occupancy_loss_weight', 0.0) or 0.0
+        )
+        stage15_gate_histogram_enabled = bool(
+            stage15_gate_head_enabled and stage15_gate_head_type == 'dual_head_histogram'
+        )
+        if not stage15_gate_histogram_enabled:
+            stage15_gate_bin_ce_weight_effective = 0.0
+            stage15_gate_bin_occupancy_weight_effective = 0.0
 
         stage1_resolution_loss_weight_raw = float(
             getattr(self.config, 'pair_ft_stage1_resolution_loss_weight', 0.0) or 0.0
@@ -915,6 +983,15 @@ class WorldModelTrainer:
             'stage15_gate_ranking_anchor_apply_trusted_only': bool(
                 stage15_gate_ranking_anchor_apply_trusted_only
             ),
+            'stage15_gate_bin_count_effective': int(stage15_gate_bin_count_effective),
+            'stage15_gate_bin_score_mode': str(stage15_gate_bin_score_mode),
+            'stage15_gate_bin_target_source': str(stage15_gate_bin_target_source),
+            'stage15_gate_bin_apply_trusted_only': bool(stage15_gate_bin_apply_trusted_only),
+            'stage15_gate_histogram_enabled': bool(stage15_gate_histogram_enabled),
+            'stage15_gate_bin_ce_loss_weight_effective': float(stage15_gate_bin_ce_weight_effective),
+            'stage15_gate_bin_occupancy_loss_weight_effective': float(
+                stage15_gate_bin_occupancy_weight_effective
+            ),
             'stage1_tail_sampling_mode_effective': str(stage1_tail_sampling_mode),
             'stage1_tail_ranking_loss_weight_effective': float(tail_ranking_loss_weight_effective),
             'stage1_tail_resolution_loss_weight_effective': float(tail_resolution_loss_weight_effective),
@@ -963,6 +1040,20 @@ class WorldModelTrainer:
         stage15_gate_resolution_loss_steps = 0
         stage15_gate_ranking_anchor_loss_total = 0.0
         stage15_gate_ranking_anchor_loss_steps = 0
+        stage15_gate_bin_ce_loss_total = 0.0
+        stage15_gate_bin_ce_loss_steps = 0
+        stage15_gate_bin_occupancy_loss_total = 0.0
+        stage15_gate_bin_occupancy_loss_steps = 0
+        stage15_gate_bin_entropy_total = 0.0
+        stage15_gate_bin_entropy_steps = 0
+        stage15_gate_bin_effective_count_total = 0.0
+        stage15_gate_bin_effective_count_steps = 0
+        stage15_gate_bin_nonempty_count_total = 0.0
+        stage15_gate_bin_nonempty_count_steps = 0
+        stage15_gate_bin_missing_target_risk_count_total = 0
+        stage15_gate_bin_missing_target_risk_count_steps = 0
+        stage15_gate_bin_occupancy_sum: Optional[np.ndarray] = None
+        stage15_gate_bin_occupancy_sum_steps = 0
 
         if not self.config.pair_finetune or len(pair_samples) == 0:
             print(
@@ -1028,6 +1119,8 @@ class WorldModelTrainer:
                     'ranking_anchor_apply_trusted_only': bool(
                         stage15_gate_ranking_anchor_apply_trusted_only
                     ),
+                    'bin_count': int(stage15_gate_bin_count_effective),
+                    'bin_score_mode': str(stage15_gate_bin_score_mode),
                     'scale': float(
                         self._stage1_pair_ft_gate_head_scale_bias()[0].detach().item()
                         if (stage15_gate_head_enabled and stage15_gate_head_type == 'monotonic_affine')
@@ -1062,6 +1155,23 @@ class WorldModelTrainer:
                     'gate_softbin_loss_mean': 0.0,
                     'gate_resolution_loss_mean': 0.0,
                     'gate_ranking_anchor_loss_mean': 0.0,
+                    'gate_bin_ce_loss_mean': 0.0,
+                    'gate_bin_occupancy_loss_mean': 0.0,
+                },
+                'stage15_gate_histogram': {
+                    'enabled': bool(stage15_gate_histogram_enabled),
+                    'bin_count': int(stage15_gate_bin_count_effective),
+                    'score_mode': str(stage15_gate_bin_score_mode),
+                    'target_source': str(stage15_gate_bin_target_source),
+                    'apply_trusted_only': bool(stage15_gate_bin_apply_trusted_only),
+                    'bin_ce_loss_mean': 0.0,
+                    'bin_occupancy_loss_mean': 0.0,
+                    'bin_entropy': 0.0,
+                    'bin_effective_count': 0.0,
+                    'bin_nonempty_count': 0.0,
+                    'missing_target_risk_count': 0,
+                    'missing_target_risk_count_mean': 0.0,
+                    'bin_occupancy': [0.0] * int(stage15_gate_bin_count_effective),
                 },
                 'stage1_probe_metrics_raw': dict(before_stage1_probe_metrics_raw),
                 'stage1_probe_metrics_gate': dict(before_stage1_probe_metrics_gate),
@@ -1312,6 +1422,13 @@ class WorldModelTrainer:
             f"[WorldModel PairFT] stage15_gate_ranking_anchor: weight={stage15_gate_ranking_anchor_weight_effective:.4f}, "
             f"trusted_only={bool(stage15_gate_ranking_anchor_apply_trusted_only)}"
         )
+        print(
+            f"[WorldModel PairFT] stage15_gate_histogram: enabled={bool(stage15_gate_histogram_enabled)}, "
+            f"bins={int(stage15_gate_bin_count_effective)}, mode={stage15_gate_bin_score_mode}, "
+            f"target_source={stage15_gate_bin_target_source}, trusted_only={bool(stage15_gate_bin_apply_trusted_only)}, "
+            f"ce_weight={stage15_gate_bin_ce_weight_effective:.4f}, "
+            f"occupancy_weight={stage15_gate_bin_occupancy_weight_effective:.4f}"
+        )
         replay_loader = self._build_replay_loader(replay_samples)
         replay_iter = iter(replay_loader) if replay_loader is not None else None
         stage4_loader = self._build_pair_loader(stage4_pair_samples)
@@ -1413,6 +1530,20 @@ class WorldModelTrainer:
         stage1_softbin_loss_total = 0.0
         stage1_softbin_entropy_total = 0.0
         stage1_softbin_effective_bins_total = 0.0
+        stage15_gate_bin_ce_loss_total_global = 0.0
+        stage15_gate_bin_ce_loss_steps_global = 0
+        stage15_gate_bin_occupancy_loss_total_global = 0.0
+        stage15_gate_bin_occupancy_loss_steps_global = 0
+        stage15_gate_bin_entropy_total_global = 0.0
+        stage15_gate_bin_entropy_steps_global = 0
+        stage15_gate_bin_effective_count_total_global = 0.0
+        stage15_gate_bin_effective_count_steps_global = 0
+        stage15_gate_bin_nonempty_count_total_global = 0.0
+        stage15_gate_bin_nonempty_count_steps_global = 0
+        stage15_gate_bin_missing_target_risk_count_total_global = 0
+        stage15_gate_bin_missing_target_risk_count_steps_global = 0
+        stage15_gate_bin_occupancy_sum_global: Optional[np.ndarray] = None
+        stage15_gate_bin_occupancy_sum_steps_global = 0
 
         for epoch_idx in range(total_epochs):
             world_pair_ft_epochs_executed = int(epoch_idx + 1)
@@ -1462,6 +1593,20 @@ class WorldModelTrainer:
             epoch_stage15_gate_resolution_loss_steps = 0
             epoch_stage15_gate_ranking_anchor_loss_total = 0.0
             epoch_stage15_gate_ranking_anchor_loss_steps = 0
+            epoch_stage15_gate_bin_ce_loss_total = 0.0
+            epoch_stage15_gate_bin_ce_loss_steps = 0
+            epoch_stage15_gate_bin_occupancy_loss_total = 0.0
+            epoch_stage15_gate_bin_occupancy_loss_steps = 0
+            epoch_stage15_gate_bin_entropy_total = 0.0
+            epoch_stage15_gate_bin_entropy_steps = 0
+            epoch_stage15_gate_bin_effective_count_total = 0.0
+            epoch_stage15_gate_bin_effective_count_steps = 0
+            epoch_stage15_gate_bin_nonempty_count_total = 0.0
+            epoch_stage15_gate_bin_nonempty_count_steps = 0
+            epoch_stage15_gate_bin_missing_target_risk_count_total = 0
+            epoch_stage15_gate_bin_missing_target_risk_count_steps = 0
+            epoch_stage15_gate_bin_occupancy_sum: Optional[np.ndarray] = None
+            epoch_stage15_gate_bin_occupancy_sum_steps = 0
             step_targets = [1]
             if stage5_pair_samples and stage5_batch_size > 0:
                 step_targets.append(int(np.ceil(len(stage5_pair_samples) / float(stage5_batch_size))))
@@ -1477,6 +1622,8 @@ class WorldModelTrainer:
                 phaseb_stage1_anticollapse_terms: List[torch.Tensor] = []
                 stage1_softbin_terms: List[torch.Tensor] = []
                 stage1_gate_ranking_anchor_terms: List[torch.Tensor] = []
+                stage1_gate_bin_ce_terms: List[torch.Tensor] = []
+                stage1_gate_bin_occupancy_terms: List[torch.Tensor] = []
 
                 if stage5_pair_samples:
                     stage5_batch, selected_pair_ids = self._sample_stage5_batch_with_cap(
@@ -1525,6 +1672,11 @@ class WorldModelTrainer:
                             stage1_softbin_num_bins=stage1_softbin_num_bins_effective,
                             stage1_softbin_temperature=stage1_softbin_temperature_effective,
                             stage1_softbin_apply_trusted_only=stage1_softbin_apply_trusted_only_effective,
+                            enable_stage1_gate_histogram=stage15_gate_histogram_enabled,
+                            stage1_gate_bin_count=stage15_gate_bin_count_effective,
+                            stage1_gate_bin_score_mode=stage15_gate_bin_score_mode,
+                            stage1_gate_bin_apply_trusted_only=stage15_gate_bin_apply_trusted_only,
+                            stage1_gate_bin_target_source=stage15_gate_bin_target_source,
                             enable_stage1_tail_anticollapse=enable_phaseb_stage1_anticollapse_on_standard,
                             stage1_tail_score_range_floor=phaseb_stage1_anticollapse_score_range_floor,
                             stage1_tail_score_range_quantile_low=phaseb_stage1_anticollapse_q_low,
@@ -1589,6 +1741,69 @@ class WorldModelTrainer:
                                 self._zero_loss(),
                             )
                             stage1_gate_ranking_anchor_terms.append(stage1_gate_anchor_loss_tensor)
+                        stage1_gate_bin_active = int(stage1_diag.get('stage15_gate_bin_active_count', 0))
+                        if stage15_gate_histogram_enabled and stage1_gate_bin_active > 0:
+                            stage1_gate_bin_ce_loss_tensor = stage1_diag.get(
+                                'stage15_gate_bin_ce_loss_tensor',
+                                self._zero_loss(),
+                            )
+                            stage1_gate_bin_occupancy_loss_tensor = stage1_diag.get(
+                                'stage15_gate_bin_occupancy_loss_tensor',
+                                self._zero_loss(),
+                            )
+                            stage1_gate_bin_ce_terms.append(stage1_gate_bin_ce_loss_tensor)
+                            stage1_gate_bin_occupancy_terms.append(stage1_gate_bin_occupancy_loss_tensor)
+                            gate_bin_ce_loss_value = float(stage1_gate_bin_ce_loss_tensor.detach().item())
+                            gate_bin_occupancy_loss_value = float(stage1_gate_bin_occupancy_loss_tensor.detach().item())
+                            gate_bin_entropy_value = float(stage1_diag.get('stage15_gate_bin_entropy', 0.0))
+                            gate_bin_effective_count_value = float(
+                                stage1_diag.get('stage15_gate_bin_effective_count', 0.0)
+                            )
+                            gate_bin_nonempty_count_value = float(
+                                stage1_diag.get('stage15_gate_bin_nonempty_count', 0.0)
+                            )
+                            gate_bin_missing_target_risk_count_value = int(
+                                stage1_diag.get('stage15_gate_bin_missing_target_risk_count', 0)
+                            )
+                            epoch_stage15_gate_bin_ce_loss_total += gate_bin_ce_loss_value
+                            epoch_stage15_gate_bin_ce_loss_steps += 1
+                            epoch_stage15_gate_bin_occupancy_loss_total += gate_bin_occupancy_loss_value
+                            epoch_stage15_gate_bin_occupancy_loss_steps += 1
+                            epoch_stage15_gate_bin_entropy_total += gate_bin_entropy_value
+                            epoch_stage15_gate_bin_entropy_steps += 1
+                            epoch_stage15_gate_bin_effective_count_total += gate_bin_effective_count_value
+                            epoch_stage15_gate_bin_effective_count_steps += 1
+                            epoch_stage15_gate_bin_nonempty_count_total += gate_bin_nonempty_count_value
+                            epoch_stage15_gate_bin_nonempty_count_steps += 1
+                            epoch_stage15_gate_bin_missing_target_risk_count_total += gate_bin_missing_target_risk_count_value
+                            epoch_stage15_gate_bin_missing_target_risk_count_steps += 1
+                            stage15_gate_bin_ce_loss_total_global += gate_bin_ce_loss_value
+                            stage15_gate_bin_ce_loss_steps_global += 1
+                            stage15_gate_bin_occupancy_loss_total_global += gate_bin_occupancy_loss_value
+                            stage15_gate_bin_occupancy_loss_steps_global += 1
+                            stage15_gate_bin_entropy_total_global += gate_bin_entropy_value
+                            stage15_gate_bin_entropy_steps_global += 1
+                            stage15_gate_bin_effective_count_total_global += gate_bin_effective_count_value
+                            stage15_gate_bin_effective_count_steps_global += 1
+                            stage15_gate_bin_nonempty_count_total_global += gate_bin_nonempty_count_value
+                            stage15_gate_bin_nonempty_count_steps_global += 1
+                            stage15_gate_bin_missing_target_risk_count_total_global += gate_bin_missing_target_risk_count_value
+                            stage15_gate_bin_missing_target_risk_count_steps_global += 1
+                            gate_bin_occupancy_values = list(
+                                stage1_diag.get('stage15_gate_bin_occupancy', []) or []
+                            )
+                            if gate_bin_occupancy_values:
+                                occupancy_arr = np.asarray(gate_bin_occupancy_values, dtype=np.float64)
+                                if epoch_stage15_gate_bin_occupancy_sum is None:
+                                    epoch_stage15_gate_bin_occupancy_sum = np.zeros_like(occupancy_arr)
+                                if stage15_gate_bin_occupancy_sum_global is None:
+                                    stage15_gate_bin_occupancy_sum_global = np.zeros_like(occupancy_arr)
+                                if epoch_stage15_gate_bin_occupancy_sum.shape == occupancy_arr.shape:
+                                    epoch_stage15_gate_bin_occupancy_sum += occupancy_arr
+                                    epoch_stage15_gate_bin_occupancy_sum_steps += 1
+                                if stage15_gate_bin_occupancy_sum_global.shape == occupancy_arr.shape:
+                                    stage15_gate_bin_occupancy_sum_global += occupancy_arr
+                                    stage15_gate_bin_occupancy_sum_steps_global += 1
                         if enable_phaseb_stage1_anticollapse_on_standard:
                             stage1_active_count = int(stage1_diag.get('stage1_probe_active_pair_count', 0))
                             if stage1_active_count > 0:
@@ -1668,6 +1883,11 @@ class WorldModelTrainer:
                             stage1_softbin_num_bins=stage1_softbin_num_bins_effective,
                             stage1_softbin_temperature=stage1_softbin_temperature_effective,
                             stage1_softbin_apply_trusted_only=stage1_softbin_apply_trusted_only_effective,
+                            enable_stage1_gate_histogram=stage15_gate_histogram_enabled,
+                            stage1_gate_bin_count=stage15_gate_bin_count_effective,
+                            stage1_gate_bin_score_mode=stage15_gate_bin_score_mode,
+                            stage1_gate_bin_apply_trusted_only=stage15_gate_bin_apply_trusted_only,
+                            stage1_gate_bin_target_source=stage15_gate_bin_target_source,
                             enable_stage1_tail_anticollapse=enable_phaseb_stage1_anticollapse_on_priority,
                             stage1_tail_score_range_floor=phaseb_stage1_anticollapse_score_range_floor,
                             stage1_tail_score_range_quantile_low=phaseb_stage1_anticollapse_q_low,
@@ -1736,6 +1956,89 @@ class WorldModelTrainer:
                                 self._zero_loss(),
                             )
                             stage1_gate_ranking_anchor_terms.append(stage1_priority_gate_anchor_loss_tensor)
+                        stage1_priority_gate_bin_active = int(
+                            stage1_priority_diag.get('stage15_gate_bin_active_count', 0)
+                        )
+                        if stage15_gate_histogram_enabled and stage1_priority_gate_bin_active > 0:
+                            stage1_priority_gate_bin_ce_loss_tensor = stage1_priority_diag.get(
+                                'stage15_gate_bin_ce_loss_tensor',
+                                self._zero_loss(),
+                            )
+                            stage1_priority_gate_bin_occupancy_loss_tensor = stage1_priority_diag.get(
+                                'stage15_gate_bin_occupancy_loss_tensor',
+                                self._zero_loss(),
+                            )
+                            stage1_gate_bin_ce_terms.append(stage1_priority_gate_bin_ce_loss_tensor)
+                            stage1_gate_bin_occupancy_terms.append(
+                                stage1_priority_gate_bin_occupancy_loss_tensor
+                            )
+                            priority_gate_bin_ce_loss_value = float(
+                                stage1_priority_gate_bin_ce_loss_tensor.detach().item()
+                            )
+                            priority_gate_bin_occupancy_loss_value = float(
+                                stage1_priority_gate_bin_occupancy_loss_tensor.detach().item()
+                            )
+                            priority_gate_bin_entropy_value = float(
+                                stage1_priority_diag.get('stage15_gate_bin_entropy', 0.0)
+                            )
+                            priority_gate_bin_effective_count_value = float(
+                                stage1_priority_diag.get('stage15_gate_bin_effective_count', 0.0)
+                            )
+                            priority_gate_bin_nonempty_count_value = float(
+                                stage1_priority_diag.get('stage15_gate_bin_nonempty_count', 0.0)
+                            )
+                            priority_gate_bin_missing_target_risk_count_value = int(
+                                stage1_priority_diag.get('stage15_gate_bin_missing_target_risk_count', 0)
+                            )
+                            epoch_stage15_gate_bin_ce_loss_total += priority_gate_bin_ce_loss_value
+                            epoch_stage15_gate_bin_ce_loss_steps += 1
+                            epoch_stage15_gate_bin_occupancy_loss_total += priority_gate_bin_occupancy_loss_value
+                            epoch_stage15_gate_bin_occupancy_loss_steps += 1
+                            epoch_stage15_gate_bin_entropy_total += priority_gate_bin_entropy_value
+                            epoch_stage15_gate_bin_entropy_steps += 1
+                            epoch_stage15_gate_bin_effective_count_total += priority_gate_bin_effective_count_value
+                            epoch_stage15_gate_bin_effective_count_steps += 1
+                            epoch_stage15_gate_bin_nonempty_count_total += priority_gate_bin_nonempty_count_value
+                            epoch_stage15_gate_bin_nonempty_count_steps += 1
+                            epoch_stage15_gate_bin_missing_target_risk_count_total += (
+                                priority_gate_bin_missing_target_risk_count_value
+                            )
+                            epoch_stage15_gate_bin_missing_target_risk_count_steps += 1
+                            stage15_gate_bin_ce_loss_total_global += priority_gate_bin_ce_loss_value
+                            stage15_gate_bin_ce_loss_steps_global += 1
+                            stage15_gate_bin_occupancy_loss_total_global += (
+                                priority_gate_bin_occupancy_loss_value
+                            )
+                            stage15_gate_bin_occupancy_loss_steps_global += 1
+                            stage15_gate_bin_entropy_total_global += priority_gate_bin_entropy_value
+                            stage15_gate_bin_entropy_steps_global += 1
+                            stage15_gate_bin_effective_count_total_global += (
+                                priority_gate_bin_effective_count_value
+                            )
+                            stage15_gate_bin_effective_count_steps_global += 1
+                            stage15_gate_bin_nonempty_count_total_global += (
+                                priority_gate_bin_nonempty_count_value
+                            )
+                            stage15_gate_bin_nonempty_count_steps_global += 1
+                            stage15_gate_bin_missing_target_risk_count_total_global += (
+                                priority_gate_bin_missing_target_risk_count_value
+                            )
+                            stage15_gate_bin_missing_target_risk_count_steps_global += 1
+                            priority_gate_bin_occupancy_values = list(
+                                stage1_priority_diag.get('stage15_gate_bin_occupancy', []) or []
+                            )
+                            if priority_gate_bin_occupancy_values:
+                                occupancy_arr = np.asarray(priority_gate_bin_occupancy_values, dtype=np.float64)
+                                if epoch_stage15_gate_bin_occupancy_sum is None:
+                                    epoch_stage15_gate_bin_occupancy_sum = np.zeros_like(occupancy_arr)
+                                if stage15_gate_bin_occupancy_sum_global is None:
+                                    stage15_gate_bin_occupancy_sum_global = np.zeros_like(occupancy_arr)
+                                if epoch_stage15_gate_bin_occupancy_sum.shape == occupancy_arr.shape:
+                                    epoch_stage15_gate_bin_occupancy_sum += occupancy_arr
+                                    epoch_stage15_gate_bin_occupancy_sum_steps += 1
+                                if stage15_gate_bin_occupancy_sum_global.shape == occupancy_arr.shape:
+                                    stage15_gate_bin_occupancy_sum_global += occupancy_arr
+                                    stage15_gate_bin_occupancy_sum_steps_global += 1
                         if enable_phaseb_stage1_anticollapse_on_priority:
                             stage1_priority_active_count = int(
                                 stage1_priority_diag.get('stage1_probe_active_pair_count', 0)
@@ -1825,6 +2128,16 @@ class WorldModelTrainer:
                     if stage1_gate_ranking_anchor_terms
                     else self._zero_loss()
                 )
+                stage1_gate_bin_ce_loss = (
+                    torch.mean(torch.stack(stage1_gate_bin_ce_terms))
+                    if stage1_gate_bin_ce_terms
+                    else self._zero_loss()
+                )
+                stage1_gate_bin_occupancy_loss = (
+                    torch.mean(torch.stack(stage1_gate_bin_occupancy_terms))
+                    if stage1_gate_bin_occupancy_terms
+                    else self._zero_loss()
+                )
                 resolution_loss = stage4_resolution_loss + stage1_resolution_loss
                 pointwise_total, _, _, _, replay_iter = self._compute_replay_losses(replay_iter, replay_loader)
                 total_loss = (
@@ -1836,6 +2149,8 @@ class WorldModelTrainer:
                     + float(phaseb_stage1_anticollapse_weight_effective) * phaseb_stage1_anticollapse_loss
                     + float(stage1_softbin_loss_weight_effective) * stage1_softbin_loss
                     + float(stage15_gate_ranking_anchor_weight_effective) * stage1_gate_ranking_anchor_loss
+                    + float(stage15_gate_bin_ce_weight_effective) * stage1_gate_bin_ce_loss
+                    + float(stage15_gate_bin_occupancy_weight_effective) * stage1_gate_bin_occupancy_loss
                 )
 
                 optimizer.zero_grad()
@@ -1860,18 +2175,28 @@ class WorldModelTrainer:
                     gate_ranking_anchor_loss_value = float(
                         stage1_gate_ranking_anchor_loss.detach().item()
                     )
+                    gate_bin_ce_loss_value = float(stage1_gate_bin_ce_loss.detach().item())
+                    gate_bin_occupancy_loss_value = float(stage1_gate_bin_occupancy_loss.detach().item())
                     epoch_stage15_gate_softbin_loss_total += gate_softbin_loss_value
                     epoch_stage15_gate_softbin_loss_steps += 1
                     epoch_stage15_gate_resolution_loss_total += gate_resolution_loss_value
                     epoch_stage15_gate_resolution_loss_steps += 1
                     epoch_stage15_gate_ranking_anchor_loss_total += gate_ranking_anchor_loss_value
                     epoch_stage15_gate_ranking_anchor_loss_steps += 1
+                    epoch_stage15_gate_bin_ce_loss_total += gate_bin_ce_loss_value
+                    epoch_stage15_gate_bin_ce_loss_steps += 1
+                    epoch_stage15_gate_bin_occupancy_loss_total += gate_bin_occupancy_loss_value
+                    epoch_stage15_gate_bin_occupancy_loss_steps += 1
                     stage15_gate_softbin_loss_total += gate_softbin_loss_value
                     stage15_gate_softbin_loss_steps += 1
                     stage15_gate_resolution_loss_total += gate_resolution_loss_value
                     stage15_gate_resolution_loss_steps += 1
                     stage15_gate_ranking_anchor_loss_total += gate_ranking_anchor_loss_value
                     stage15_gate_ranking_anchor_loss_steps += 1
+                    stage15_gate_bin_ce_loss_total += gate_bin_ce_loss_value
+                    stage15_gate_bin_ce_loss_steps += 1
+                    stage15_gate_bin_occupancy_loss_total += gate_bin_occupancy_loss_value
+                    stage15_gate_bin_occupancy_loss_steps += 1
                 optimizer.step()
 
                 step_total = float(total_loss.item())
@@ -2055,6 +2380,36 @@ class WorldModelTrainer:
                         float(epoch_stage15_gate_ranking_anchor_loss_total)
                         / float(epoch_stage15_gate_ranking_anchor_loss_steps)
                         if (stage15_gate_head_enabled and epoch_stage15_gate_ranking_anchor_loss_steps > 0)
+                        else 0.0
+                    ),
+                    'stage15_gate_bin_ce_loss': (
+                        float(epoch_stage15_gate_bin_ce_loss_total)
+                        / float(epoch_stage15_gate_bin_ce_loss_steps)
+                        if (stage15_gate_head_enabled and epoch_stage15_gate_bin_ce_loss_steps > 0)
+                        else 0.0
+                    ),
+                    'stage15_gate_bin_occupancy_loss': (
+                        float(epoch_stage15_gate_bin_occupancy_loss_total)
+                        / float(epoch_stage15_gate_bin_occupancy_loss_steps)
+                        if (stage15_gate_head_enabled and epoch_stage15_gate_bin_occupancy_loss_steps > 0)
+                        else 0.0
+                    ),
+                    'stage15_gate_bin_entropy': (
+                        float(epoch_stage15_gate_bin_entropy_total)
+                        / float(epoch_stage15_gate_bin_entropy_steps)
+                        if (stage15_gate_head_enabled and epoch_stage15_gate_bin_entropy_steps > 0)
+                        else 0.0
+                    ),
+                    'stage15_gate_bin_effective_count': (
+                        float(epoch_stage15_gate_bin_effective_count_total)
+                        / float(epoch_stage15_gate_bin_effective_count_steps)
+                        if (stage15_gate_head_enabled and epoch_stage15_gate_bin_effective_count_steps > 0)
+                        else 0.0
+                    ),
+                    'stage15_gate_bin_nonempty_count': (
+                        float(epoch_stage15_gate_bin_nonempty_count_total)
+                        / float(epoch_stage15_gate_bin_nonempty_count_steps)
+                        if (stage15_gate_head_enabled and epoch_stage15_gate_bin_nonempty_count_steps > 0)
                         else 0.0
                     ),
                     'phase_b_stage1_anticollapse_loss': (
@@ -2628,6 +2983,11 @@ class WorldModelTrainer:
                         'stage15_gate_softbin_loss': 0.0,
                         'stage15_gate_resolution_loss': 0.0,
                         'stage15_gate_ranking_anchor_loss': 0.0,
+                        'stage15_gate_bin_ce_loss': 0.0,
+                        'stage15_gate_bin_occupancy_loss': 0.0,
+                        'stage15_gate_bin_entropy': 0.0,
+                        'stage15_gate_bin_effective_count': 0.0,
+                        'stage15_gate_bin_nonempty_count': 0.0,
                         'phase_b_stage1_anticollapse_loss': 0.0,
                         'phase_b_stage1_score_range_q10': 0.0,
                         'phase_b_stage1_score_range_q90': 0.0,
@@ -2847,6 +3207,19 @@ class WorldModelTrainer:
         if stage2_healthy_candidate_exists and stage2_healthy_candidate_best_world_model_path:
             stage2_healthy_candidate_exists = Path(stage2_healthy_candidate_best_world_model_path).exists()
         stage2_healthy_candidate_best_metrics = dict(best_healthy_candidate.get('metrics', {})) if best_healthy_candidate else {}
+        if stage15_gate_bin_occupancy_sum_global is not None and stage15_gate_bin_occupancy_sum_steps_global > 0:
+            stage15_gate_bin_occupancy_mean_array = (
+                stage15_gate_bin_occupancy_sum_global / float(stage15_gate_bin_occupancy_sum_steps_global)
+            )
+            stage15_gate_bin_occupancy_mean = (
+                stage15_gate_bin_occupancy_mean_array.astype(float).tolist()
+            )
+            stage15_gate_bin_nonempty_count_from_occupancy = int(
+                np.sum(stage15_gate_bin_occupancy_mean_array > 1e-6)
+            )
+        else:
+            stage15_gate_bin_occupancy_mean = [0.0] * int(stage15_gate_bin_count_effective)
+            stage15_gate_bin_nonempty_count_from_occupancy = 0
         self.last_pair_metrics = after_pair_metrics
         self.last_pair_ft_report = {
             'enabled': True,
@@ -2884,6 +3257,8 @@ class WorldModelTrainer:
                 'ranking_anchor_apply_trusted_only': bool(
                     stage15_gate_ranking_anchor_apply_trusted_only
                 ),
+                'bin_count': int(stage15_gate_bin_count_effective),
+                'bin_score_mode': str(stage15_gate_bin_score_mode),
                 'scale': float(stage15_gate_head_scale),
                 'bias': float(stage15_gate_head_bias),
                 'gate_head_weight_norm': float(stage15_gate_head_weight_norm),
@@ -2949,6 +3324,63 @@ class WorldModelTrainer:
                     if (stage15_gate_head_enabled and stage15_gate_ranking_anchor_loss_steps > 0)
                     else 0.0
                 ),
+                'gate_bin_ce_loss_mean': (
+                    float(stage15_gate_bin_ce_loss_total_global)
+                    / float(stage15_gate_bin_ce_loss_steps_global)
+                    if (stage15_gate_head_enabled and stage15_gate_bin_ce_loss_steps_global > 0)
+                    else 0.0
+                ),
+                'gate_bin_occupancy_loss_mean': (
+                    float(stage15_gate_bin_occupancy_loss_total_global)
+                    / float(stage15_gate_bin_occupancy_loss_steps_global)
+                    if (stage15_gate_head_enabled and stage15_gate_bin_occupancy_loss_steps_global > 0)
+                    else 0.0
+                ),
+            },
+            'stage15_gate_histogram': {
+                'enabled': bool(stage15_gate_histogram_enabled),
+                'bin_count': int(stage15_gate_bin_count_effective),
+                'score_mode': str(stage15_gate_bin_score_mode),
+                'target_source': str(stage15_gate_bin_target_source),
+                'apply_trusted_only': bool(stage15_gate_bin_apply_trusted_only),
+                'bin_ce_loss_mean': (
+                    float(stage15_gate_bin_ce_loss_total_global)
+                    / float(stage15_gate_bin_ce_loss_steps_global)
+                    if stage15_gate_bin_ce_loss_steps_global > 0
+                    else 0.0
+                ),
+                'bin_occupancy_loss_mean': (
+                    float(stage15_gate_bin_occupancy_loss_total_global)
+                    / float(stage15_gate_bin_occupancy_loss_steps_global)
+                    if stage15_gate_bin_occupancy_loss_steps_global > 0
+                    else 0.0
+                ),
+                'bin_entropy': (
+                    float(stage15_gate_bin_entropy_total_global)
+                    / float(stage15_gate_bin_entropy_steps_global)
+                    if stage15_gate_bin_entropy_steps_global > 0
+                    else 0.0
+                ),
+                'bin_effective_count': (
+                    float(stage15_gate_bin_effective_count_total_global)
+                    / float(stage15_gate_bin_effective_count_steps_global)
+                    if stage15_gate_bin_effective_count_steps_global > 0
+                    else 0.0
+                ),
+                'bin_nonempty_count': (
+                    float(stage15_gate_bin_nonempty_count_total_global)
+                    / float(stage15_gate_bin_nonempty_count_steps_global)
+                    if stage15_gate_bin_nonempty_count_steps_global > 0
+                    else float(stage15_gate_bin_nonempty_count_from_occupancy)
+                ),
+                'missing_target_risk_count': int(stage15_gate_bin_missing_target_risk_count_total_global),
+                'missing_target_risk_count_mean': (
+                    float(stage15_gate_bin_missing_target_risk_count_total_global)
+                    / float(stage15_gate_bin_missing_target_risk_count_steps_global)
+                    if stage15_gate_bin_missing_target_risk_count_steps_global > 0
+                    else 0.0
+                ),
+                'bin_occupancy': list(stage15_gate_bin_occupancy_mean),
             },
             'stage1_probe_metrics_raw': dict(after_stage1_probe_metrics_raw),
             'stage1_probe_metrics_gate': dict(after_stage1_probe_metrics_gate),
@@ -3718,7 +4150,7 @@ class WorldModelTrainer:
                     _, score_a = self._apply_stage1_pair_ft_calibration(score_a_logit, score_a)
                     _, score_b = self._apply_stage1_pair_ft_calibration(score_b_logit, score_b)
                 if use_stage1_gate_head_for_stage1_probe:
-                    if self._stage15_gate_head_type() in {'dual_head_linear', 'dual_head_mlp'}:
+                    if self._stage15_gate_head_type() in {'dual_head_linear', 'dual_head_mlp', 'dual_head_histogram'}:
                         gate_score_a = out_a.get('gate_score')
                         gate_score_b = out_b.get('gate_score')
                         if gate_score_a is None or gate_score_b is None:
@@ -3840,6 +4272,11 @@ class WorldModelTrainer:
         stage1_softbin_num_bins: int = 16,
         stage1_softbin_temperature: float = 80.0,
         stage1_softbin_apply_trusted_only: bool = True,
+        enable_stage1_gate_histogram: bool = False,
+        stage1_gate_bin_count: int = 16,
+        stage1_gate_bin_score_mode: str = "expectation",
+        stage1_gate_bin_apply_trusted_only: bool = True,
+        stage1_gate_bin_target_source: str = "target_risk",
         enable_stage1_tail_anticollapse: bool = False,
         stage1_tail_score_range_floor: float = 0.02,
         stage1_tail_score_range_quantile_low: float = 0.10,
@@ -3874,16 +4311,20 @@ class WorldModelTrainer:
         stage1_score_b = score_b
         stage1_gate_logit_a: Optional[torch.Tensor] = None
         stage1_gate_logit_b: Optional[torch.Tensor] = None
+        stage1_gate_bin_logits_a: Optional[torch.Tensor] = None
+        stage1_gate_bin_logits_b: Optional[torch.Tensor] = None
         stage1_gate_head_scale = 1.0
         stage1_gate_head_bias = 0.0
         stage1_gate_head_weight_norm = 0.0
         stage1_gate_head_bias_norm = 0.0
         if enable_stage1_gate_head:
-            if self._stage15_gate_head_type() in {'dual_head_linear', 'dual_head_mlp'}:
+            if self._stage15_gate_head_type() in {'dual_head_linear', 'dual_head_mlp', 'dual_head_histogram'}:
                 gate_score_logit_a = out_a.get('gate_score_logit')
                 gate_score_logit_b = out_b.get('gate_score_logit')
                 gate_score_a = out_a.get('gate_score')
                 gate_score_b = out_b.get('gate_score')
+                stage1_gate_bin_logits_a = out_a.get('gate_bin_logits')
+                stage1_gate_bin_logits_b = out_b.get('gate_bin_logits')
                 if gate_score_logit_a is None or gate_score_a is None:
                     gate_score_logit_a, gate_score_a = self._apply_stage1_pair_ft_gate_head(
                         score_a_logit,
@@ -4123,6 +4564,99 @@ class WorldModelTrainer:
             stage1_softbin_occupancy_values = (
                 stage1_softbin_occupancy.detach().cpu().numpy().astype(float).tolist()
             )
+        stage1_gate_bin_count_effective = max(2, int(stage1_gate_bin_count))
+        stage1_gate_bin_score_mode = str(stage1_gate_bin_score_mode or "expectation").strip().lower()
+        if stage1_gate_bin_score_mode not in {"expectation"}:
+            stage1_gate_bin_score_mode = "expectation"
+        stage1_gate_bin_target_source = str(stage1_gate_bin_target_source or "target_risk").strip().lower()
+        if stage1_gate_bin_target_source not in {"target_risk"}:
+            stage1_gate_bin_target_source = "target_risk"
+        stage1_gate_bin_mask = stage1_probe_mask
+        if stage1_gate_bin_apply_trusted_only:
+            stage1_gate_bin_mask = stage1_gate_bin_mask & trusted_for_spread
+        stage1_gate_bin_mask = (
+            stage1_gate_bin_mask.to(torch.float32)
+            if enable_stage1_gate_histogram
+            else torch.zeros_like(weight)
+        )
+        stage1_gate_bin_active_mask = stage1_gate_bin_mask > 0.0
+        stage1_gate_bin_active_count = int(torch.sum(stage1_gate_bin_mask).item())
+        stage1_gate_bin_ce_loss = self._zero_loss()
+        stage1_gate_bin_occupancy_loss = self._zero_loss()
+        stage1_gate_bin_entropy = self._zero_loss()
+        stage1_gate_bin_effective_count = torch.ones((), dtype=torch.float32, device=self.device)
+        stage1_gate_bin_nonempty_count = 0
+        stage1_gate_bin_missing_target_risk_count = 0
+        stage1_gate_bin_occupancy_values: List[float] = []
+        if (
+            enable_stage1_gate_histogram
+            and stage1_gate_bin_active_count > 0
+            and stage1_gate_bin_logits_a is not None
+            and stage1_gate_bin_logits_b is not None
+        ):
+            if stage1_gate_bin_target_source == "target_risk":
+                has_target_a = torch.tensor(
+                    [
+                        bool(dict(sample.meta or {}).get("target_risk_a", None) is not None)
+                        for sample in batch
+                    ],
+                    dtype=torch.bool,
+                    device=self.device,
+                )
+                has_target_b = torch.tensor(
+                    [
+                        bool(dict(sample.meta or {}).get("target_risk_b", None) is not None)
+                        for sample in batch
+                    ],
+                    dtype=torch.bool,
+                    device=self.device,
+                )
+            else:
+                has_target_a = torch.ones_like(stage1_gate_bin_active_mask, dtype=torch.bool)
+                has_target_b = torch.ones_like(stage1_gate_bin_active_mask, dtype=torch.bool)
+            active_a_mask = stage1_gate_bin_active_mask & has_target_a
+            active_b_mask = stage1_gate_bin_active_mask & has_target_b
+            missing_a_count = int(torch.sum((stage1_gate_bin_active_mask & (~has_target_a)).to(torch.int32)).item())
+            missing_b_count = int(torch.sum((stage1_gate_bin_active_mask & (~has_target_b)).to(torch.int32)).item())
+            stage1_gate_bin_missing_target_risk_count = int(missing_a_count + missing_b_count)
+
+            gate_bin_dim = int(stage1_gate_bin_logits_a.shape[-1])
+            if gate_bin_dim > 1 and int(stage1_gate_bin_logits_b.shape[-1]) == gate_bin_dim:
+                stage1_gate_bin_count_effective = int(gate_bin_dim)
+                target_a_clamped = torch.clamp(target_a, min=0.0, max=1.0 - 1e-8)
+                target_b_clamped = torch.clamp(target_b, min=0.0, max=1.0 - 1e-8)
+                labels_a = torch.floor(target_a_clamped * float(stage1_gate_bin_count_effective)).to(torch.long)
+                labels_b = torch.floor(target_b_clamped * float(stage1_gate_bin_count_effective)).to(torch.long)
+                labels_a = torch.clamp(labels_a, min=0, max=stage1_gate_bin_count_effective - 1)
+                labels_b = torch.clamp(labels_b, min=0, max=stage1_gate_bin_count_effective - 1)
+
+                logits_stack = torch.cat([stage1_gate_bin_logits_a, stage1_gate_bin_logits_b], dim=0)
+                labels_stack = torch.cat([labels_a, labels_b], dim=0)
+                active_mask_stack = torch.cat([active_a_mask, active_b_mask], dim=0)
+                active_weight_stack = active_mask_stack.to(torch.float32)
+                active_logits = logits_stack[active_mask_stack]
+                if active_logits.numel() > 0:
+                    ce_terms = torch.nn.functional.cross_entropy(
+                        logits_stack,
+                        labels_stack,
+                        reduction="none",
+                    )
+                    ce_denom = torch.clamp(torch.sum(active_weight_stack), min=1.0)
+                    stage1_gate_bin_ce_loss = torch.sum(ce_terms * active_weight_stack) / ce_denom
+
+                    active_probs = torch.softmax(active_logits, dim=-1)
+                    occupancy = torch.mean(active_probs, dim=0)
+                    stage1_gate_bin_entropy = -torch.sum(
+                        occupancy * torch.log(torch.clamp(occupancy, min=1e-8))
+                    )
+                    stage1_gate_bin_occupancy_loss = -stage1_gate_bin_entropy
+                    stage1_gate_bin_effective_count = torch.exp(stage1_gate_bin_entropy)
+                    stage1_gate_bin_nonempty_count = int(
+                        torch.sum((occupancy > 1e-6).to(torch.int32)).item()
+                    )
+                    stage1_gate_bin_occupancy_values = (
+                        occupancy.detach().cpu().numpy().astype(float).tolist()
+                    )
         stage1_tail_q10 = 0.0
         stage1_tail_q90 = 0.0
         stage1_tail_score_range = 0.0
@@ -4215,6 +4749,21 @@ class WorldModelTrainer:
             ),
             'stage15_gate_ranking_anchor_loss': float(gate_ranking_anchor_loss.detach().item()),
             'stage15_gate_ranking_anchor_loss_tensor': gate_ranking_anchor_loss,
+            'stage15_gate_bin_enabled': bool(enable_stage1_gate_histogram),
+            'stage15_gate_bin_count': int(stage1_gate_bin_count_effective),
+            'stage15_gate_bin_score_mode': str(stage1_gate_bin_score_mode),
+            'stage15_gate_bin_target_source': str(stage1_gate_bin_target_source),
+            'stage15_gate_bin_apply_trusted_only': bool(stage1_gate_bin_apply_trusted_only),
+            'stage15_gate_bin_active_count': int(stage1_gate_bin_active_count),
+            'stage15_gate_bin_missing_target_risk_count': int(stage1_gate_bin_missing_target_risk_count),
+            'stage15_gate_bin_ce_loss': float(stage1_gate_bin_ce_loss.detach().item()),
+            'stage15_gate_bin_occupancy_loss': float(stage1_gate_bin_occupancy_loss.detach().item()),
+            'stage15_gate_bin_entropy': float(stage1_gate_bin_entropy.detach().item()),
+            'stage15_gate_bin_effective_count': float(stage1_gate_bin_effective_count.detach().item()),
+            'stage15_gate_bin_nonempty_count': int(stage1_gate_bin_nonempty_count),
+            'stage15_gate_bin_occupancy': stage1_gate_bin_occupancy_values,
+            'stage15_gate_bin_ce_loss_tensor': stage1_gate_bin_ce_loss,
+            'stage15_gate_bin_occupancy_loss_tensor': stage1_gate_bin_occupancy_loss,
             'stage1_softbin_loss': float(stage1_softbin_loss.detach().item()),
             'stage1_softbin_entropy': float(stage1_softbin_entropy.detach().item()),
             'stage1_softbin_effective_bins': float(stage1_softbin_effective_bins.detach().item()),
@@ -4353,7 +4902,7 @@ class WorldModelTrainer:
             getattr(self.config, 'pair_ft_gate_head_type', 'monotonic_affine')
             or 'monotonic_affine'
         ).strip().lower()
-        if head_type not in {'monotonic_affine', 'dual_head_linear', 'dual_head_mlp'}:
+        if head_type not in {'monotonic_affine', 'dual_head_linear', 'dual_head_mlp', 'dual_head_histogram'}:
             return 'monotonic_affine'
         return head_type
 
@@ -4367,7 +4916,7 @@ class WorldModelTrainer:
         ).strip().lower()
         if scope not in {'stage1_probe'}:
             return False
-        if head_type not in {'monotonic_affine', 'dual_head_linear', 'dual_head_mlp'}:
+        if head_type not in {'monotonic_affine', 'dual_head_linear', 'dual_head_mlp', 'dual_head_histogram'}:
             return False
         if train_scope not in {'pair_ft_only'}:
             return False
@@ -4403,7 +4952,7 @@ class WorldModelTrainer:
         score: Optional[torch.Tensor] = None,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         head_type = self._stage15_gate_head_type()
-        if head_type in {'dual_head_linear', 'dual_head_mlp'}:
+        if head_type in {'dual_head_linear', 'dual_head_mlp', 'dual_head_histogram'}:
             # Fallback path: dual head should read gate logits directly from model outputs.
             calibrated_logit = score_logit
             calibrated_score = torch.sigmoid(calibrated_logit)
@@ -4448,6 +4997,36 @@ class WorldModelTrainer:
                             bias_sq += bias_norm * bias_norm
                 return float(math.sqrt(weight_sq)), float(math.sqrt(bias_sq))
             return 0.0, 0.0
+        if head_type == 'dual_head_histogram':
+            hist_feature = getattr(self.model, 'pair_ft_stage1_gate_head_hist_feature', None)
+            hist_logit = getattr(self.model, 'pair_ft_stage1_gate_head_hist_logit', None)
+            hist_bin = getattr(self.model, 'pair_ft_stage1_gate_head_hist_bin', None)
+            weight_sq = 0.0
+            bias_sq = 0.0
+            if isinstance(hist_feature, nn.Module):
+                for module in hist_feature.modules():
+                    if isinstance(module, nn.Linear):
+                        if isinstance(module.weight, nn.Parameter):
+                            weight_norm = self._safe_param_norm(module.weight)
+                            weight_sq += weight_norm * weight_norm
+                        if isinstance(module.bias, nn.Parameter):
+                            bias_norm = self._safe_param_norm(module.bias)
+                            bias_sq += bias_norm * bias_norm
+            if isinstance(hist_logit, nn.Linear):
+                if isinstance(hist_logit.weight, nn.Parameter):
+                    weight_norm = self._safe_param_norm(hist_logit.weight)
+                    weight_sq += weight_norm * weight_norm
+                if isinstance(hist_logit.bias, nn.Parameter):
+                    bias_norm = self._safe_param_norm(hist_logit.bias)
+                    bias_sq += bias_norm * bias_norm
+            if isinstance(hist_bin, nn.Linear):
+                if isinstance(hist_bin.weight, nn.Parameter):
+                    weight_norm = self._safe_param_norm(hist_bin.weight)
+                    weight_sq += weight_norm * weight_norm
+                if isinstance(hist_bin.bias, nn.Parameter):
+                    bias_norm = self._safe_param_norm(hist_bin.bias)
+                    bias_sq += bias_norm * bias_norm
+            return float(math.sqrt(weight_sq)), float(math.sqrt(bias_sq))
         scale, bias = self._stage1_pair_ft_gate_head_scale_bias()
         return float(torch.abs(scale).detach().item()), float(torch.abs(bias).detach().item())
 
@@ -4468,6 +5047,25 @@ class WorldModelTrainer:
                 for name, parameter in mlp_head.named_parameters():
                     if isinstance(parameter, nn.Parameter):
                         items.append((f'pair_ft_stage1_gate_head_mlp.{name}', parameter))
+            return items
+        if head_type == 'dual_head_histogram':
+            hist_feature = getattr(self.model, 'pair_ft_stage1_gate_head_hist_feature', None)
+            hist_logit = getattr(self.model, 'pair_ft_stage1_gate_head_hist_logit', None)
+            hist_bin = getattr(self.model, 'pair_ft_stage1_gate_head_hist_bin', None)
+            if isinstance(hist_feature, nn.Module):
+                for name, parameter in hist_feature.named_parameters():
+                    if isinstance(parameter, nn.Parameter):
+                        items.append((f'pair_ft_stage1_gate_head_hist_feature.{name}', parameter))
+            if isinstance(hist_logit, nn.Linear):
+                if isinstance(hist_logit.weight, nn.Parameter):
+                    items.append(('pair_ft_stage1_gate_head_hist_logit.weight', hist_logit.weight))
+                if isinstance(hist_logit.bias, nn.Parameter):
+                    items.append(('pair_ft_stage1_gate_head_hist_logit.bias', hist_logit.bias))
+            if isinstance(hist_bin, nn.Linear):
+                if isinstance(hist_bin.weight, nn.Parameter):
+                    items.append(('pair_ft_stage1_gate_head_hist_bin.weight', hist_bin.weight))
+                if isinstance(hist_bin.bias, nn.Parameter):
+                    items.append(('pair_ft_stage1_gate_head_hist_bin.bias', hist_bin.bias))
             return items
         raw_scale = getattr(self.model, 'pair_ft_stage1_gate_head_raw_scale', None)
         bias = getattr(self.model, 'pair_ft_stage1_gate_head_bias', None)
@@ -4592,7 +5190,7 @@ class WorldModelTrainer:
                     _, score_a = self._apply_stage1_pair_ft_calibration(score_a_logit, score_a)
                     _, score_b = self._apply_stage1_pair_ft_calibration(score_b_logit, score_b)
                 if use_stage1_gate_head_for_stage1_probe:
-                    if self._stage15_gate_head_type() in {'dual_head_linear', 'dual_head_mlp'}:
+                    if self._stage15_gate_head_type() in {'dual_head_linear', 'dual_head_mlp', 'dual_head_histogram'}:
                         score_a = out_a.get('gate_score')
                         score_b = out_b.get('gate_score')
                         if score_a is None or score_b is None:

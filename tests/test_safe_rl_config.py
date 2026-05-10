@@ -283,14 +283,20 @@ def test_risk_model_v2_defaults_enabled():
     assert config.world_model.pair_ft_gate_head_scale_init == pytest.approx(1.0)
     assert config.world_model.pair_ft_gate_head_bias_init == pytest.approx(0.0)
     assert config.world_model.pair_ft_gate_head_train_scope == "pair_ft_only"
-    assert config.world_model.pair_ft_gate_eval_uses_gate_score is True
-    assert config.world_model.pair_ft_gate_softbin_loss_weight == pytest.approx(0.006)
+    assert config.world_model.pair_ft_gate_eval_uses_gate_score is False
+    assert config.world_model.pair_ft_gate_softbin_loss_weight == pytest.approx(0.0)
     assert config.world_model.pair_ft_gate_softbin_num_bins == 16
     assert config.world_model.pair_ft_gate_softbin_temperature == pytest.approx(80.0)
     assert config.world_model.pair_ft_gate_softbin_apply_trusted_only is True
-    assert config.world_model.pair_ft_gate_resolution_loss_weight == pytest.approx(0.02)
+    assert config.world_model.pair_ft_gate_resolution_loss_weight == pytest.approx(0.0)
     assert config.world_model.pair_ft_gate_ranking_anchor_weight == pytest.approx(0.0)
     assert config.world_model.pair_ft_gate_ranking_anchor_apply_trusted_only is True
+    assert config.world_model.pair_ft_gate_bin_count == 16
+    assert config.world_model.pair_ft_gate_bin_score_mode == "expectation"
+    assert config.world_model.pair_ft_gate_bin_ce_loss_weight == pytest.approx(0.0)
+    assert config.world_model.pair_ft_gate_bin_occupancy_loss_weight == pytest.approx(0.0)
+    assert config.world_model.pair_ft_gate_bin_apply_trusted_only is True
+    assert config.world_model.pair_ft_gate_bin_target_source == "target_risk"
     assert config.world_model.pair_ft_random_seed == 42
     assert config.world_model.pair_ft_deterministic is True
     assert config.world_model.pair_ft_strict_deterministic_algorithms is False
@@ -793,6 +799,12 @@ def test_stage2_stage1_gate_head_calibration_config_loads():
     assert config.world_model.pair_ft_gate_softbin_temperature == pytest.approx(80.0)
     assert config.world_model.pair_ft_gate_softbin_apply_trusted_only is True
     assert config.world_model.pair_ft_gate_resolution_loss_weight == pytest.approx(0.02)
+    assert config.world_model.pair_ft_gate_bin_count == 16
+    assert config.world_model.pair_ft_gate_bin_score_mode == "expectation"
+    assert config.world_model.pair_ft_gate_bin_ce_loss_weight == pytest.approx(0.0)
+    assert config.world_model.pair_ft_gate_bin_occupancy_loss_weight == pytest.approx(0.0)
+    assert config.world_model.pair_ft_gate_bin_apply_trusted_only is True
+    assert config.world_model.pair_ft_gate_bin_target_source == "target_risk"
     assert config.world_model.pair_ft_random_seed == base_config.world_model.pair_ft_random_seed
     assert config.world_model.pair_ft_deterministic == base_config.world_model.pair_ft_deterministic
     assert (
@@ -850,6 +862,44 @@ def test_stage2_stage1_gate_dual_head_mlp_calibration_config_loads():
     assert config.world_model.pair_ft_gate_eval_uses_gate_score is True
     assert config.world_model.pair_ft_gate_ranking_anchor_weight == pytest.approx(0.02)
     assert config.world_model.pair_ft_gate_ranking_anchor_apply_trusted_only is True
+    assert config.world_model.pair_ft_stage1_calibration_enabled is False
+    assert config.world_model.pair_ft_stage1_softbin_loss_weight == pytest.approx(0.0)
+    assert config.world_model.pair_ft_random_seed == base_config.world_model.pair_ft_random_seed
+    assert config.world_model.pair_ft_deterministic == base_config.world_model.pair_ft_deterministic
+    assert (
+        config.world_model.pair_ft_strict_deterministic_algorithms
+        == base_config.world_model.pair_ft_strict_deterministic_algorithms
+    )
+    assert config.world_model.pair_ft_save_healthy_candidates == base_config.world_model.pair_ft_save_healthy_candidates
+    assert config.world_model.pair_ft_max_healthy_candidates_to_keep == base_config.world_model.pair_ft_max_healthy_candidates_to_keep
+    assert config.world_model.pair_ft_early_stop_enabled is False
+    assert config.world_model.pair_ft_stage1_priority_mix_enabled == base_config.world_model.pair_ft_stage1_priority_mix_enabled
+    assert config.world_model.pair_ft_stage1_priority_mix_fraction == pytest.approx(
+        base_config.world_model.pair_ft_stage1_priority_mix_fraction
+    )
+    assert config.world_model.pair_ft_stage1_resolution_loss_weight == pytest.approx(
+        base_config.world_model.pair_ft_stage1_resolution_loss_weight
+    )
+
+
+def test_stage2_stage1_gate_histogram_calibration_stage15d_config_loads():
+    base_config = load_safe_rl_config("safe_rl/config/advanced/stage2_stage1_gate_dual_head_mlp_calibration.yaml")
+    config = load_safe_rl_config("safe_rl/config/advanced/stage2_stage1_gate_histogram_calibration_Stage15D.yaml")
+    assert config.world_model.pair_ft_gate_head_enabled is True
+    assert config.world_model.pair_ft_gate_head_scope == "stage1_probe"
+    assert config.world_model.pair_ft_gate_head_type == "dual_head_histogram"
+    assert config.world_model.pair_ft_gate_head_hidden_dim == 128
+    assert config.world_model.pair_ft_gate_head_dropout == pytest.approx(0.0)
+    assert config.world_model.pair_ft_gate_head_train_scope == "pair_ft_only"
+    assert config.world_model.pair_ft_gate_eval_uses_gate_score is True
+    assert config.world_model.pair_ft_gate_ranking_anchor_weight == pytest.approx(0.02)
+    assert config.world_model.pair_ft_gate_ranking_anchor_apply_trusted_only is True
+    assert config.world_model.pair_ft_gate_bin_count == 16
+    assert config.world_model.pair_ft_gate_bin_score_mode == "expectation"
+    assert config.world_model.pair_ft_gate_bin_ce_loss_weight == pytest.approx(0.02)
+    assert config.world_model.pair_ft_gate_bin_occupancy_loss_weight == pytest.approx(0.003)
+    assert config.world_model.pair_ft_gate_bin_apply_trusted_only is True
+    assert config.world_model.pair_ft_gate_bin_target_source == "target_risk"
     assert config.world_model.pair_ft_stage1_calibration_enabled is False
     assert config.world_model.pair_ft_stage1_softbin_loss_weight == pytest.approx(0.0)
     assert config.world_model.pair_ft_random_seed == base_config.world_model.pair_ft_random_seed
