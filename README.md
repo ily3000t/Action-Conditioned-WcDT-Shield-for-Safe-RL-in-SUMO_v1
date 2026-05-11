@@ -60,3 +60,23 @@ python -m safe_rl.visualization.export_paired_gif --run-id <run_id> --trace-dir 
 # GUI 深挖
 python -m safe_rl.visualization.replay_in_sumo_gui --run-id <run_id> --seed <seed> --mode shielded --trace-dir stage5_trace_capture_default --base-config safe_rl/config/visualization/stage5_trace_capture_default.yaml
 ```
+
+## Stage1 Data Audit / Stage1 SUMO Replay
+
+```bash
+# 1) Stage1 数据分布审计（pair_all / pair_trusted / candidate）
+python -m safe_rl.visualization.stage1_data_audit --run-id <run_id>
+
+# 2) Stage1 样本选择（用于人工 case review）
+python -m safe_rl.visualization.select_stage1_probe_samples --run-id <run_id> --top-k 40 --device cpu
+
+# 3) Stage1 原轨迹回放（raw_action_prefix + risk_event_schedule）
+python -m safe_rl.visualization.stage1_sumo_replay --run-id <run_id> --mode raw_replay --episode-id ep_00037 --until-step 120 --config safe_rl/config/default_safe_rl.yaml
+
+# 4) Stage1 A/B 分支对比回放（同 seed + 同 prefix 双重重放）
+python -m safe_rl.visualization.stage1_sumo_replay --run-id <run_id> --mode compare_ab --episode-id ep_00037 --step-index 52 --action-a 0 --action-b 8 --horizon 20 --config safe_rl/config/default_safe_rl.yaml
+```
+
+说明：
+- Stage5 可视化链路（trace/anomaly/gif/gui）用于 Stage5 pair 检查；
+- Stage1 Data Audit / Stage1 SUMO Replay 用于定位 Stage1 监督分布与 pair 结构问题。

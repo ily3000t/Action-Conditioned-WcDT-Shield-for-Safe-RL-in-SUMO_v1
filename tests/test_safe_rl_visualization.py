@@ -420,3 +420,289 @@ def test_select_stage1_probe_samples_gap_bucket_export():
     assert Path(payload["output_path"]).exists()
     assert sum(payload["selected_count_by_gap_bin"].values()) == payload["selected_count"]
     assert all("gap_bin" in item for item in payload["cases"])
+
+
+def _create_stage1_data_audit_fixture(run_root: Path, run_id: str) -> Path:
+    from safe_rl.data.types import RiskPairSample
+
+    run_dir = Path(run_root) / run_id
+    (run_dir / "datasets").mkdir(parents=True, exist_ok=True)
+    (run_dir / "reports").mkdir(parents=True, exist_ok=True)
+
+    pairs = []
+    for idx in range(6):
+        risk_a = 0.65 + 0.05 * float(idx)
+        risk_b = 0.62 + 0.03 * float(idx)
+        pairs.append(
+            RiskPairSample(
+                history_scene=_build_stage1_history(history_steps=3, base_x=float(idx)),
+                action_a=0,
+                action_b=8,
+                preferred_action=(0 if idx % 2 == 0 else 8),
+                source="stage1_probe_same_state",
+                meta={
+                    "episode_id": f"ep_{idx:05d}",
+                    "step_index": int(10 + idx),
+                    "target_risk_a": float(risk_a),
+                    "target_risk_b": float(risk_b),
+                    "target_gap": float(abs(risk_a - risk_b)),
+                    "trusted_for_spread": bool(idx % 2 == 0),
+                    "boundary_pair": bool(idx % 3 == 0),
+                },
+            )
+        )
+
+    with (run_dir / "datasets" / "pairs_stage1_probe.pkl").open("wb") as f:
+        pickle.dump(pairs, f)
+
+    events = {
+        "events": [
+            {
+                "episode_id": "ep_00000",
+                "step_index": 10,
+                "status": "ok",
+                "pairs_created": 2,
+                "candidate_count": 3,
+                "candidates": [
+                    {"candidate_action": 0, "overall_proxy_risk": 0.72, "min_ttc": 3.1, "min_distance": 9.0},
+                    {"candidate_action": 4, "overall_proxy_risk": 0.88, "min_ttc": 2.1, "min_distance": 5.0},
+                    {"candidate_action": 8, "overall_proxy_risk": 1.00, "min_ttc": 1.0, "min_distance": 1.0},
+                ],
+            }
+        ]
+    }
+    (run_dir / "reports" / "stage1_probe_events.json").write_text(
+        json.dumps(events, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+
+    summary = {
+        "pairs_created": 6,
+        "pairs_dropped_small_gap": 30,
+        "pairs_kept_strong_signal": 4,
+        "pairs_capped_by_budget": 2,
+        "pairs_boundary_appended": 1,
+    }
+    (run_dir / "reports" / "stage1_probe_summary.json").write_text(
+        json.dumps(summary, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+    return run_dir
+
+
+def test_stage1_data_audit_generates_required_artifacts_and_summary_fields():
+    from safe_rl.visualization.stage1_data_audit import generate_stage1_data_audit
+
+    run_root = _tmp_dir("viz_stage1_audit")
+    run_id = f"ut_viz_stage1_audit_{uuid.uuid4().hex[:8]}"
+    _create_stage1_data_audit_fixture(run_root=run_root, run_id=run_id)
+
+    result = generate_stage1_data_audit(
+        run_id=run_id,
+        run_root=run_root,
+        output_root=Path("qualitative_results/stage1_data_audit"),
+        bins=16,
+    )
+
+    assert Path(result["output_path"]).exists()
+    for key in (
+        "target_risk_hist_ecdf",
+        "target_risk_bin_occupancy",
+        "target_risk_trusted_vs_all_bin_occupancy",
+        "candidate_risk_hist",
+        "candidate_bin_occupancy",
+        "pair_target_gap_hist",
+        "pair_bin_heatmap",
+    ):
+        assert Path(result["files"][key]).exists()
+
+    summary = dict(result["summary"] or {})
+    required = {
+        "pair_count",
+        "candidate_count",
+        "pairs_dropped_small_gap",
+        "pairs_kept_strong_signal",
+        "pairs_capped_by_budget",
+        "pairs_boundary_appended",
+        "target_risk_q01",
+        "target_risk_q10",
+        "target_risk_q50",
+        "target_risk_q90",
+        "target_risk_q99",
+        "pair_all_bin_nonempty",
+        "pair_all_bin_effective",
+        "pair_trusted_bin_nonempty",
+        "pair_trusted_bin_effective",
+        "candidate_bin_nonempty",
+        "candidate_bin_effective",
+        "preferred_a",
+        "preferred_b",
+        "tie_like",
+    }
+    assert required.issubset(set(summary.keys()))
+    assert int(summary["pair_all_bin_nonempty"]) <= 16
+    assert float(summary["pair_all_bin_effective"]) >= 1.0
+    assert int(summary["preferred_a"]) + int(summary["preferred_b"]) + int(summary["tie_like"]) == int(summary["pair_count"])
+
+
+def test_stage1_data_audit_missing_files_fail_fast():
+    from safe_rl.visualization.stage1_data_audit import generate_stage1_data_audit
+
+    run_root = _tmp_dir("viz_stage1_audit_missing")
+    run_id = f"ut_viz_stage1_missing_{uuid.uuid4().hex[:8]}"
+    run_dir = run_root / run_id
+    run_dir.mkdir(parents=True, exist_ok=True)
+
+    with pytest.raises(FileNotFoundError):
+        generate_stage1_data_audit(run_id=run_id, run_root=run_root)
+
+
+class _Stage1ReplayBackend:
+    def __init__(self):
+        from safe_rl.data.types import SceneState, VehicleState
+        from safe_rl.sim.backend_interface import BackendStepResult
+
+        self._SceneState = SceneState
+        self._VehicleState = VehicleState
+        self._BackendStepResult = BackendStepResult
+        self._step_index = 0
+        self._last_action = 4
+        self.injected_events = []
+
+    def start(self):
+        return None
+
+    def close(self):
+        return None
+
+    def set_episode_context(self, episode_id: str, risky_mode: bool):
+        _ = (episode_id, risky_mode)
+
+    def reset(self, seed=None):
+        _ = seed
+        self._step_index = 0
+        self._last_action = 4
+        return self.get_state()
+
+    def inject_risk_event(self, event_type=None):
+        self.injected_events.append(event_type)
+        return None
+
+    def _scene(self, action_id: int):
+        gap = 1.0 if int(action_id) == 8 else 10.0
+        ego_x = 2.0 * float(self._step_index)
+        return self._SceneState(
+            timestamp=0.1 * float(self._step_index),
+            ego_id="ego",
+            vehicles=[
+                self._VehicleState("ego", ego_x, 4.0, 20.0, 0.0, 0.0, 0.0, 0.0, 1),
+                self._VehicleState("lead", ego_x + gap, 4.0, 18.0, 0.0, 0.0, 0.0, 0.0, 1),
+            ],
+        )
+
+    def get_state(self):
+        return self._scene(self._last_action)
+
+    def step(self, action_id: int):
+        self._last_action = int(action_id)
+        self._step_index += 1
+        collision = bool(int(action_id) == 8)
+        return self._BackendStepResult(
+            scene=self._scene(int(action_id)),
+            task_reward=1.0 - 0.1 * float(abs(int(action_id) - 4)),
+            done=self._step_index >= 8,
+            info={"collision": collision, "lane_violation": bool(int(action_id) in (7, 8)), "teleport": collision},
+        )
+
+
+def _create_stage1_raw_episode_fixture(run_root: Path, run_id: str, episode_id: str = "ep_00037") -> Path:
+    run_dir = Path(run_root) / run_id
+    raw_dir = run_dir / "raw"
+    raw_dir.mkdir(parents=True, exist_ok=True)
+    payload = {
+        "episode_id": episode_id,
+        "risky_mode": True,
+        "meta": {
+            "episode_seed": 7,
+            "raw_action_prefix": [4, 4, 4, 4, 4, 4, 4, 4],
+            "risk_event_schedule": [{"before_step": 2, "event_type": "hard_brake"}],
+        },
+        "steps": [{"step_index": idx} for idx in range(8)],
+    }
+    (raw_dir / f"{episode_id}.json").write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    return run_dir
+
+
+def test_stage1_sumo_replay_raw_and_compare_ab_outputs(monkeypatch):
+    from safe_rl.visualization.stage1_sumo_replay import run_stage1_sumo_replay
+
+    run_root = _tmp_dir("viz_stage1_replay")
+    run_id = f"ut_viz_stage1_replay_{uuid.uuid4().hex[:8]}"
+    _create_stage1_raw_episode_fixture(run_root=run_root, run_id=run_id)
+
+    monkeypatch.setattr("safe_rl.visualization.stage1_sumo_replay.create_backend", lambda _sim_cfg: _Stage1ReplayBackend())
+
+    raw_payload = run_stage1_sumo_replay(
+        run_id=run_id,
+        mode="raw_replay",
+        episode_id="ep_00037",
+        run_root=run_root,
+        output_root=Path("qualitative_results/stage1_sumo_replay"),
+        use_gui=False,
+        until_step=5,
+    )
+    assert Path(raw_payload["output_path"]).exists()
+    assert int(raw_payload["executed_steps"]) > 0
+    assert raw_payload["trace"][0]["action_id"] == 4
+
+    cmp_payload = run_stage1_sumo_replay(
+        run_id=run_id,
+        mode="compare_ab",
+        episode_id="ep_00037",
+        run_root=run_root,
+        output_root=Path("qualitative_results/stage1_sumo_replay"),
+        use_gui=False,
+        step_index=2,
+        action_a=0,
+        action_b=8,
+        horizon=4,
+    )
+    assert Path(cmp_payload["output_path"]).exists()
+    assert "branch_a" in cmp_payload and "branch_b" in cmp_payload
+    assert "comparison" in cmp_payload
+    assert "overall_proxy_risk" in cmp_payload["branch_a"]["proxy_metrics"]
+
+
+def test_stage1_sumo_replay_validate_step_and_horizon(monkeypatch):
+    from safe_rl.visualization.stage1_sumo_replay import run_stage1_sumo_replay
+
+    run_root = _tmp_dir("viz_stage1_replay_validate")
+    run_id = f"ut_viz_stage1_replay_val_{uuid.uuid4().hex[:8]}"
+    _create_stage1_raw_episode_fixture(run_root=run_root, run_id=run_id)
+    monkeypatch.setattr("safe_rl.visualization.stage1_sumo_replay.create_backend", lambda _sim_cfg: _Stage1ReplayBackend())
+
+    with pytest.raises(ValueError):
+        run_stage1_sumo_replay(
+            run_id=run_id,
+            mode="compare_ab",
+            episode_id="ep_00037",
+            run_root=run_root,
+            use_gui=False,
+            step_index=2,
+            action_a=0,
+            action_b=8,
+            horizon=0,
+        )
+
+    with pytest.raises(ValueError):
+        run_stage1_sumo_replay(
+            run_id=run_id,
+            mode="compare_ab",
+            episode_id="ep_00037",
+            run_root=run_root,
+            use_gui=False,
+            step_index=99,
+            action_a=0,
+            action_b=8,
+            horizon=3,
+        )

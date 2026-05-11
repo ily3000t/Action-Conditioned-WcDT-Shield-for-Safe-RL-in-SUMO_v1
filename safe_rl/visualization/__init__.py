@@ -6,5 +6,7 @@ __all__ = [
     "render_pair_gif",
     "generate_stage1_probe_diagnostics",
     "select_stage1_probe_samples",
+    "generate_stage1_data_audit",
+    "run_stage1_sumo_replay",
     "select_anomaly_cases",
 ]
