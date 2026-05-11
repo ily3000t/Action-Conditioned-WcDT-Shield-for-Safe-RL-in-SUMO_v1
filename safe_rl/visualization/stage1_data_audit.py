@@ -263,7 +263,12 @@ def generate_stage1_data_audit(
 
     for event in events:
         for candidate in list(event.get("candidates", []) or []):
-            candidate_risks.append(_safe_float(candidate.get("overall_proxy_risk", 0.0), 0.0))
+            candidate_risks.append(
+                _safe_float(
+                    candidate.get("target_proxy_risk", candidate.get("overall_proxy_risk", 0.0)),
+                    0.0,
+                )
+            )
 
     risk_all = [min(1.0, max(0.0, float(v))) for v in risk_all]
     risk_trusted = [min(1.0, max(0.0, float(v))) for v in risk_trusted]

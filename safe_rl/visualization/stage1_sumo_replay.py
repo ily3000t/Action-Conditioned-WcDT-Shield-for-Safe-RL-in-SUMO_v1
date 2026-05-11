@@ -84,6 +84,28 @@ def _step_proxy_metrics(scenes: Sequence[SceneState], infos: Sequence[Dict[str, 
     }
 
 
+def _saturation_reasons(metrics: Dict[str, Any], saturation_threshold: float = 0.999) -> List[str]:
+    reasons: List[str] = []
+    risk = _safe_float(metrics.get("overall_proxy_risk", 0.0), 0.0)
+    if risk < float(saturation_threshold):
+        return reasons
+    if bool(metrics.get("teleport_flag", False)):
+        reasons.append("teleport")
+    if bool(metrics.get("route_structural_flag", False)):
+        reasons.append("route_structural")
+    if bool(metrics.get("collision", False)):
+        reasons.append("collision")
+    if bool(metrics.get("lane_conflict", False)):
+        reasons.append("lane_conflict")
+    if _safe_float(metrics.get("min_ttc", 1e6), 1e6) < 1.5:
+        reasons.append("min_ttc_low")
+    if _safe_float(metrics.get("min_distance", 1e6), 1e6) < 3.0:
+        reasons.append("min_distance_low")
+    if not reasons:
+        reasons.append("high_risk_saturated")
+    return reasons
+
+
 def _replay_prefix(
     backend: Any,
     raw_action_prefix: Sequence[int],
@@ -237,6 +259,36 @@ def _run_compare_ab(
         "collision_b": bool(b_metrics.get("collision", False)),
         "preferred_by_proxy_risk": str(preferred_by_risk),
     }
+    saturation_threshold = 0.999
+    both_saturated = (
+        float(a_metrics.get("overall_proxy_risk", 0.0)) >= saturation_threshold
+        and float(b_metrics.get("overall_proxy_risk", 0.0)) >= saturation_threshold
+    )
+    saturation_reason_a = _saturation_reasons(a_metrics, saturation_threshold=saturation_threshold)
+    saturation_reason_b = _saturation_reasons(b_metrics, saturation_threshold=saturation_threshold)
+    action_sensitive = not (
+        bool(both_saturated)
+        and abs(float(comparison["delta_overall_proxy_risk_b_minus_a"])) <= 1e-6
+    )
+    diagnosis = "action_sensitive_proxy_risk_divergence"
+    if bool(both_saturated):
+        structural_or_teleport_a = any(item in ("teleport", "route_structural") for item in saturation_reason_a)
+        structural_or_teleport_b = any(item in ("teleport", "route_structural") for item in saturation_reason_b)
+        if structural_or_teleport_a and structural_or_teleport_b:
+            diagnosis = "both_branches_saturated_by_structural_or_teleport"
+        else:
+            diagnosis = "both_branches_saturated"
+    elif str(preferred_by_risk) == "tie":
+        diagnosis = "action_insensitive_tie"
+    comparison.update(
+        {
+            "both_saturated": bool(both_saturated),
+            "saturation_reason_a": list(saturation_reason_a),
+            "saturation_reason_b": list(saturation_reason_b),
+            "action_sensitive": bool(action_sensitive),
+            "diagnosis": str(diagnosis),
+        }
+    )
 
     output_dir = Path(output_root) / str(run_id)
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -256,7 +308,10 @@ def _run_compare_ab(
         "action_b": int(action_b),
         "branch_a": branch_outputs["a"],
         "branch_b": branch_outputs["b"],
+        "a": branch_outputs["a"].get("proxy_metrics", {}),
+        "b": branch_outputs["b"].get("proxy_metrics", {}),
         "comparison": comparison,
+        "diagnosis": str(diagnosis),
     }
     output_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
     payload["output_path"] = str(output_path)

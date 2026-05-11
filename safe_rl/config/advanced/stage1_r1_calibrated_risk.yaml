@@ -1,0 +1,8 @@
+tensorboard:
+  run_name: "stage1_r1_calibrated_risk"
+
+stage1_collection:
+  probe_pair_target_risk_source: "calibrated_proxy_risk"
+  probe_trusted_exclude_structural_dominant: true
+  probe_pair_stratified_keep_enabled: false
+  stage2_distribution_gate_enabled: false

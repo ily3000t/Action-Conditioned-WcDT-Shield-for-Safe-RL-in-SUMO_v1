@@ -1,5 +1,6 @@
 import hashlib
 import json
+import math
 from collections import Counter
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
@@ -354,13 +355,25 @@ class Stage1ProbeRunner:
         teleport_flag = any(bool(info.get('teleport', False) or info.get('sim_teleport', False)) for info in infos)
         distance_term = 1.0 if min_distance < 3.0 else max(0.0, 1.0 - float(min_distance) / 30.0)
         ttc_term = 1.0 if min_ttc < 1.5 else max(0.0, 1.0 - float(min_ttc) / 8.0)
-        overall_proxy_risk = max(
+        raw_proxy_risk = max(
             1.0 if collision else 0.0,
             0.7 if min_ttc < self.config.dataset.ttc_threshold else 0.0,
             0.5 if lane_conflict else 0.0,
             1.0 if route_structural_flag or teleport_flag else 0.0,
             distance_term,
             ttc_term,
+        )
+        calibrated_proxy_risk = self._compute_calibrated_proxy_risk(
+            collision=bool(collision),
+            min_ttc=float(min_ttc),
+            min_distance=float(min_distance),
+            lane_conflict=bool(lane_conflict),
+            route_structural_flag=bool(route_structural_flag),
+            teleport_flag=bool(teleport_flag),
+        )
+        target_proxy_risk = self._probe_target_risk_from_values(
+            raw_proxy_risk=float(raw_proxy_risk),
+            calibrated_proxy_risk=float(calibrated_proxy_risk),
         )
         return {
             'candidate_action': int(candidate_action),
@@ -370,7 +383,10 @@ class Stage1ProbeRunner:
             'lane_conflict': bool(lane_conflict),
             'route_structural_flag': bool(route_structural_flag),
             'teleport_flag': bool(teleport_flag),
-            'overall_proxy_risk': float(overall_proxy_risk),
+            'overall_proxy_risk': float(raw_proxy_risk),
+            'raw_proxy_risk': float(raw_proxy_risk),
+            'calibrated_proxy_risk': float(calibrated_proxy_risk),
+            'target_proxy_risk': float(target_proxy_risk),
             'replay_ok': bool(replay_ok),
             'history_hash': str(same_state_proof.get('history_hash', '')),
         }
@@ -395,6 +411,11 @@ class Stage1ProbeRunner:
             0,
             int(getattr(self.config.stage1_collection, 'probe_pair_boundary_keep_per_risky_step', 1) or 0),
         )
+        stratified_enabled = bool(getattr(self.config.stage1_collection, 'probe_pair_stratified_keep_enabled', False))
+        stratified_bins = max(2, int(getattr(self.config.stage1_collection, 'probe_pair_stratified_bins', 16) or 16))
+        keep_per_risk_bin = max(0, int(getattr(self.config.stage1_collection, 'probe_pair_keep_per_risk_bin', 32) or 0))
+        keep_per_gap_bin = max(0, int(getattr(self.config.stage1_collection, 'probe_pair_keep_per_gap_bin', 32) or 0))
+        min_total_per_active_bin = max(0, int(getattr(self.config.stage1_collection, 'probe_pair_min_total_per_active_bin', 16) or 0))
         pair_candidates: List[Tuple[Tuple[float, float, float, int, int], Dict[str, Any]]] = []
         boundary_candidates: List[Tuple[Tuple[float, float, float, int, int], Dict[str, Any]]] = []
         ordered = sorted(list(candidate_records), key=lambda item: int(item.get('candidate_action', -1)))
@@ -405,7 +426,9 @@ class Stage1ProbeRunner:
                 preferred = self._preferred_probe_action(left, right)
                 if preferred is None:
                     continue
-                target_gap = abs(float(left.get('overall_proxy_risk', 0.0)) - float(right.get('overall_proxy_risk', 0.0)))
+                left_target_risk = float(self._probe_candidate_target_risk(left))
+                right_target_risk = float(self._probe_candidate_target_risk(right))
+                target_gap = abs(float(left_target_risk) - float(right_target_risk))
                 trusted_for_spread = self._probe_pair_trusted_for_spread(left, right)
                 hard_negative = bool(left.get('collision', False) != right.get('collision', False))
                 priority = (
@@ -427,8 +450,11 @@ class Stage1ProbeRunner:
                                     'right': right,
                                     'preferred': int(preferred),
                                     'target_gap': float(target_gap),
+                                    'target_risk_a': float(left_target_risk),
+                                    'target_risk_b': float(right_target_risk),
                                     'trusted_for_spread': bool(trusted_for_spread),
                                     'hard_negative': bool(hard_negative),
+                                    'selection_source': 'boundary_small_gap',
                                 },
                             )
                         )
@@ -441,18 +467,82 @@ class Stage1ProbeRunner:
                             'right': right,
                             'preferred': int(preferred),
                             'target_gap': float(target_gap),
+                            'target_risk_a': float(left_target_risk),
+                            'target_risk_b': float(right_target_risk),
                             'trusted_for_spread': bool(trusted_for_spread),
                             'hard_negative': bool(hard_negative),
+                            'selection_source': 'strong_signal' if (hard_negative or trusted_for_spread) else 'fallback_priority',
                         },
                     )
                 )
 
         pair_candidates.sort(key=lambda item: item[0])
-        if max_pairs_per_step > 0 and len(pair_candidates) > max_pairs_per_step:
-            self.summary['pairs_capped_by_budget'] += len(pair_candidates) - max_pairs_per_step
-            pair_candidates = pair_candidates[:max_pairs_per_step]
+        selected_candidates: List[Tuple[Tuple[float, float, float, int, int], Dict[str, Any]]] = []
+        if stratified_enabled and pair_candidates:
+            by_risk_bin: Dict[int, List[Tuple[Tuple[float, float, float, int, int], Dict[str, Any]]]] = {}
+            by_gap_bin: Dict[int, List[Tuple[Tuple[float, float, float, int, int], Dict[str, Any]]]] = {}
+            for item in pair_candidates:
+                meta = item[1]
+                risk_mid = 0.5 * (float(meta['target_risk_a']) + float(meta['target_risk_b']))
+                risk_bin = self._risk_bin_index(risk_mid, stratified_bins)
+                gap_bin = self._risk_bin_index(float(meta['target_gap']), stratified_bins)
+                by_risk_bin.setdefault(int(risk_bin), []).append(item)
+                by_gap_bin.setdefault(int(gap_bin), []).append(item)
 
-        for _, item in pair_candidates:
+            selected_ids = set()
+            for risk_bin in sorted(by_risk_bin.keys()):
+                for item in by_risk_bin[risk_bin][:keep_per_risk_bin]:
+                    key = id(item[1])
+                    if key in selected_ids:
+                        continue
+                    item[1]['selection_source'] = 'stratified_risk_bin'
+                    selected_candidates.append(item)
+                    selected_ids.add(key)
+
+            for gap_bin in sorted(by_gap_bin.keys()):
+                for item in by_gap_bin[gap_bin][:keep_per_gap_bin]:
+                    key = id(item[1])
+                    if key in selected_ids:
+                        continue
+                    item[1]['selection_source'] = 'stratified_gap_bin'
+                    selected_candidates.append(item)
+                    selected_ids.add(key)
+
+            strong_candidates = [
+                item
+                for item in pair_candidates
+                if bool(item[1].get('hard_negative', False) or item[1].get('trusted_for_spread', False))
+            ]
+            for item in strong_candidates:
+                key = id(item[1])
+                if key in selected_ids:
+                    continue
+                item[1]['selection_source'] = 'strong_signal'
+                selected_candidates.append(item)
+                selected_ids.add(key)
+
+            active_risk_bins = max(1, len(by_risk_bin))
+            target_min_keep = max(0, min_total_per_active_bin * active_risk_bins)
+            if max_pairs_per_step > 0:
+                target_min_keep = min(target_min_keep, max_pairs_per_step)
+            if target_min_keep > 0 and len(selected_candidates) < target_min_keep:
+                for item in pair_candidates:
+                    key = id(item[1])
+                    if key in selected_ids:
+                        continue
+                    item[1]['selection_source'] = str(item[1].get('selection_source', '') or 'fallback_priority')
+                    selected_candidates.append(item)
+                    selected_ids.add(key)
+                    if len(selected_candidates) >= target_min_keep:
+                        break
+        else:
+            selected_candidates = list(pair_candidates)
+
+        if max_pairs_per_step > 0 and len(selected_candidates) > max_pairs_per_step:
+            self.summary['pairs_capped_by_budget'] += len(selected_candidates) - max_pairs_per_step
+            selected_candidates = selected_candidates[:max_pairs_per_step]
+
+        for _, item in selected_candidates:
             left = dict(item['left'])
             right = dict(item['right'])
             hard_negative = bool(item['hard_negative'])
@@ -470,13 +560,19 @@ class Stage1ProbeRunner:
                     meta={
                         'episode_id': episode.episode_id,
                         'step_index': int(step_index),
-                        'target_risk_a': float(left.get('overall_proxy_risk', 0.0)),
-                        'target_risk_b': float(right.get('overall_proxy_risk', 0.0)),
+                        'target_risk_a': float(item.get('target_risk_a', self._probe_candidate_target_risk(left))),
+                        'target_risk_b': float(item.get('target_risk_b', self._probe_candidate_target_risk(right))),
+                        'target_risk_source': str(getattr(self.config.stage1_collection, 'probe_pair_target_risk_source', 'raw_proxy_risk')),
+                        'raw_proxy_risk_a': float(left.get('raw_proxy_risk', left.get('overall_proxy_risk', 0.0))),
+                        'raw_proxy_risk_b': float(right.get('raw_proxy_risk', right.get('overall_proxy_risk', 0.0))),
+                        'calibrated_proxy_risk_a': float(left.get('calibrated_proxy_risk', left.get('overall_proxy_risk', 0.0))),
+                        'calibrated_proxy_risk_b': float(right.get('calibrated_proxy_risk', right.get('overall_proxy_risk', 0.0))),
                         'hard_negative': bool(hard_negative),
                         'trusted_for_spread': bool(trusted_for_spread),
                         'target_gap': float(item['target_gap']),
                         'boundary_pair': False,
                         'clear_dominance': bool(trusted_for_spread),
+                        'pair_selection_source': str(item.get('selection_source', '') or 'fallback_priority'),
                         **same_state_proof,
                     },
                 )
@@ -500,13 +596,19 @@ class Stage1ProbeRunner:
                         meta={
                             'episode_id': episode.episode_id,
                             'step_index': int(step_index),
-                            'target_risk_a': float(left.get('overall_proxy_risk', 0.0)),
-                            'target_risk_b': float(right.get('overall_proxy_risk', 0.0)),
+                            'target_risk_a': float(item.get('target_risk_a', self._probe_candidate_target_risk(left))),
+                            'target_risk_b': float(item.get('target_risk_b', self._probe_candidate_target_risk(right))),
+                            'target_risk_source': str(getattr(self.config.stage1_collection, 'probe_pair_target_risk_source', 'raw_proxy_risk')),
+                            'raw_proxy_risk_a': float(left.get('raw_proxy_risk', left.get('overall_proxy_risk', 0.0))),
+                            'raw_proxy_risk_b': float(right.get('raw_proxy_risk', right.get('overall_proxy_risk', 0.0))),
+                            'calibrated_proxy_risk_a': float(left.get('calibrated_proxy_risk', left.get('overall_proxy_risk', 0.0))),
+                            'calibrated_proxy_risk_b': float(right.get('calibrated_proxy_risk', right.get('overall_proxy_risk', 0.0))),
                             'hard_negative': bool(item['hard_negative']),
                             'trusted_for_spread': bool(item['trusted_for_spread']),
                             'target_gap': float(item['target_gap']),
                             'boundary_pair': True,
                             'clear_dominance': bool(item['trusted_for_spread']),
+                            'pair_selection_source': 'boundary_small_gap',
                             **same_state_proof,
                         },
                     )
@@ -527,21 +629,85 @@ class Stage1ProbeRunner:
         return (
             1.0 if bool(candidate.get('collision', False)) else 0.0,
             1.0 if bool(candidate.get('route_structural_flag', False) or candidate.get('teleport_flag', False)) else 0.0,
-            float(candidate.get('overall_proxy_risk', 0.0)),
+            float(self._probe_candidate_target_risk(candidate)),
             -float(candidate.get('min_distance', 0.0)),
             int(candidate.get('candidate_action', -1)),
         )
 
     def _probe_pair_trusted_for_spread(self, left: Dict[str, Any], right: Dict[str, Any]) -> bool:
+        if bool(getattr(self.config.stage1_collection, 'probe_trusted_exclude_structural_dominant', False)):
+            if self._is_structural_dominant(left) or self._is_structural_dominant(right):
+                return False
         if bool(left.get('collision', False)) != bool(right.get('collision', False)):
             return True
         if abs(float(left.get('min_ttc', 0.0)) - float(right.get('min_ttc', 0.0))) >= 0.75:
             return True
         if abs(float(left.get('min_distance', 0.0)) - float(right.get('min_distance', 0.0))) >= 2.0:
             return True
-        if abs(float(left.get('overall_proxy_risk', 0.0)) - float(right.get('overall_proxy_risk', 0.0))) >= 0.15:
+        if abs(float(self._probe_candidate_target_risk(left)) - float(self._probe_candidate_target_risk(right))) >= 0.15:
             return True
         return False
+
+    def _probe_target_risk_from_values(self, raw_proxy_risk: float, calibrated_proxy_risk: float) -> float:
+        source = str(getattr(self.config.stage1_collection, 'probe_pair_target_risk_source', 'raw_proxy_risk') or '').strip().lower()
+        if source in ('calibrated', 'calibrated_proxy_risk'):
+            return float(calibrated_proxy_risk)
+        return float(raw_proxy_risk)
+
+    def _probe_candidate_target_risk(self, candidate: Dict[str, Any]) -> float:
+        source = str(getattr(self.config.stage1_collection, 'probe_pair_target_risk_source', 'raw_proxy_risk') or '').strip().lower()
+        if source in ('calibrated', 'calibrated_proxy_risk'):
+            calibrated = candidate.get('calibrated_proxy_risk', None)
+            if calibrated is not None:
+                return float(calibrated)
+            return self._compute_calibrated_proxy_risk(
+                collision=bool(candidate.get('collision', False)),
+                min_ttc=float(candidate.get('min_ttc', 1e6)),
+                min_distance=float(candidate.get('min_distance', 1e6)),
+                lane_conflict=bool(candidate.get('lane_conflict', False)),
+                route_structural_flag=bool(candidate.get('route_structural_flag', False)),
+                teleport_flag=bool(candidate.get('teleport_flag', False)),
+            )
+        if 'raw_proxy_risk' in candidate:
+            return float(candidate.get('raw_proxy_risk', 0.0))
+        return float(candidate.get('overall_proxy_risk', 0.0))
+
+    def _compute_calibrated_proxy_risk(
+        self,
+        collision: bool,
+        min_ttc: float,
+        min_distance: float,
+        lane_conflict: bool,
+        route_structural_flag: bool,
+        teleport_flag: bool,
+    ) -> float:
+        distance_term = 1.0 if float(min_distance) < 3.0 else max(0.0, 1.0 - float(min_distance) / 30.0)
+        ttc_term = 1.0 if float(min_ttc) < 1.5 else max(0.0, 1.0 - float(min_ttc) / 8.0)
+        ttc_trigger = 1.0 if float(min_ttc) < float(self.config.dataset.ttc_threshold) else 0.0
+        total = 0.0
+        total += float(getattr(self.config.stage1_collection, 'probe_calibrated_collision_weight', 3.0) or 0.0) * (1.0 if collision else 0.0)
+        total += float(getattr(self.config.stage1_collection, 'probe_calibrated_ttc_trigger_weight', 1.2) or 0.0) * ttc_trigger
+        total += float(getattr(self.config.stage1_collection, 'probe_calibrated_lane_conflict_weight', 0.8) or 0.0) * (
+            1.0 if lane_conflict else 0.0
+        )
+        total += float(getattr(self.config.stage1_collection, 'probe_calibrated_structural_weight', 1.8) or 0.0) * (
+            1.0 if route_structural_flag else 0.0
+        )
+        total += float(getattr(self.config.stage1_collection, 'probe_calibrated_teleport_weight', 2.0) or 0.0) * (
+            1.0 if teleport_flag else 0.0
+        )
+        total += float(getattr(self.config.stage1_collection, 'probe_calibrated_distance_weight', 1.0) or 0.0) * float(distance_term)
+        total += float(getattr(self.config.stage1_collection, 'probe_calibrated_ttc_continuous_weight', 1.0) or 0.0) * float(ttc_term)
+        calibrated = 1.0 - math.exp(-max(0.0, float(total)))
+        return float(min(1.0, max(0.0, calibrated)))
+
+    def _is_structural_dominant(self, candidate: Dict[str, Any]) -> bool:
+        return bool(candidate.get('route_structural_flag', False) or candidate.get('teleport_flag', False))
+
+    def _risk_bin_index(self, value: float, bins: int) -> int:
+        k = max(2, int(bins))
+        clipped = min(1.0, max(0.0, float(value)))
+        return min(k - 1, int(clipped * k))
 
     def _is_high_risk_or_event_window_step(self, episode: EpisodeLog, step_index: int) -> bool:
         if step_index < 0 or step_index >= len(episode.steps):

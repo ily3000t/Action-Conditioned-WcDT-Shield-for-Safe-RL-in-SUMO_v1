@@ -38,6 +38,47 @@ stage1_collection:
   probe_pair_max_pairs_per_step: 12
   probe_pair_boundary_gap_floor: 0.005
   probe_pair_boundary_keep_per_risky_step: 1
+  probe_pair_target_risk_source: "raw_proxy_risk"
+  probe_calibrated_collision_weight: 3.0
+  probe_calibrated_ttc_trigger_weight: 1.2
+  probe_calibrated_lane_conflict_weight: 0.8
+  probe_calibrated_structural_weight: 1.8
+  probe_calibrated_teleport_weight: 2.0
+  probe_calibrated_distance_weight: 1.0
+  probe_calibrated_ttc_continuous_weight: 1.0
+  probe_trusted_exclude_structural_dominant: false
+  probe_pair_stratified_keep_enabled: false
+  probe_pair_stratified_bins: 16
+  probe_pair_keep_per_risk_bin: 32
+  probe_pair_keep_per_gap_bin: 32
+  probe_pair_min_total_per_active_bin: 16
+  stage1_distribution_health_bins: 16
+  stage1_distribution_healthy_pair_all_effective_min: 8.0
+  stage1_distribution_healthy_pair_trusted_effective_min: 7.0
+  stage1_distribution_healthy_candidate_effective_min: 3.0
+  stage1_distribution_degraded_pair_all_effective_min: 6.0
+  stage1_distribution_degraded_pair_trusted_effective_min: 5.0
+  stage1_distribution_degraded_candidate_effective_min: 2.0
+  stage1_distribution_high_bin_saturation_threshold: 0.85
+  stage2_distribution_gate_enabled: false
+  stage2_distribution_gate_block_on_status: "critical"
+  scene_sanity_enabled: true
+  scene_sanity_merge_success_y_threshold: 0.0
+  scene_sanity_stopped_speed_threshold: 0.5
+  scene_sanity_stuck_min_wait_steps: 20
+  scene_sanity_roi_x_min: 320.0
+  scene_sanity_roi_x_max: 420.0
+  scene_sanity_roi_y_min: -12.0
+  scene_sanity_roi_y_max: 16.0
+  scene_sanity_trigger_merge_success_min: 0.30
+  scene_sanity_trigger_stuck_rate_max: 0.50
+  scene_sanity_trigger_teleport_rate_max: 0.08
+  scene_sanity_trigger_structural_rate_max: 0.12
+  scene_sanity_trigger_structural_saturation_rate_max: 0.50
+  scene_sanity_accept_merge_success_min: 0.45
+  scene_sanity_accept_stuck_rate_max: 0.35
+  scene_sanity_accept_teleport_rate_max: 0.08
+  scene_sanity_accept_structural_rate_max: 0.12
   stage4_candidate_min_target_gap: 0.01
 
 light_risk:

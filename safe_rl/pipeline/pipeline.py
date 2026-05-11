@@ -19,7 +19,7 @@ from safe_rl.config import SafeRLConfig, load_safe_rl_config
 from safe_rl.data.collector import SumoDataCollector
 from safe_rl.data.dataset_builder import ActionConditionedDatasetBuilder
 from safe_rl.data.pair_dataset import load_risk_pairs, save_risk_pairs, summarize_pair_sources
-from safe_rl.data.types import InterventionRecord, RiskPairSample, dataclass_to_dict, scene_state_list_from_dicts
+from safe_rl.data.types import EpisodeLog, InterventionRecord, RiskPairSample, dataclass_to_dict, scene_state_list_from_dicts
 from safe_rl.eval import SafeRLEvaluator
 from safe_rl.models.features import encode_history
 from safe_rl.pipeline.session_event_logger import IncrementalSessionEventLogger
@@ -87,6 +87,7 @@ class SafeRLPipeline:
         self.stage1_probe_summary_path: Optional[Path] = None
         self.stage1_bucket_summary_path: Optional[Path] = None
         self.stage1_probe_events_path: Optional[Path] = None
+        self.stage1_scene_sanity_path: Optional[Path] = None
         self.stage3_runtime_config_path: Optional[Path] = None
         self.stage3_session_events_path: Optional[Path] = None
         self.stage4_buffer_report_path: Optional[Path] = None
@@ -311,6 +312,7 @@ class SafeRLPipeline:
         self.stage1_probe_summary_path = self.reports_dir / "stage1_probe_summary.json"
         self.stage1_bucket_summary_path = self.reports_dir / "stage1_bucket_summary.json"
         self.stage1_probe_events_path = self.reports_dir / "stage1_probe_events.json"
+        self.stage1_scene_sanity_path = self.reports_dir / "stage1_scene_sanity_report.json"
         self.stage3_runtime_config_path = self.reports_dir / "stage3_runtime_config.json"
         self.stage3_session_events_path = self.reports_dir / "stage3_session_events.json"
         self.stage4_buffer_report_path = self.reports_dir / "stage4_buffer_report.json"
@@ -363,6 +365,7 @@ class SafeRLPipeline:
                 "stage1_probe_summary_report": str(self.stage1_probe_summary_path),
                 "stage1_bucket_summary_report": str(self.stage1_bucket_summary_path),
                 "stage1_probe_events_report": str(self.stage1_probe_events_path),
+                "stage1_scene_sanity_report": str(self.stage1_scene_sanity_path),
                 "stage3_runtime_config_report": str(self.stage3_runtime_config_path),
                 "stage3_session_events_report": str(self.stage3_session_events_path),
                 "stage4_buffer_report": str(self.stage4_buffer_report_path),
@@ -1298,10 +1301,27 @@ class SafeRLPipeline:
         probe_summary = dict(collector.probe_summary)
         bucket_summary = dict(collector.bucket_summary())
         stage1_probe_pairs = list(collector.probe_pairs)
+        stage1_probe_events = list(collector.probe_events)
+        stage1_scene_sanity = self._build_stage1_scene_sanity_report(
+            episodes=episodes,
+            probe_events=stage1_probe_events,
+        )
+        stage1_distribution_health = self._build_stage1_distribution_health(
+            stage1_probe_pairs=stage1_probe_pairs,
+            stage1_probe_events=stage1_probe_events,
+        )
+        pair_source_breakdown = self._build_stage1_pair_source_breakdown(
+            stage1_probe_pairs=stage1_probe_pairs,
+            stage1_probe_summary=probe_summary,
+        )
+        probe_summary["stage1_distribution_health"] = dict(stage1_distribution_health)
+        probe_summary["pair_source_breakdown"] = dict(pair_source_breakdown)
+        probe_summary["scene_sanity_status"] = str(stage1_scene_sanity.get("status", "unknown"))
         save_risk_pairs(str(self.pairs_stage1_probe_path), stage1_probe_pairs)
         self._write_json(self.stage1_probe_summary_path, probe_summary)
         self._write_json(self.stage1_bucket_summary_path, bucket_summary)
-        self._write_json(self.stage1_probe_events_path, {"events": list(collector.probe_events)})
+        self._write_json(self.stage1_probe_events_path, {"events": stage1_probe_events})
+        self._write_json(self.stage1_scene_sanity_path, stage1_scene_sanity)
 
         builder = ActionConditionedDatasetBuilder(sim_config=stage_config.sim, dataset_config=stage_config.dataset)
         samples = builder.build_samples(
@@ -1338,6 +1358,7 @@ class SafeRLPipeline:
             "stage1_probe_summary_report": str(self.stage1_probe_summary_path),
             "stage1_bucket_summary_report": str(self.stage1_bucket_summary_path),
             "stage1_probe_events_report": str(self.stage1_probe_events_path),
+            "stage1_scene_sanity_report": str(self.stage1_scene_sanity_path),
             "pairs_stage1_probe": str(self.pairs_stage1_probe_path),
             "warning_acceptance_passed": bool(warning_report["acceptance"]["passed"]),
             "warning_acceptance": warning_report["acceptance"],
@@ -1347,7 +1368,483 @@ class SafeRLPipeline:
             "samples_test": len(test_samples),
             "stage1_probe_pairs_created": int(len(stage1_probe_pairs)),
             "bucket_summary": bucket_summary,
+            "stage1_distribution_health": dict(stage1_distribution_health),
+            "scene_sanity_status": str(stage1_scene_sanity.get("status", "unknown")),
         }
+
+    def _stage1_bin_distribution_metrics(self, values: Sequence[float], bins: int) -> Dict[str, Any]:
+        bin_count = max(2, int(bins))
+        clipped = [min(1.0, max(0.0, float(item))) for item in list(values or [])]
+        hist = [0 for _ in range(bin_count)]
+        for value in clipped:
+            index = min(bin_count - 1, int(value * bin_count))
+            hist[index] += 1
+        total = float(sum(hist))
+        if total <= 0.0:
+            occupancy = [0.0 for _ in range(bin_count)]
+            entropy = 0.0
+            effective = 0.0
+        else:
+            occupancy = [float(count) / total for count in hist]
+            entropy = 0.0
+            for mass in occupancy:
+                if mass > 1e-12:
+                    entropy -= float(mass) * math.log(float(mass))
+            effective = float(math.exp(entropy))
+        return {
+            "bins": int(bin_count),
+            "hist": [int(item) for item in hist],
+            "occupancy": [float(item) for item in occupancy],
+            "nonempty": int(sum(1 for item in hist if int(item) > 0)),
+            "entropy": float(entropy),
+            "effective": float(effective),
+            "high_bin_occupancy": float(occupancy[-1]) if occupancy else 0.0,
+        }
+
+    def _build_stage1_scene_sanity_report(
+        self,
+        episodes: Sequence[EpisodeLog],
+        probe_events: Sequence[Dict[str, Any]],
+    ) -> Dict[str, Any]:
+        cfg = self.config.stage1_collection
+        enabled = bool(getattr(cfg, "scene_sanity_enabled", True))
+        report: Dict[str, Any] = {
+            "run_id": str(self.run_id or ""),
+            "created_at": dt.datetime.now().isoformat(timespec="seconds"),
+            "enabled": bool(enabled),
+            "status": "disabled" if not enabled else "unknown",
+            "warnings": [],
+            "critical_reasons": [],
+            "acceptance_reasons": [],
+            "episode_count": int(len(list(episodes or []))),
+            "episode_metrics": [],
+            "aggregate": {},
+            "trigger_thresholds": {
+                "ramp_merge_success_rate_min": float(getattr(cfg, "scene_sanity_trigger_merge_success_min", 0.30) or 0.30),
+                "ramp_stuck_rate_max": float(getattr(cfg, "scene_sanity_trigger_stuck_rate_max", 0.50) or 0.50),
+                "teleport_rate_max": float(getattr(cfg, "scene_sanity_trigger_teleport_rate_max", 0.08) or 0.08),
+                "structural_rate_max": float(getattr(cfg, "scene_sanity_trigger_structural_rate_max", 0.12) or 0.12),
+                "risk_saturation_by_structural_or_teleport_rate_max": float(
+                    getattr(cfg, "scene_sanity_trigger_structural_saturation_rate_max", 0.50) or 0.50
+                ),
+            },
+            "acceptance_thresholds": {
+                "ramp_merge_success_rate_min": float(getattr(cfg, "scene_sanity_accept_merge_success_min", 0.45) or 0.45),
+                "ramp_stuck_rate_max": float(getattr(cfg, "scene_sanity_accept_stuck_rate_max", 0.35) or 0.35),
+                "teleport_rate_max": float(getattr(cfg, "scene_sanity_accept_teleport_rate_max", 0.08) or 0.08),
+                "structural_rate_max": float(getattr(cfg, "scene_sanity_accept_structural_rate_max", 0.12) or 0.12),
+            },
+            "roi": {
+                "x_min": float(getattr(cfg, "scene_sanity_roi_x_min", 320.0) or 320.0),
+                "x_max": float(getattr(cfg, "scene_sanity_roi_x_max", 420.0) or 420.0),
+                "y_min": float(getattr(cfg, "scene_sanity_roi_y_min", -12.0) or -12.0),
+                "y_max": float(getattr(cfg, "scene_sanity_roi_y_max", 16.0) or 16.0),
+                "merge_success_y_threshold": float(getattr(cfg, "scene_sanity_merge_success_y_threshold", 0.0) or 0.0),
+            },
+        }
+        if not enabled:
+            report["aggregate"] = {
+                "ramp_vehicle_count": 0,
+                "ramp_merged_count": 0,
+                "ramp_stuck_count": 0,
+                "ramp_merge_success_rate": 0.0,
+                "ramp_stuck_rate": 0.0,
+                "teleport_rate": 0.0,
+                "structural_rate": 0.0,
+                "risk_saturation_rate": 0.0,
+                "risk_saturation_by_structural_or_teleport_rate": 0.0,
+            }
+            return report
+
+        x_min = float(report["roi"]["x_min"])
+        x_max = float(report["roi"]["x_max"])
+        y_min = float(report["roi"]["y_min"])
+        y_max = float(report["roi"]["y_max"])
+        merge_y = float(report["roi"]["merge_success_y_threshold"])
+        stopped_speed = float(getattr(cfg, "scene_sanity_stopped_speed_threshold", 0.5) or 0.5)
+        stuck_wait = max(1, int(getattr(cfg, "scene_sanity_stuck_min_wait_steps", 20) or 20))
+
+        events_by_episode: Dict[str, List[Dict[str, Any]]] = {}
+        for event in list(probe_events or []):
+            episode_id = str(event.get("episode_id", "") or "")
+            events_by_episode.setdefault(episode_id, []).append(dict(event or {}))
+
+        total_ramp_vehicle_count = 0
+        total_ramp_merged_count = 0
+        total_ramp_stuck_count = 0
+        total_teleport_episode_count = 0
+        total_structural_episode_count = 0
+        total_saturated_candidates = 0
+        total_saturated_structural_or_teleport = 0
+        total_candidate_count = 0
+        density_values: List[float] = []
+        speed_values: List[float] = []
+
+        for episode in list(episodes or []):
+            episode_id = str(episode.episode_id)
+            vehicle_state: Dict[str, Dict[str, Any]] = {}
+            teleport_step_count = 0
+            collision_count = 0
+            roi_step_count = 0
+            roi_vehicle_total = 0
+            roi_speed_total = 0.0
+            roi_speed_count = 0
+
+            for step in list(episode.steps or []):
+                meta = dict(step.meta or {})
+                if bool(meta.get("teleport_flag", False)):
+                    teleport_step_count += 1
+                if bool(step.risk_labels.collision):
+                    collision_count += 1
+                roi_vehicle_this_step = 0
+                for vehicle in list(step.scene.vehicles or []):
+                    vx = float(getattr(vehicle, "vx", 0.0) or 0.0)
+                    vy = float(getattr(vehicle, "vy", 0.0) or 0.0)
+                    speed = float(math.sqrt(vx * vx + vy * vy))
+                    x = float(getattr(vehicle, "x", 0.0) or 0.0)
+                    y = float(getattr(vehicle, "y", 0.0) or 0.0)
+                    in_roi = x_min <= x <= x_max and y_min <= y <= y_max
+                    if not in_roi:
+                        continue
+                    roi_vehicle_this_step += 1
+                    roi_speed_total += speed
+                    roi_speed_count += 1
+                    vehicle_id = str(getattr(vehicle, "vehicle_id", "") or "")
+                    state = vehicle_state.setdefault(
+                        vehicle_id,
+                        {
+                            "seen_ramp": False,
+                            "merged": False,
+                            "stopped_streak": 0,
+                            "max_stopped_streak": 0,
+                            "stopped_steps": 0,
+                        },
+                    )
+                    if y < merge_y:
+                        state["seen_ramp"] = True
+                        if speed <= stopped_speed:
+                            state["stopped_streak"] = int(state["stopped_streak"]) + 1
+                            state["stopped_steps"] = int(state["stopped_steps"]) + 1
+                        else:
+                            state["stopped_streak"] = 0
+                        state["max_stopped_streak"] = max(
+                            int(state["max_stopped_streak"]),
+                            int(state["stopped_streak"]),
+                        )
+                    elif bool(state.get("seen_ramp", False)):
+                        state["merged"] = True
+                        state["stopped_streak"] = 0
+                if roi_vehicle_this_step > 0:
+                    roi_step_count += 1
+                    roi_vehicle_total += int(roi_vehicle_this_step)
+
+            ramp_vehicle_count = int(sum(1 for item in vehicle_state.values() if bool(item.get("seen_ramp", False))))
+            ramp_merged_count = int(sum(1 for item in vehicle_state.values() if bool(item.get("seen_ramp", False)) and bool(item.get("merged", False))))
+            ramp_stuck_count = int(
+                sum(
+                    1
+                    for item in vehicle_state.values()
+                    if bool(item.get("seen_ramp", False))
+                    and not bool(item.get("merged", False))
+                    and int(item.get("max_stopped_streak", 0) or 0) >= stuck_wait
+                )
+            )
+            ramp_wait_steps_total = int(
+                sum(
+                    int(item.get("stopped_steps", 0) or 0)
+                    for item in vehicle_state.values()
+                    if bool(item.get("seen_ramp", False))
+                )
+            )
+
+            episode_events = list(events_by_episode.get(episode_id, []) or [])
+            structural_count = 0
+            saturated_count = 0
+            saturated_structural_or_teleport = 0
+            candidate_count = 0
+            for event in episode_events:
+                for candidate in list(event.get("candidates", []) or []):
+                    candidate_count += 1
+                    structural = bool(candidate.get("route_structural_flag", False))
+                    teleport = bool(candidate.get("teleport_flag", False))
+                    if structural:
+                        structural_count += 1
+                    risk_value = float(candidate.get("overall_proxy_risk", candidate.get("target_proxy_risk", 0.0)) or 0.0)
+                    if risk_value >= 0.999:
+                        saturated_count += 1
+                        if structural or teleport:
+                            saturated_structural_or_teleport += 1
+
+            episode_payload = {
+                "episode_id": episode_id,
+                "step_count": int(len(list(episode.steps or []))),
+                "ramp_vehicle_count": int(ramp_vehicle_count),
+                "ramp_merged_count": int(ramp_merged_count),
+                "ramp_stuck_count": int(ramp_stuck_count),
+                "ramp_wait_steps_total": int(ramp_wait_steps_total),
+                "teleport_step_count": int(teleport_step_count),
+                "route_structural_count": int(structural_count),
+                "collision_count": int(collision_count),
+                "candidate_count": int(candidate_count),
+                "saturated_candidate_count": int(saturated_count),
+                "saturated_structural_or_teleport_count": int(saturated_structural_or_teleport),
+                "mean_speed_near_merge": float(roi_speed_total / roi_speed_count) if roi_speed_count > 0 else 0.0,
+                "merge_zone_density": float(roi_vehicle_total / roi_step_count) if roi_step_count > 0 else 0.0,
+            }
+            report["episode_metrics"].append(episode_payload)
+
+            total_ramp_vehicle_count += int(ramp_vehicle_count)
+            total_ramp_merged_count += int(ramp_merged_count)
+            total_ramp_stuck_count += int(ramp_stuck_count)
+            total_candidate_count += int(candidate_count)
+            total_saturated_candidates += int(saturated_count)
+            total_saturated_structural_or_teleport += int(saturated_structural_or_teleport)
+            if teleport_step_count > 0:
+                total_teleport_episode_count += 1
+            if structural_count > 0:
+                total_structural_episode_count += 1
+            density_values.append(float(episode_payload["merge_zone_density"]))
+            speed_values.append(float(episode_payload["mean_speed_near_merge"]))
+
+        episode_count = int(len(report["episode_metrics"]))
+        merge_success_rate = self._safe_ratio(total_ramp_merged_count, max(1, total_ramp_vehicle_count))
+        stuck_rate = self._safe_ratio(total_ramp_stuck_count, max(1, total_ramp_vehicle_count))
+        teleport_rate = self._safe_ratio(total_teleport_episode_count, max(1, episode_count))
+        structural_rate = self._safe_ratio(total_structural_episode_count, max(1, episode_count))
+        saturation_rate = self._safe_ratio(total_saturated_candidates, max(1, total_candidate_count))
+        saturation_structural_rate = self._safe_ratio(
+            total_saturated_structural_or_teleport,
+            max(1, total_saturated_candidates),
+        )
+        aggregate = {
+            "ramp_vehicle_count": int(total_ramp_vehicle_count),
+            "ramp_merged_count": int(total_ramp_merged_count),
+            "ramp_stuck_count": int(total_ramp_stuck_count),
+            "ramp_merge_success_rate": float(merge_success_rate),
+            "ramp_stuck_rate": float(stuck_rate),
+            "teleport_rate": float(teleport_rate),
+            "structural_rate": float(structural_rate),
+            "risk_saturation_rate": float(saturation_rate),
+            "risk_saturation_by_structural_or_teleport_rate": float(saturation_structural_rate),
+            "candidate_count": int(total_candidate_count),
+            "saturated_candidate_count": int(total_saturated_candidates),
+            "saturated_structural_or_teleport_count": int(total_saturated_structural_or_teleport),
+            "mean_speed_near_merge": float(sum(speed_values) / len(speed_values)) if speed_values else 0.0,
+            "merge_zone_density": float(sum(density_values) / len(density_values)) if density_values else 0.0,
+        }
+        report["aggregate"] = aggregate
+
+        trigger = dict(report["trigger_thresholds"])
+        critical_reasons: List[str] = []
+        if aggregate["ramp_merge_success_rate"] < float(trigger["ramp_merge_success_rate_min"]):
+            critical_reasons.append("ramp_merge_success_rate_below_trigger")
+        if aggregate["ramp_stuck_rate"] > float(trigger["ramp_stuck_rate_max"]):
+            critical_reasons.append("ramp_stuck_rate_above_trigger")
+        if aggregate["teleport_rate"] > float(trigger["teleport_rate_max"]):
+            critical_reasons.append("teleport_rate_above_trigger")
+        if aggregate["structural_rate"] > float(trigger["structural_rate_max"]):
+            critical_reasons.append("structural_rate_above_trigger")
+        if aggregate["risk_saturation_by_structural_or_teleport_rate"] > float(
+            trigger["risk_saturation_by_structural_or_teleport_rate_max"]
+        ):
+            critical_reasons.append("risk_saturation_by_structural_or_teleport_above_trigger")
+
+        acceptance = dict(report["acceptance_thresholds"])
+        acceptance_reasons: List[str] = []
+        if aggregate["ramp_merge_success_rate"] < float(acceptance["ramp_merge_success_rate_min"]):
+            acceptance_reasons.append("ramp_merge_success_rate_below_acceptance")
+        if aggregate["ramp_stuck_rate"] > float(acceptance["ramp_stuck_rate_max"]):
+            acceptance_reasons.append("ramp_stuck_rate_above_acceptance")
+        if aggregate["teleport_rate"] > float(acceptance["teleport_rate_max"]):
+            acceptance_reasons.append("teleport_rate_above_acceptance")
+        if aggregate["structural_rate"] > float(acceptance["structural_rate_max"]):
+            acceptance_reasons.append("structural_rate_above_acceptance")
+
+        if critical_reasons:
+            report["status"] = "critical"
+        elif acceptance_reasons:
+            report["status"] = "degraded"
+        else:
+            report["status"] = "healthy"
+        report["critical_reasons"] = list(critical_reasons)
+        report["acceptance_reasons"] = list(acceptance_reasons)
+        report["warnings"] = list(critical_reasons) + list(acceptance_reasons)
+        return report
+
+    def _build_stage1_distribution_health(
+        self,
+        stage1_probe_pairs: Sequence[RiskPairSample],
+        stage1_probe_events: Sequence[Dict[str, Any]],
+    ) -> Dict[str, Any]:
+        cfg = self.config.stage1_collection
+        bins = max(2, int(getattr(cfg, "stage1_distribution_health_bins", 16) or 16))
+        pair_all_values: List[float] = []
+        pair_trusted_values: List[float] = []
+        candidate_values: List[float] = []
+        preferred_a = 0
+        preferred_b = 0
+        tie_like = 0
+
+        for sample in list(stage1_probe_pairs or []):
+            meta = dict(sample.meta or {})
+            risk_a = float(meta.get("target_risk_a", 0.0) or 0.0)
+            risk_b = float(meta.get("target_risk_b", 0.0) or 0.0)
+            pair_all_values.extend([risk_a, risk_b])
+            if bool(meta.get("trusted_for_spread", False)):
+                pair_trusted_values.extend([risk_a, risk_b])
+            if int(sample.preferred_action) == int(sample.action_a):
+                preferred_a += 1
+            elif int(sample.preferred_action) == int(sample.action_b):
+                preferred_b += 1
+            else:
+                tie_like += 1
+
+        for event in list(stage1_probe_events or []):
+            for candidate in list(event.get("candidates", []) or []):
+                candidate_values.append(
+                    float(candidate.get("target_proxy_risk", candidate.get("overall_proxy_risk", 0.0)) or 0.0)
+                )
+
+        pair_all = self._stage1_bin_distribution_metrics(pair_all_values, bins)
+        pair_trusted = self._stage1_bin_distribution_metrics(pair_trusted_values, bins)
+        candidate = self._stage1_bin_distribution_metrics(candidate_values, bins)
+
+        thresholds = {
+            "healthy": {
+                "pair_all_effective_min": float(getattr(cfg, "stage1_distribution_healthy_pair_all_effective_min", 8.0) or 8.0),
+                "pair_trusted_effective_min": float(
+                    getattr(cfg, "stage1_distribution_healthy_pair_trusted_effective_min", 7.0) or 7.0
+                ),
+                "candidate_effective_min": float(
+                    getattr(cfg, "stage1_distribution_healthy_candidate_effective_min", 3.0) or 3.0
+                ),
+            },
+            "degraded": {
+                "pair_all_effective_min": float(getattr(cfg, "stage1_distribution_degraded_pair_all_effective_min", 6.0) or 6.0),
+                "pair_trusted_effective_min": float(
+                    getattr(cfg, "stage1_distribution_degraded_pair_trusted_effective_min", 5.0) or 5.0
+                ),
+                "candidate_effective_min": float(
+                    getattr(cfg, "stage1_distribution_degraded_candidate_effective_min", 2.0) or 2.0
+                ),
+            },
+            "high_bin_saturation_threshold": float(
+                getattr(cfg, "stage1_distribution_high_bin_saturation_threshold", 0.85) or 0.85
+            ),
+        }
+
+        warnings: List[str] = []
+        high_bin_saturation = float(candidate.get("high_bin_occupancy", 0.0))
+        if high_bin_saturation >= float(thresholds["high_bin_saturation_threshold"]):
+            warnings.append("candidate_risk_high_bin_saturation")
+        if float(pair_trusted.get("effective", 0.0)) < float(thresholds["healthy"]["pair_trusted_effective_min"]):
+            warnings.append("trusted_distribution_too_narrow")
+
+        healthy_ok = (
+            float(pair_all.get("effective", 0.0)) >= float(thresholds["healthy"]["pair_all_effective_min"])
+            and float(pair_trusted.get("effective", 0.0)) >= float(thresholds["healthy"]["pair_trusted_effective_min"])
+            and float(candidate.get("effective", 0.0)) >= float(thresholds["healthy"]["candidate_effective_min"])
+        )
+        degraded_ok = (
+            float(pair_all.get("effective", 0.0)) >= float(thresholds["degraded"]["pair_all_effective_min"])
+            and float(pair_trusted.get("effective", 0.0)) >= float(thresholds["degraded"]["pair_trusted_effective_min"])
+            and float(candidate.get("effective", 0.0)) >= float(thresholds["degraded"]["candidate_effective_min"])
+        )
+        if healthy_ok and "candidate_risk_high_bin_saturation" not in warnings:
+            status = "healthy"
+        elif degraded_ok:
+            status = "degraded"
+        else:
+            status = "critical"
+
+        return {
+            "run_id": str(self.run_id or ""),
+            "created_at": dt.datetime.now().isoformat(timespec="seconds"),
+            "status": str(status),
+            "warnings": list(warnings),
+            "pair_count": int(len(list(stage1_probe_pairs or []))),
+            "candidate_count": int(len(candidate_values)),
+            "preferred_a": int(preferred_a),
+            "preferred_b": int(preferred_b),
+            "tie_like": int(tie_like),
+            "pair_all_bin_nonempty": int(pair_all.get("nonempty", 0)),
+            "pair_all_bin_effective": float(pair_all.get("effective", 0.0)),
+            "pair_all_bin_entropy": float(pair_all.get("entropy", 0.0)),
+            "pair_all_bin_occupancy": list(pair_all.get("occupancy", [])),
+            "pair_trusted_bin_nonempty": int(pair_trusted.get("nonempty", 0)),
+            "pair_trusted_bin_effective": float(pair_trusted.get("effective", 0.0)),
+            "pair_trusted_bin_entropy": float(pair_trusted.get("entropy", 0.0)),
+            "pair_trusted_bin_occupancy": list(pair_trusted.get("occupancy", [])),
+            "candidate_bin_nonempty": int(candidate.get("nonempty", 0)),
+            "candidate_bin_effective": float(candidate.get("effective", 0.0)),
+            "candidate_bin_entropy": float(candidate.get("entropy", 0.0)),
+            "candidate_bin_occupancy": list(candidate.get("occupancy", [])),
+            "candidate_high_bin_occupancy": float(high_bin_saturation),
+            "thresholds": thresholds,
+        }
+
+    def _build_stage1_pair_source_breakdown(
+        self,
+        stage1_probe_pairs: Sequence[RiskPairSample],
+        stage1_probe_summary: Optional[Dict[str, Any]],
+    ) -> Dict[str, Any]:
+        bins = max(2, int(getattr(self.config.stage1_collection, "probe_pair_stratified_bins", 16) or 16))
+        category_values: Dict[str, List[float]] = {
+            "stratified_risk_bin": [],
+            "stratified_gap_bin": [],
+            "strong_signal": [],
+            "boundary_small_gap": [],
+            "appended_boundary": [],
+            "capped_by_budget": [],
+            "fallback_priority": [],
+        }
+        category_pair_count: Dict[str, int] = {key: 0 for key in category_values.keys()}
+        category_trusted_count: Dict[str, int] = {key: 0 for key in category_values.keys()}
+
+        for sample in list(stage1_probe_pairs or []):
+            meta = dict(sample.meta or {})
+            source = str(meta.get("pair_selection_source", "") or "")
+            normalized = source if source in category_values else "fallback_priority"
+            if bool(meta.get("boundary_pair", False)) and normalized not in ("boundary_small_gap",):
+                normalized = "appended_boundary"
+            risk_a = float(meta.get("target_risk_a", 0.0) or 0.0)
+            risk_b = float(meta.get("target_risk_b", 0.0) or 0.0)
+            category_values[normalized].extend([risk_a, risk_b])
+            category_pair_count[normalized] += 1
+            if bool(meta.get("trusted_for_spread", False)):
+                category_trusted_count[normalized] += 1
+
+        summary_payload = dict(stage1_probe_summary or {})
+        category_pair_count["strong_signal"] = max(
+            int(category_pair_count.get("strong_signal", 0)),
+            int(summary_payload.get("pairs_kept_strong_signal", 0) or 0),
+        )
+        category_pair_count["appended_boundary"] = max(
+            int(category_pair_count.get("appended_boundary", 0)),
+            int(summary_payload.get("pairs_boundary_appended", 0) or 0),
+        )
+        category_pair_count["capped_by_budget"] = int(summary_payload.get("pairs_capped_by_budget", 0) or 0)
+
+        breakdown: Dict[str, Any] = {}
+        for key in (
+            "stratified_risk_bin",
+            "stratified_gap_bin",
+            "strong_signal",
+            "boundary_small_gap",
+            "appended_boundary",
+            "capped_by_budget",
+            "fallback_priority",
+        ):
+            metrics = self._stage1_bin_distribution_metrics(category_values.get(key, []), bins)
+            breakdown[key] = {
+                "pair_count": int(category_pair_count.get(key, 0)),
+                "trusted_count": int(category_trusted_count.get(key, 0)),
+                "bin_nonempty": int(metrics.get("nonempty", 0)),
+                "bin_effective": float(metrics.get("effective", 0.0)),
+                "bin_entropy": float(metrics.get("entropy", 0.0)),
+                "bin_occupancy": list(metrics.get("occupancy", [])),
+            }
+        return breakdown
 
     def _run_stage2(self, tb_manager: TensorboardManager) -> Dict:
         print("[Pipeline] stage2: train light risk and world model", flush=True)
@@ -1370,6 +1867,10 @@ class SafeRLPipeline:
         )
         self._print_stage2_pair_source_preflight(stage2_pair_source_health)
         self._update_warning_summary_with_stage2_pair_source_health(stage2_pair_source_health)
+        stage1_distribution_gate = self._collect_stage1_distribution_gate()
+        self._print_stage1_distribution_preflight(stage1_distribution_gate)
+        self._update_warning_summary_with_stage1_distribution_gate(stage1_distribution_gate)
+        self._enforce_stage1_distribution_gate(stage1_distribution_gate)
         print(
             f"[Pipeline] stage2: pair datasets stage5_pairs_created={stage5_pairs_created}, stage1_probe_pairs_created={stage1_probe_pairs_created}, stage4_pairs_created={stage4_pairs_created}",
             flush=True,
@@ -1476,6 +1977,7 @@ class SafeRLPipeline:
             "world_pair_ft_restored_best": bool(world_pair_ft_report.get("world_pair_ft_restored_best", False)),
             "stage2_determinism": dict(training_meta.get("stage2_determinism", {})),
             "stage2_pair_source_health": stage2_pair_source_health,
+            "stage1_distribution_gate": dict(stage1_distribution_gate),
         }
         stage2_report["stage2_pair_source_health"]["stage5_requirement_met"] = bool(stage2_report["stage5_requirement_met"])
         stage2_report["stage2_pair_source_health"]["world_pair_finetune_mode"] = str(stage2_report["world_pair_finetune_mode"])
@@ -1821,6 +2323,166 @@ class SafeRLPipeline:
             }
         except Exception as exc:
             return self._stage2_healthy_snapshot_default_payload(f"snapshot_create_failed: {exc}")
+
+    def _collect_stage1_distribution_gate(self) -> Dict[str, Any]:
+        enabled = bool(getattr(self.config.stage1_collection, "stage2_distribution_gate_enabled", False))
+        block_on_status = str(
+            getattr(self.config.stage1_collection, "stage2_distribution_gate_block_on_status", "critical") or "critical"
+        ).strip().lower()
+        if block_on_status not in {"healthy", "degraded", "critical"}:
+            block_on_status = "critical"
+
+        payload: Dict[str, Any] = {
+            "run_id": str(self.run_id or ""),
+            "created_at": dt.datetime.now().isoformat(timespec="seconds"),
+            "enabled": bool(enabled),
+            "stage1_probe_summary_path": str(self.stage1_probe_summary_path or ""),
+            "status": "disabled" if not enabled else "warning",
+            "message": "Stage1 distribution gate disabled.",
+            "gate_passed": True,
+            "hard_block": False,
+            "allow_with_warning": False,
+            "block_on_status": str(block_on_status),
+            "distribution_health": {},
+            "recommendation_commands": [],
+        }
+        if self.run_id:
+            payload["recommendation_commands"] = [
+                f"python safe_rl_main.py --config safe_rl/config/advanced/stage1_r0_audit.yaml --stage stage1 --run-id {self.run_id}",
+                f"python safe_rl_main.py --config safe_rl/config/advanced/stage1_r1_calibrated_risk.yaml --stage stage1 --run-id {self.run_id}",
+                f"python safe_rl_main.py --config safe_rl/config/advanced/stage1_r2_stratified_sampling.yaml --stage stage1 --run-id {self.run_id}",
+            ]
+        else:
+            payload["recommendation_commands"] = [
+                "python safe_rl_main.py --config safe_rl/config/advanced/stage1_r0_audit.yaml --stage stage1 --run-id <run_id>",
+                "python safe_rl_main.py --config safe_rl/config/advanced/stage1_r1_calibrated_risk.yaml --stage stage1 --run-id <run_id>",
+                "python safe_rl_main.py --config safe_rl/config/advanced/stage1_r2_stratified_sampling.yaml --stage stage1 --run-id <run_id>",
+            ]
+
+        if not enabled:
+            return payload
+
+        if self.stage1_probe_summary_path is None or not self.stage1_probe_summary_path.exists():
+            payload["status"] = "warning"
+            payload["message"] = "stage1_probe_summary.json not found; Stage1 distribution gate cannot evaluate health."
+            payload["allow_with_warning"] = True
+            return payload
+
+        try:
+            stage1_summary = self._read_json(self.stage1_probe_summary_path)
+        except Exception as exc:
+            payload["status"] = "warning"
+            payload["message"] = f"failed_to_read_stage1_probe_summary: {exc}"
+            payload["allow_with_warning"] = True
+            return payload
+
+        distribution_health = dict(stage1_summary.get("stage1_distribution_health", {}) or {})
+        if not distribution_health:
+            payload["status"] = "warning"
+            payload["message"] = "stage1_distribution_health missing in stage1_probe_summary.json."
+            payload["allow_with_warning"] = True
+            return payload
+
+        status = str(distribution_health.get("status", "unknown") or "unknown").strip().lower()
+        payload["distribution_health"] = distribution_health
+        payload["status"] = status if status in {"healthy", "degraded", "critical"} else "warning"
+        payload["message"] = str(distribution_health.get("message", "") or "")
+        payload["pair_all_bin_effective"] = float(distribution_health.get("pair_all_bin_effective", 0.0) or 0.0)
+        payload["pair_trusted_bin_effective"] = float(distribution_health.get("pair_trusted_bin_effective", 0.0) or 0.0)
+        payload["candidate_bin_effective"] = float(distribution_health.get("candidate_bin_effective", 0.0) or 0.0)
+        payload["warnings"] = list(distribution_health.get("warnings", []) or [])
+
+        if status == block_on_status:
+            payload["gate_passed"] = False
+            payload["hard_block"] = True
+            payload["allow_with_warning"] = False
+            payload["message"] = (
+                str(payload["message"]).strip()
+                or f"Stage1 distribution health is {status}, blocked by stage2_distribution_gate_block_on_status={block_on_status}."
+            )
+            return payload
+
+        if status == "degraded":
+            payload["gate_passed"] = True
+            payload["hard_block"] = False
+            payload["allow_with_warning"] = True
+            payload["message"] = (
+                str(payload["message"]).strip()
+                or "Stage1 distribution health is degraded; Stage2 proceeds with warning."
+            )
+            return payload
+
+        if status == "healthy":
+            payload["gate_passed"] = True
+            payload["hard_block"] = False
+            payload["allow_with_warning"] = False
+            payload["message"] = str(payload["message"]).strip() or "Stage1 distribution health gate passed."
+            return payload
+
+        payload["gate_passed"] = True
+        payload["hard_block"] = False
+        payload["allow_with_warning"] = True
+        payload["message"] = (
+            str(payload["message"]).strip()
+            or "Stage1 distribution health status is unknown; Stage2 proceeds with warning."
+        )
+        return payload
+
+    def _print_stage1_distribution_preflight(self, gate: Dict[str, Any]):
+        if not bool(gate.get("enabled", False)):
+            return
+        status = str(gate.get("status", "warning"))
+        if status == "healthy" and bool(gate.get("gate_passed", True)):
+            print(
+                "[Pipeline][Stage2][Preflight] stage1 distribution health is healthy.",
+                flush=True,
+            )
+            return
+        print(
+            "[Pipeline][Stage2][Preflight] stage1 distribution gate check:",
+            flush=True,
+        )
+        print(
+            f"[Pipeline][Stage2][Preflight] status={status}, block_on={str(gate.get('block_on_status', 'critical'))}, "
+            f"pair_all_bin_effective={float(gate.get('pair_all_bin_effective', 0.0)):.4f}, "
+            f"pair_trusted_bin_effective={float(gate.get('pair_trusted_bin_effective', 0.0)):.4f}, "
+            f"candidate_bin_effective={float(gate.get('candidate_bin_effective', 0.0)):.4f}",
+            flush=True,
+        )
+        warnings = list(gate.get("warnings", []) or [])
+        if warnings:
+            print(
+                f"[Pipeline][Stage2][Preflight] distribution_warnings={','.join(str(item) for item in warnings)}",
+                flush=True,
+            )
+        message = str(gate.get("message", "") or "").strip()
+        if message:
+            print(f"[Pipeline][Stage2][Preflight] message: {message}", flush=True)
+        for command in list(gate.get("recommendation_commands", []) or []):
+            print(f"[Pipeline][Stage2][Preflight] suggestion: {command}", flush=True)
+
+    def _update_warning_summary_with_stage1_distribution_gate(self, gate: Dict[str, Any]):
+        self._merge_warning_summary_stage_payload(
+            stage_key="stage2",
+            top_level_key="stage1_distribution_gate",
+            payload=gate,
+        )
+
+    def _enforce_stage1_distribution_gate(self, gate: Dict[str, Any]):
+        if not bool(gate.get("enabled", False)):
+            return
+        if bool(gate.get("gate_passed", True)):
+            return
+        if not bool(gate.get("hard_block", False)):
+            return
+        message = (
+            "[Pipeline][stage2] blocked by Stage1 distribution gate: "
+            f"status={str(gate.get('status', 'unknown'))}, "
+            f"block_on={str(gate.get('block_on_status', 'critical'))}, "
+            f"summary={str(gate.get('stage1_probe_summary_path', ''))}, "
+            f"message={str(gate.get('message', ''))}"
+        )
+        raise RuntimeError(message)
 
     def _build_stage2_pair_source_health(
         self,

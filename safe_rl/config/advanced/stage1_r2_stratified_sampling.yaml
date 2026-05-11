@@ -1,0 +1,13 @@
+tensorboard:
+  run_name: "stage1_r2_stratified_sampling"
+
+stage1_collection:
+  probe_pair_target_risk_source: "calibrated_proxy_risk"
+  probe_trusted_exclude_structural_dominant: true
+  probe_pair_stratified_keep_enabled: true
+  probe_pair_stratified_bins: 16
+  probe_pair_keep_per_risk_bin: 32
+  probe_pair_keep_per_gap_bin: 32
+  probe_pair_min_total_per_active_bin: 16
+  stage2_distribution_gate_enabled: true
+  stage2_distribution_gate_block_on_status: "critical"

@@ -80,3 +80,33 @@ python -m safe_rl.visualization.stage1_sumo_replay --run-id <run_id> --mode comp
 说明：
 - Stage5 可视化链路（trace/anomaly/gif/gui）用于 Stage5 pair 检查；
 - Stage1 Data Audit / Stage1 SUMO Replay 用于定位 Stage1 监督分布与 pair 结构问题。
+
+## Stage1-R Phased Runbook
+
+```bash
+# R0: audit only (no data semantic change)
+python safe_rl_main.py --config safe_rl/config/advanced/stage1_r0_audit.yaml --stage stage1 --run-id 20260414_200057
+
+# R1: calibrated risk mapping only (keep sampling unchanged)
+python safe_rl_main.py --config safe_rl/config/advanced/stage1_r1_calibrated_risk.yaml --stage stage1 --run-id 20260414_200057
+
+# R2: stratified sampling only + Stage2 distribution gate (critical-only block)
+python safe_rl_main.py --config safe_rl/config/advanced/stage1_r2_stratified_sampling.yaml --stage stage1 --run-id 20260414_200057
+python safe_rl_main.py --config safe_rl/config/advanced/stage1_r2_stratified_sampling.yaml --stage stage2 --run-id 20260414_200057
+```
+
+R3 compact merge rule:
+- Trigger only when `stage1_scene_sanity_report.json` is critical by trigger thresholds.
+- Must use a new run id (do not mix with `20260414_200057`).
+
+```bash
+python safe_rl_main.py --config safe_rl/config/advanced/stage1_r3_compact_merge.yaml --stage stage1 --run-id 202605_stage1r_compact_v1
+python safe_rl_main.py --config safe_rl/config/advanced/stage1_r3_compact_merge.yaml --stage stage2 --run-id 202605_stage1r_compact_v1
+```
+
+Compare-AB output fields include:
+- `both_saturated`
+- `saturation_reason_a`
+- `saturation_reason_b`
+- `action_sensitive`
+- `diagnosis`

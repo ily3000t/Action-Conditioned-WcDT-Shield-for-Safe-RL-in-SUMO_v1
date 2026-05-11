@@ -7,6 +7,7 @@ import pytest
 
 from safe_rl.buffer import InterventionBuffer
 from safe_rl.config.config import SafeRLConfig, ShieldSweepVariant
+from safe_rl.data.types import RiskPairSample
 from safe_rl.pipeline.pipeline import SafeRLPipeline
 from safe_rl.rl.ppo import HeuristicPolicy
 from safe_rl.tools.restore_stage2_snapshot import restore_stage2_snapshot
@@ -305,6 +306,120 @@ def test_warning_summary_stage_merge_preserves_existing_stage_fields_on_auto_rec
     assert merged["by_stage"]["stage4"]["status"] == "critical"
     assert merged["by_stage"]["stage4"]["auto_stage2_recovery_triggered"] is True
     assert merged["by_stage"]["stage4"]["auto_stage2_recovery_result_status"] == "degraded"
+
+
+def test_stage1_distribution_health_and_pair_source_breakdown_fields():
+    config = _tiny_config()
+    pipeline = SafeRLPipeline(config)
+    run_id = f"ut_stage1_dist_{uuid.uuid4().hex[:8]}"
+    pipeline._prepare_run_context(stage="stage1", run_id=run_id)
+
+    pairs = [
+        RiskPairSample(
+            history_scene=[],
+            action_a=0,
+            action_b=1,
+            preferred_action=0,
+            source="stage1_probe_same_state",
+            meta={
+                "target_risk_a": 0.2,
+                "target_risk_b": 0.8,
+                "trusted_for_spread": True,
+                "pair_selection_source": "stratified_risk_bin",
+            },
+        ),
+        RiskPairSample(
+            history_scene=[],
+            action_a=1,
+            action_b=2,
+            preferred_action=2,
+            source="stage1_probe_same_state",
+            meta={
+                "target_risk_a": 0.4,
+                "target_risk_b": 0.6,
+                "trusted_for_spread": False,
+                "pair_selection_source": "boundary_small_gap",
+                "boundary_pair": True,
+            },
+        ),
+    ]
+    events = [
+        {
+            "episode_id": "ep_0",
+            "candidates": [
+                {"target_proxy_risk": 0.3, "overall_proxy_risk": 0.3},
+                {"target_proxy_risk": 0.9, "overall_proxy_risk": 0.9},
+            ],
+        }
+    ]
+
+    health = pipeline._build_stage1_distribution_health(
+        stage1_probe_pairs=pairs,
+        stage1_probe_events=events,
+    )
+    assert health["pair_count"] == 2
+    assert health["preferred_a"] + health["preferred_b"] + health["tie_like"] == 2
+    assert "pair_all_bin_effective" in health
+    assert "pair_trusted_bin_effective" in health
+    assert "candidate_bin_effective" in health
+    assert health["status"] in {"healthy", "degraded", "critical"}
+
+    breakdown = pipeline._build_stage1_pair_source_breakdown(
+        stage1_probe_pairs=pairs,
+        stage1_probe_summary={"pairs_capped_by_budget": 3, "pairs_boundary_appended": 1},
+    )
+    for key in (
+        "stratified_risk_bin",
+        "stratified_gap_bin",
+        "strong_signal",
+        "boundary_small_gap",
+        "appended_boundary",
+        "capped_by_budget",
+    ):
+        assert key in breakdown
+        assert "pair_count" in breakdown[key]
+        assert "trusted_count" in breakdown[key]
+        assert "bin_effective" in breakdown[key]
+
+
+def test_stage2_distribution_gate_blocks_critical_and_allows_degraded():
+    config = _tiny_config()
+    config.stage1_collection.stage2_distribution_gate_enabled = True
+    config.stage1_collection.stage2_distribution_gate_block_on_status = "critical"
+    pipeline = SafeRLPipeline(config)
+    run_id = f"ut_stage1_gate_{uuid.uuid4().hex[:8]}"
+    pipeline._prepare_run_context(stage="stage2", run_id=run_id)
+
+    critical_summary = {
+        "stage1_distribution_health": {
+            "status": "critical",
+            "pair_all_bin_effective": 4.0,
+            "pair_trusted_bin_effective": 3.0,
+            "candidate_bin_effective": 1.5,
+            "warnings": ["trusted_distribution_too_narrow"],
+        }
+    }
+    pipeline._write_json(pipeline.stage1_probe_summary_path, critical_summary)
+    gate_critical = pipeline._collect_stage1_distribution_gate()
+    assert gate_critical["hard_block"] is True
+    with pytest.raises(RuntimeError):
+        pipeline._enforce_stage1_distribution_gate(gate_critical)
+
+    degraded_summary = {
+        "stage1_distribution_health": {
+            "status": "degraded",
+            "pair_all_bin_effective": 6.2,
+            "pair_trusted_bin_effective": 5.1,
+            "candidate_bin_effective": 2.3,
+            "warnings": [],
+        }
+    }
+    pipeline._write_json(pipeline.stage1_probe_summary_path, degraded_summary)
+    gate_degraded = pipeline._collect_stage1_distribution_gate()
+    assert gate_degraded["gate_passed"] is True
+    assert gate_degraded["hard_block"] is False
+    assert gate_degraded["allow_with_warning"] is True
+    pipeline._enforce_stage1_distribution_gate(gate_degraded)
 
 
 def test_stage4_pair_builder_uses_candidate_rank_pairs_without_interventions():

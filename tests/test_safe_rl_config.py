@@ -29,6 +29,33 @@ def test_default_config_loads():
     assert config.stage1_collection.probe_pair_max_pairs_per_step == 12
     assert config.stage1_collection.probe_pair_boundary_gap_floor == 0.005
     assert config.stage1_collection.probe_pair_boundary_keep_per_risky_step == 1
+    assert config.stage1_collection.probe_pair_target_risk_source == "raw_proxy_risk"
+    assert config.stage1_collection.probe_trusted_exclude_structural_dominant is False
+    assert config.stage1_collection.probe_pair_stratified_keep_enabled is False
+    assert config.stage1_collection.probe_pair_stratified_bins == 16
+    assert config.stage1_collection.probe_pair_keep_per_risk_bin == 32
+    assert config.stage1_collection.probe_pair_keep_per_gap_bin == 32
+    assert config.stage1_collection.probe_pair_min_total_per_active_bin == 16
+    assert config.stage1_collection.stage1_distribution_health_bins == 16
+    assert config.stage1_collection.stage1_distribution_healthy_pair_all_effective_min == pytest.approx(8.0)
+    assert config.stage1_collection.stage1_distribution_healthy_pair_trusted_effective_min == pytest.approx(7.0)
+    assert config.stage1_collection.stage1_distribution_healthy_candidate_effective_min == pytest.approx(3.0)
+    assert config.stage1_collection.stage1_distribution_degraded_pair_all_effective_min == pytest.approx(6.0)
+    assert config.stage1_collection.stage1_distribution_degraded_pair_trusted_effective_min == pytest.approx(5.0)
+    assert config.stage1_collection.stage1_distribution_degraded_candidate_effective_min == pytest.approx(2.0)
+    assert config.stage1_collection.stage1_distribution_high_bin_saturation_threshold == pytest.approx(0.85)
+    assert config.stage1_collection.stage2_distribution_gate_enabled is False
+    assert config.stage1_collection.stage2_distribution_gate_block_on_status == "critical"
+    assert config.stage1_collection.scene_sanity_enabled is True
+    assert config.stage1_collection.scene_sanity_trigger_merge_success_min == pytest.approx(0.30)
+    assert config.stage1_collection.scene_sanity_trigger_stuck_rate_max == pytest.approx(0.50)
+    assert config.stage1_collection.scene_sanity_trigger_teleport_rate_max == pytest.approx(0.08)
+    assert config.stage1_collection.scene_sanity_trigger_structural_rate_max == pytest.approx(0.12)
+    assert config.stage1_collection.scene_sanity_trigger_structural_saturation_rate_max == pytest.approx(0.50)
+    assert config.stage1_collection.scene_sanity_accept_merge_success_min == pytest.approx(0.45)
+    assert config.stage1_collection.scene_sanity_accept_stuck_rate_max == pytest.approx(0.35)
+    assert config.stage1_collection.scene_sanity_accept_teleport_rate_max == pytest.approx(0.08)
+    assert config.stage1_collection.scene_sanity_accept_structural_rate_max == pytest.approx(0.12)
     assert config.stage1_collection.stage4_candidate_min_target_gap == 0.01
     assert config.stage1_collection.exclude_structural_from_main is True
     assert config.world_model.min_spread_eligible_pairs_for_gate_source == 128
@@ -173,6 +200,36 @@ def test_stage5_pair_bootstrap_config_loads():
     assert len(config.shield_trace.seed_list) == 50
     assert config.eval.eval_episodes == 50
     assert config.tensorboard.run_name == "shield_trace_pair_bootstrap"
+
+
+def test_stage1_r_profiles_load():
+    default_cfg = load_safe_rl_config("safe_rl/config/default_safe_rl.yaml")
+    r0 = load_safe_rl_config("safe_rl/config/advanced/stage1_r0_audit.yaml")
+    r1 = load_safe_rl_config("safe_rl/config/advanced/stage1_r1_calibrated_risk.yaml")
+    r2 = load_safe_rl_config("safe_rl/config/advanced/stage1_r2_stratified_sampling.yaml")
+    r3 = load_safe_rl_config("safe_rl/config/advanced/stage1_r3_compact_merge.yaml")
+
+    assert r0.stage1_collection.probe_pair_target_risk_source == "raw_proxy_risk"
+    assert r0.stage1_collection.probe_pair_stratified_keep_enabled is False
+    assert r0.stage1_collection.stage2_distribution_gate_enabled is False
+
+    assert r1.stage1_collection.probe_pair_target_risk_source == "calibrated_proxy_risk"
+    assert r1.stage1_collection.probe_trusted_exclude_structural_dominant is True
+    assert r1.stage1_collection.probe_pair_stratified_keep_enabled is False
+    assert r1.stage1_collection.stage2_distribution_gate_enabled is False
+
+    assert r2.stage1_collection.probe_pair_target_risk_source == "calibrated_proxy_risk"
+    assert r2.stage1_collection.probe_pair_stratified_keep_enabled is True
+    assert r2.stage1_collection.probe_pair_stratified_bins == 16
+    assert r2.stage1_collection.stage2_distribution_gate_enabled is True
+    assert r2.stage1_collection.stage2_distribution_gate_block_on_status == "critical"
+
+    assert r3.sim.scenario_variant == "stage1r_compact_merge_v1"
+    assert r3.stage1_collection.probe_pair_target_risk_source == "calibrated_proxy_risk"
+    assert r3.stage1_collection.probe_pair_stratified_keep_enabled is True
+    assert r3.stage1_collection.stage2_distribution_gate_enabled is True
+
+    assert r0.world_model.pair_ft_gate_head_enabled == default_cfg.world_model.pair_ft_gate_head_enabled
 
 
 def test_stage5_eval_hardening_config_loads():
