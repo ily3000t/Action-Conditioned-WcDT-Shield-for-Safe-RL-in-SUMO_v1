@@ -7,10 +7,11 @@ import datetime as dt
 import json
 import shutil
 import time
+import xml.etree.ElementTree as ET
 from collections import Counter
 from dataclasses import asdict, dataclass
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Sequence
+from typing import Any, Dict, List, Optional, Sequence, Set
 
 import numpy as np
 
@@ -1401,6 +1402,87 @@ class SafeRLPipeline:
             "high_bin_occupancy": float(occupancy[-1]) if occupancy else 0.0,
         }
 
+    def _normalize_string_list(self, value: Any, default: Sequence[str]) -> List[str]:
+        if isinstance(value, str):
+            items = [item.strip() for item in value.split(",")]
+            cleaned = [item for item in items if item]
+            return cleaned if cleaned else [str(item) for item in default]
+        if isinstance(value, (list, tuple)):
+            cleaned = [str(item).strip() for item in list(value) if str(item).strip()]
+            return cleaned if cleaned else [str(item) for item in default]
+        return [str(item) for item in default]
+
+    def _resolve_scene_sanity_net_path(self) -> Optional[Path]:
+        cfg_path = Path(self.config.sim.sumo_cfg)
+        if not cfg_path.is_absolute():
+            cfg_path = (Path.cwd() / cfg_path).resolve()
+        if not cfg_path.exists():
+            return None
+        try:
+            root = ET.parse(cfg_path).getroot()
+            input_node = root.find("./input")
+            if input_node is None:
+                return None
+            net_node = input_node.find("net-file")
+            if net_node is None:
+                return None
+            raw_value = str(net_node.attrib.get("value", "")).strip()
+            if not raw_value:
+                return None
+            first_path = raw_value.split(",")[0].strip()
+            if not first_path:
+                return None
+            net_path = (cfg_path.parent / first_path).resolve()
+            return net_path if net_path.exists() else None
+        except Exception:
+            return None
+
+    def _infer_scene_sanity_merge_x_from_net(self, main_downstream_edges: Sequence[str]) -> Optional[float]:
+        net_path = self._resolve_scene_sanity_net_path()
+        if net_path is None:
+            return None
+        try:
+            root = ET.parse(net_path).getroot()
+        except Exception:
+            return None
+        edges_by_id: Dict[str, Any] = {}
+        for edge in root.findall("./edge"):
+            edge_id = str(edge.attrib.get("id", "")).strip()
+            if edge_id:
+                edges_by_id[edge_id] = edge
+        target_edge_id = None
+        for edge_id in list(main_downstream_edges or []):
+            if str(edge_id) in edges_by_id:
+                target_edge_id = str(edge_id)
+                break
+        if target_edge_id is None:
+            return None
+        edge = edges_by_id.get(target_edge_id)
+        if edge is None:
+            return None
+        from_junction = str(edge.attrib.get("from", "")).strip()
+        if from_junction:
+            for junction in root.findall("./junction"):
+                if str(junction.attrib.get("id", "")).strip() != from_junction:
+                    continue
+                try:
+                    return float(junction.attrib.get("x", 0.0))
+                except Exception:
+                    break
+        lane = edge.find("./lane")
+        if lane is None:
+            return None
+        shape = str(lane.attrib.get("shape", "")).strip()
+        if not shape:
+            return None
+        first = shape.split(" ")[0].strip()
+        if "," not in first:
+            return None
+        try:
+            return float(first.split(",")[0])
+        except Exception:
+            return None
+
     def _build_stage1_scene_sanity_report(
         self,
         episodes: Sequence[EpisodeLog],
@@ -1408,6 +1490,44 @@ class SafeRLPipeline:
     ) -> Dict[str, Any]:
         cfg = self.config.stage1_collection
         enabled = bool(getattr(cfg, "scene_sanity_enabled", True))
+        merge_success_logic = str(getattr(cfg, "scene_sanity_merge_success_logic", "y_threshold") or "y_threshold").strip().lower()
+        if merge_success_logic not in {"y_threshold", "edge_route_based"}:
+            merge_success_logic = "y_threshold"
+        ramp_edges = self._normalize_string_list(getattr(cfg, "scene_sanity_ramp_edges", None), ["ramp_in"])
+        main_downstream_edges = self._normalize_string_list(
+            getattr(cfg, "scene_sanity_main_downstream_edges", None),
+            ["main_out"],
+        )
+        stuck_edge_prefixes = self._normalize_string_list(
+            getattr(cfg, "scene_sanity_stuck_edge_prefixes", None),
+            ["ramp_in", ":merge"],
+        )
+
+        x_min = float(getattr(cfg, "scene_sanity_roi_x_min", 320.0) or 320.0)
+        x_max = float(getattr(cfg, "scene_sanity_roi_x_max", 420.0) or 420.0)
+        y_min = float(getattr(cfg, "scene_sanity_roi_y_min", -12.0) or -12.0)
+        y_max = float(getattr(cfg, "scene_sanity_roi_y_max", 16.0) or 16.0)
+        merge_y = float(getattr(cfg, "scene_sanity_merge_success_y_threshold", 0.0) or 0.0)
+        merge_x_override = float(getattr(cfg, "scene_sanity_merge_x_override", 0.0) or 0.0)
+        roi_auto_from_net = bool(getattr(cfg, "scene_sanity_roi_auto_from_net", False))
+        roi_half_width = max(1.0, float(getattr(cfg, "scene_sanity_roi_half_width", 50.0) or 50.0))
+
+        roi_source = "legacy_defaults"
+        if merge_x_override > 0.0:
+            merge_x = float(merge_x_override)
+            roi_source = "config"
+        else:
+            merge_x_inferred = self._infer_scene_sanity_merge_x_from_net(main_downstream_edges) if roi_auto_from_net else None
+            if merge_x_inferred is not None:
+                merge_x = float(merge_x_inferred)
+                roi_source = "net_geometry"
+            else:
+                merge_x = float((x_min + x_max) * 0.5)
+                roi_source = "legacy_defaults"
+        if merge_x_override > 0.0 or roi_auto_from_net:
+            x_min = float(merge_x - roi_half_width)
+            x_max = float(merge_x + roi_half_width)
+
         report: Dict[str, Any] = {
             "run_id": str(self.run_id or ""),
             "created_at": dt.datetime.now().isoformat(timespec="seconds"),
@@ -1419,6 +1539,13 @@ class SafeRLPipeline:
             "episode_count": int(len(list(episodes or []))),
             "episode_metrics": [],
             "aggregate": {},
+            "merge_success_logic": str(merge_success_logic),
+            "ramp_edges": list(ramp_edges),
+            "main_downstream_edges": list(main_downstream_edges),
+            "stuck_edge_prefixes": list(stuck_edge_prefixes),
+            "logic_fallback_used": False,
+            "logic_fallback_reason": "",
+            "logic_fallback_reasons": [],
             "trigger_thresholds": {
                 "ramp_merge_success_rate_min": float(getattr(cfg, "scene_sanity_trigger_merge_success_min", 0.30) or 0.30),
                 "ramp_stuck_rate_max": float(getattr(cfg, "scene_sanity_trigger_stuck_rate_max", 0.50) or 0.50),
@@ -1435,11 +1562,13 @@ class SafeRLPipeline:
                 "structural_rate_max": float(getattr(cfg, "scene_sanity_accept_structural_rate_max", 0.12) or 0.12),
             },
             "roi": {
-                "x_min": float(getattr(cfg, "scene_sanity_roi_x_min", 320.0) or 320.0),
-                "x_max": float(getattr(cfg, "scene_sanity_roi_x_max", 420.0) or 420.0),
-                "y_min": float(getattr(cfg, "scene_sanity_roi_y_min", -12.0) or -12.0),
-                "y_max": float(getattr(cfg, "scene_sanity_roi_y_max", 16.0) or 16.0),
-                "merge_success_y_threshold": float(getattr(cfg, "scene_sanity_merge_success_y_threshold", 0.0) or 0.0),
+                "x_min": float(x_min),
+                "x_max": float(x_max),
+                "y_min": float(y_min),
+                "y_max": float(y_max),
+                "merge_success_y_threshold": float(merge_y),
+                "merge_x": float(merge_x),
+                "source": str(roi_source),
             },
         }
         if not enabled:
@@ -1456,11 +1585,6 @@ class SafeRLPipeline:
             }
             return report
 
-        x_min = float(report["roi"]["x_min"])
-        x_max = float(report["roi"]["x_max"])
-        y_min = float(report["roi"]["y_min"])
-        y_max = float(report["roi"]["y_max"])
-        merge_y = float(report["roi"]["merge_success_y_threshold"])
         stopped_speed = float(getattr(cfg, "scene_sanity_stopped_speed_threshold", 0.5) or 0.5)
         stuck_wait = max(1, int(getattr(cfg, "scene_sanity_stuck_min_wait_steps", 20) or 20))
 
@@ -1479,6 +1603,7 @@ class SafeRLPipeline:
         total_candidate_count = 0
         density_values: List[float] = []
         speed_values: List[float] = []
+        fallback_reasons: Set[str] = set()
 
         for episode in list(episodes or []):
             episode_id = str(episode.episode_id)
@@ -1503,6 +1628,7 @@ class SafeRLPipeline:
                     speed = float(math.sqrt(vx * vx + vy * vy))
                     x = float(getattr(vehicle, "x", 0.0) or 0.0)
                     y = float(getattr(vehicle, "y", 0.0) or 0.0)
+                    road_id = str(getattr(vehicle, "road_id", "") or "")
                     in_roi = x_min <= x <= x_max and y_min <= y <= y_max
                     if not in_roi:
                         continue
@@ -1520,26 +1646,61 @@ class SafeRLPipeline:
                             "stopped_steps": 0,
                         },
                     )
-                    if y < merge_y:
-                        state["seen_ramp"] = True
-                        if speed <= stopped_speed:
-                            state["stopped_streak"] = int(state["stopped_streak"]) + 1
-                            state["stopped_steps"] = int(state["stopped_steps"]) + 1
-                        else:
+
+                    use_edge_logic = merge_success_logic == "edge_route_based"
+                    if use_edge_logic and not road_id:
+                        fallback_reasons.add("missing_vehicle_road_id")
+                        use_edge_logic = False
+
+                    if use_edge_logic:
+                        in_ramp = road_id in ramp_edges
+                        in_downstream = road_id in main_downstream_edges and x > merge_x
+                        in_stuck_zone = any(road_id.startswith(prefix) for prefix in stuck_edge_prefixes)
+                        if in_ramp:
+                            state["seen_ramp"] = True
+                        if bool(state.get("seen_ramp", False)) and in_downstream:
+                            state["merged"] = True
                             state["stopped_streak"] = 0
-                        state["max_stopped_streak"] = max(
-                            int(state["max_stopped_streak"]),
-                            int(state["stopped_streak"]),
-                        )
-                    elif bool(state.get("seen_ramp", False)):
-                        state["merged"] = True
-                        state["stopped_streak"] = 0
+                        elif bool(state.get("seen_ramp", False)) and in_stuck_zone:
+                            if speed <= stopped_speed:
+                                state["stopped_streak"] = int(state["stopped_streak"]) + 1
+                                state["stopped_steps"] = int(state["stopped_steps"]) + 1
+                            else:
+                                state["stopped_streak"] = 0
+                            state["max_stopped_streak"] = max(
+                                int(state["max_stopped_streak"]),
+                                int(state["stopped_streak"]),
+                            )
+                        elif bool(state.get("seen_ramp", False)):
+                            state["stopped_streak"] = 0
+                    else:
+                        if y < merge_y:
+                            state["seen_ramp"] = True
+                            if speed <= stopped_speed:
+                                state["stopped_streak"] = int(state["stopped_streak"]) + 1
+                                state["stopped_steps"] = int(state["stopped_steps"]) + 1
+                            else:
+                                state["stopped_streak"] = 0
+                            state["max_stopped_streak"] = max(
+                                int(state["max_stopped_streak"]),
+                                int(state["stopped_streak"]),
+                            )
+                        elif bool(state.get("seen_ramp", False)):
+                            state["merged"] = True
+                            state["stopped_streak"] = 0
+
                 if roi_vehicle_this_step > 0:
                     roi_step_count += 1
                     roi_vehicle_total += int(roi_vehicle_this_step)
 
             ramp_vehicle_count = int(sum(1 for item in vehicle_state.values() if bool(item.get("seen_ramp", False))))
-            ramp_merged_count = int(sum(1 for item in vehicle_state.values() if bool(item.get("seen_ramp", False)) and bool(item.get("merged", False))))
+            ramp_merged_count = int(
+                sum(
+                    1
+                    for item in vehicle_state.values()
+                    if bool(item.get("seen_ramp", False)) and bool(item.get("merged", False))
+                )
+            )
             ramp_stuck_count = int(
                 sum(
                     1
@@ -1605,6 +1766,10 @@ class SafeRLPipeline:
                 total_structural_episode_count += 1
             density_values.append(float(episode_payload["merge_zone_density"]))
             speed_values.append(float(episode_payload["mean_speed_near_merge"]))
+
+        report["logic_fallback_used"] = bool(fallback_reasons)
+        report["logic_fallback_reasons"] = sorted(fallback_reasons)
+        report["logic_fallback_reason"] = ",".join(sorted(fallback_reasons))
 
         episode_count = int(len(report["episode_metrics"]))
         merge_success_rate = self._safe_ratio(total_ramp_merged_count, max(1, total_ramp_vehicle_count))

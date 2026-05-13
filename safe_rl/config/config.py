@@ -84,6 +84,13 @@ class Stage1CollectionConfig:
     stage2_distribution_gate_enabled: bool = False
     stage2_distribution_gate_block_on_status: str = "critical"
     scene_sanity_enabled: bool = True
+    scene_sanity_merge_success_logic: str = "y_threshold"
+    scene_sanity_roi_auto_from_net: bool = False
+    scene_sanity_roi_half_width: float = 50.0
+    scene_sanity_merge_x_override: float = 0.0
+    scene_sanity_ramp_edges: List[str] = field(default_factory=lambda: ["ramp_in"])
+    scene_sanity_main_downstream_edges: List[str] = field(default_factory=lambda: ["main_out"])
+    scene_sanity_stuck_edge_prefixes: List[str] = field(default_factory=lambda: ["ramp_in", ":merge"])
     scene_sanity_merge_success_y_threshold: float = 0.0
     scene_sanity_stopped_speed_threshold: float = 0.5
     scene_sanity_stuck_min_wait_steps: int = 20

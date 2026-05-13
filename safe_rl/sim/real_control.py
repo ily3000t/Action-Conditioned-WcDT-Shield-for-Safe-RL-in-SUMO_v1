@@ -85,6 +85,8 @@ class RealSumoController:
                 ay=0.0,
                 heading=0.0,
                 lane_id=vehicle.lane_index,
+                road_id=str(vehicle.road_id),
+                lane_token=str(vehicle.lane_id),
                 length=vehicle.length,
                 width=vehicle.width,
             )

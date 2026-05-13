@@ -382,6 +382,175 @@ def test_stage1_distribution_health_and_pair_source_breakdown_fields():
         assert "bin_effective" in breakdown[key]
 
 
+def test_stage1_scene_sanity_edge_route_merge_success_and_roi_source():
+    config = _tiny_config()
+    config.stage1_collection.scene_sanity_merge_success_logic = "edge_route_based"
+    config.stage1_collection.scene_sanity_roi_auto_from_net = False
+    config.stage1_collection.scene_sanity_merge_x_override = 220.0
+    config.stage1_collection.scene_sanity_roi_half_width = 50.0
+    config.stage1_collection.scene_sanity_roi_y_min = -30.0
+    config.stage1_collection.scene_sanity_roi_y_max = 80.0
+    config.stage1_collection.scene_sanity_ramp_edges = ["ramp_in"]
+    config.stage1_collection.scene_sanity_main_downstream_edges = ["main_out"]
+    pipeline = SafeRLPipeline(config)
+    run_id = f"ut_stage1_scene_edge_{uuid.uuid4().hex[:8]}"
+    pipeline._prepare_run_context(stage="stage1", run_id=run_id)
+
+    episode = SimpleNamespace(
+        episode_id="ep_0",
+        steps=[
+            SimpleNamespace(
+                meta={},
+                risk_labels=SimpleNamespace(collision=False),
+                scene=SimpleNamespace(
+                    vehicles=[
+                        SimpleNamespace(vehicle_id="ramp_v", x=200.0, y=8.0, vx=3.0, vy=0.0, road_id="ramp_in")
+                    ]
+                ),
+            ),
+            SimpleNamespace(
+                meta={},
+                risk_labels=SimpleNamespace(collision=False),
+                scene=SimpleNamespace(
+                    vehicles=[
+                        SimpleNamespace(vehicle_id="ramp_v", x=230.0, y=-8.0, vx=8.0, vy=0.0, road_id="main_out")
+                    ]
+                ),
+            ),
+        ],
+    )
+
+    report = pipeline._build_stage1_scene_sanity_report([episode], probe_events=[])
+    agg = dict(report.get("aggregate", {}))
+    roi = dict(report.get("roi", {}))
+    assert report["merge_success_logic"] == "edge_route_based"
+    assert agg["ramp_vehicle_count"] == 1
+    assert agg["ramp_merged_count"] == 1
+    assert agg["ramp_merge_success_rate"] == pytest.approx(1.0)
+    assert report["logic_fallback_used"] is False
+    assert roi["source"] == "config"
+    assert roi["merge_x"] == pytest.approx(220.0)
+    assert roi["x_min"] == pytest.approx(170.0)
+    assert roi["x_max"] == pytest.approx(270.0)
+
+
+def test_stage1_scene_sanity_edge_route_ignores_non_ramp_vehicles():
+    config = _tiny_config()
+    config.stage1_collection.scene_sanity_merge_success_logic = "edge_route_based"
+    config.stage1_collection.scene_sanity_roi_auto_from_net = False
+    config.stage1_collection.scene_sanity_merge_x_override = 220.0
+    config.stage1_collection.scene_sanity_roi_half_width = 50.0
+    config.stage1_collection.scene_sanity_roi_y_min = -30.0
+    config.stage1_collection.scene_sanity_roi_y_max = 80.0
+    config.stage1_collection.scene_sanity_ramp_edges = ["ramp_in"]
+    config.stage1_collection.scene_sanity_main_downstream_edges = ["main_out"]
+    pipeline = SafeRLPipeline(config)
+    run_id = f"ut_stage1_scene_nonramp_{uuid.uuid4().hex[:8]}"
+    pipeline._prepare_run_context(stage="stage1", run_id=run_id)
+
+    episode = SimpleNamespace(
+        episode_id="ep_1",
+        steps=[
+            SimpleNamespace(
+                meta={},
+                risk_labels=SimpleNamespace(collision=False),
+                scene=SimpleNamespace(
+                    vehicles=[
+                        SimpleNamespace(vehicle_id="main_v", x=230.0, y=-8.0, vx=8.0, vy=0.0, road_id="main_out")
+                    ]
+                ),
+            )
+        ],
+    )
+
+    report = pipeline._build_stage1_scene_sanity_report([episode], probe_events=[])
+    agg = dict(report.get("aggregate", {}))
+    assert agg["ramp_vehicle_count"] == 0
+    assert agg["ramp_merged_count"] == 0
+
+
+def test_stage1_scene_sanity_stuck_only_counted_on_stuck_edges():
+    config = _tiny_config()
+    config.stage1_collection.scene_sanity_merge_success_logic = "edge_route_based"
+    config.stage1_collection.scene_sanity_roi_auto_from_net = False
+    config.stage1_collection.scene_sanity_merge_x_override = 220.0
+    config.stage1_collection.scene_sanity_roi_half_width = 50.0
+    config.stage1_collection.scene_sanity_roi_y_min = -30.0
+    config.stage1_collection.scene_sanity_roi_y_max = 80.0
+    config.stage1_collection.scene_sanity_stuck_min_wait_steps = 1
+    config.stage1_collection.scene_sanity_stuck_edge_prefixes = ["ramp_in", ":merge"]
+    pipeline = SafeRLPipeline(config)
+    run_id = f"ut_stage1_scene_stuck_{uuid.uuid4().hex[:8]}"
+    pipeline._prepare_run_context(stage="stage1", run_id=run_id)
+
+    episode = SimpleNamespace(
+        episode_id="ep_2",
+        steps=[
+            SimpleNamespace(
+                meta={},
+                risk_labels=SimpleNamespace(collision=False),
+                scene=SimpleNamespace(
+                    vehicles=[
+                        SimpleNamespace(vehicle_id="ramp_v", x=200.0, y=8.0, vx=1.0, vy=0.0, road_id="ramp_in")
+                    ]
+                ),
+            ),
+            SimpleNamespace(
+                meta={},
+                risk_labels=SimpleNamespace(collision=False),
+                scene=SimpleNamespace(
+                    vehicles=[
+                        SimpleNamespace(vehicle_id="ramp_v", x=210.0, y=-8.0, vx=0.0, vy=0.0, road_id="main_out")
+                    ]
+                ),
+            ),
+        ],
+    )
+
+    report = pipeline._build_stage1_scene_sanity_report([episode], probe_events=[])
+    agg = dict(report.get("aggregate", {}))
+    assert agg["ramp_vehicle_count"] == 1
+    assert agg["ramp_merged_count"] == 0
+    assert agg["ramp_stuck_count"] == 0
+
+
+def test_stage1_scene_sanity_edge_route_fallback_to_y_threshold_when_road_id_missing():
+    config = _tiny_config()
+    config.stage1_collection.scene_sanity_merge_success_logic = "edge_route_based"
+    config.stage1_collection.scene_sanity_roi_auto_from_net = False
+    config.stage1_collection.scene_sanity_merge_x_override = 220.0
+    config.stage1_collection.scene_sanity_roi_half_width = 50.0
+    config.stage1_collection.scene_sanity_roi_y_min = -30.0
+    config.stage1_collection.scene_sanity_roi_y_max = 80.0
+    config.stage1_collection.scene_sanity_merge_success_y_threshold = 0.0
+    pipeline = SafeRLPipeline(config)
+    run_id = f"ut_stage1_scene_fallback_{uuid.uuid4().hex[:8]}"
+    pipeline._prepare_run_context(stage="stage1", run_id=run_id)
+
+    episode = SimpleNamespace(
+        episode_id="ep_3",
+        steps=[
+            SimpleNamespace(
+                meta={},
+                risk_labels=SimpleNamespace(collision=False),
+                scene=SimpleNamespace(vehicles=[SimpleNamespace(vehicle_id="v0", x=200.0, y=-1.0, vx=2.0, vy=0.0)]),
+            ),
+            SimpleNamespace(
+                meta={},
+                risk_labels=SimpleNamespace(collision=False),
+                scene=SimpleNamespace(vehicles=[SimpleNamespace(vehicle_id="v0", x=230.0, y=1.0, vx=2.0, vy=0.0)]),
+            ),
+        ],
+    )
+
+    report = pipeline._build_stage1_scene_sanity_report([episode], probe_events=[])
+    agg = dict(report.get("aggregate", {}))
+    assert report["logic_fallback_used"] is True
+    assert "missing_vehicle_road_id" in str(report.get("logic_fallback_reason", ""))
+    assert agg["ramp_vehicle_count"] == 1
+    assert agg["ramp_merged_count"] == 1
+
+
 def test_stage2_distribution_gate_blocks_critical_and_allows_degraded():
     config = _tiny_config()
     config.stage1_collection.stage2_distribution_gate_enabled = True

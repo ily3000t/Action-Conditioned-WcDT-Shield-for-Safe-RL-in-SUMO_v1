@@ -7,6 +7,12 @@ sim:
 stage1_collection:
   probe_pair_target_risk_source: "calibrated_proxy_risk"
   probe_trusted_exclude_structural_dominant: true
+  scene_sanity_merge_success_logic: "edge_route_based"
+  scene_sanity_roi_auto_from_net: true
+  scene_sanity_roi_half_width: 50.0
+  scene_sanity_ramp_edges: ["ramp_in"]
+  scene_sanity_main_downstream_edges: ["main_out"]
+  scene_sanity_stuck_edge_prefixes: ["ramp_in", ":merge"]
   probe_pair_stratified_keep_enabled: true
   probe_pair_stratified_bins: 16
   probe_pair_keep_per_risk_bin: 32

@@ -13,6 +13,8 @@ class VehicleState:
     ay: float
     heading: float
     lane_id: int
+    road_id: str = ""
+    lane_token: str = ""
     length: float = 4.8
     width: float = 2.0
 
@@ -173,6 +175,8 @@ def vehicle_state_from_dict(value: Dict[str, Any]) -> VehicleState:
         ay=float(payload.get("ay", 0.0)),
         heading=float(payload.get("heading", 0.0)),
         lane_id=int(payload.get("lane_id", 0)),
+        road_id=str(payload.get("road_id", "")),
+        lane_token=str(payload.get("lane_token", "")),
         length=float(payload.get("length", 4.8)),
         width=float(payload.get("width", 2.0)),
     )

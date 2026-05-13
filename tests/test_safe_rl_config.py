@@ -47,6 +47,13 @@ def test_default_config_loads():
     assert config.stage1_collection.stage2_distribution_gate_enabled is False
     assert config.stage1_collection.stage2_distribution_gate_block_on_status == "critical"
     assert config.stage1_collection.scene_sanity_enabled is True
+    assert config.stage1_collection.scene_sanity_merge_success_logic == "y_threshold"
+    assert config.stage1_collection.scene_sanity_roi_auto_from_net is False
+    assert config.stage1_collection.scene_sanity_roi_half_width == pytest.approx(50.0)
+    assert config.stage1_collection.scene_sanity_merge_x_override == pytest.approx(0.0)
+    assert config.stage1_collection.scene_sanity_ramp_edges == ["ramp_in"]
+    assert config.stage1_collection.scene_sanity_main_downstream_edges == ["main_out"]
+    assert config.stage1_collection.scene_sanity_stuck_edge_prefixes == ["ramp_in", ":merge"]
     assert config.stage1_collection.scene_sanity_trigger_merge_success_min == pytest.approx(0.30)
     assert config.stage1_collection.scene_sanity_trigger_stuck_rate_max == pytest.approx(0.50)
     assert config.stage1_collection.scene_sanity_trigger_teleport_rate_max == pytest.approx(0.08)
@@ -228,6 +235,12 @@ def test_stage1_r_profiles_load():
     assert r3.stage1_collection.probe_pair_target_risk_source == "calibrated_proxy_risk"
     assert r3.stage1_collection.probe_pair_stratified_keep_enabled is True
     assert r3.stage1_collection.stage2_distribution_gate_enabled is True
+    assert r3.stage1_collection.scene_sanity_merge_success_logic == "edge_route_based"
+    assert r3.stage1_collection.scene_sanity_roi_auto_from_net is True
+    assert r3.stage1_collection.scene_sanity_roi_half_width == pytest.approx(50.0)
+    assert r3.stage1_collection.scene_sanity_ramp_edges == ["ramp_in"]
+    assert r3.stage1_collection.scene_sanity_main_downstream_edges == ["main_out"]
+    assert r3.stage1_collection.scene_sanity_stuck_edge_prefixes == ["ramp_in", ":merge"]
 
     assert r0.world_model.pair_ft_gate_head_enabled == default_cfg.world_model.pair_ft_gate_head_enabled
 
