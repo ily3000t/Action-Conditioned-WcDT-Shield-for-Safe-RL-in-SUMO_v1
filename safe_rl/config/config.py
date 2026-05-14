@@ -101,12 +101,20 @@ class Stage1CollectionConfig:
     scene_sanity_trigger_merge_success_min: float = 0.30
     scene_sanity_trigger_stuck_rate_max: float = 0.50
     scene_sanity_trigger_teleport_rate_max: float = 0.08
+    scene_sanity_structural_mode: str = "any_episode"
+    scene_sanity_structural_episode_ratio_threshold: float = 0.5
+    scene_sanity_structural_episode_min_count: int = 3
     scene_sanity_trigger_structural_rate_max: float = 0.12
+    scene_sanity_trigger_structural_dominant_rate_max: float = 0.35
+    scene_sanity_trigger_structural_candidate_rate_max: float = 0.35
+    scene_sanity_warning_structural_any_episode_rate_max: float = 0.50
     scene_sanity_trigger_structural_saturation_rate_max: float = 0.50
     scene_sanity_accept_merge_success_min: float = 0.45
     scene_sanity_accept_stuck_rate_max: float = 0.35
     scene_sanity_accept_teleport_rate_max: float = 0.08
     scene_sanity_accept_structural_rate_max: float = 0.12
+    scene_sanity_accept_structural_dominant_rate_max: float = 0.25
+    scene_sanity_accept_structural_candidate_rate_max: float = 0.25
     stage4_candidate_min_target_gap: float = 0.01
     exclude_structural_from_main: bool = True
 

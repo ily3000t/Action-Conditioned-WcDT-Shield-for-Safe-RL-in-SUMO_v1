@@ -1493,6 +1493,9 @@ class SafeRLPipeline:
         merge_success_logic = str(getattr(cfg, "scene_sanity_merge_success_logic", "y_threshold") or "y_threshold").strip().lower()
         if merge_success_logic not in {"y_threshold", "edge_route_based"}:
             merge_success_logic = "y_threshold"
+        structural_mode = str(getattr(cfg, "scene_sanity_structural_mode", "any_episode") or "any_episode").strip().lower()
+        if structural_mode not in {"any_episode", "dominant_ratio"}:
+            structural_mode = "any_episode"
         ramp_edges = self._normalize_string_list(getattr(cfg, "scene_sanity_ramp_edges", None), ["ramp_in"])
         main_downstream_edges = self._normalize_string_list(
             getattr(cfg, "scene_sanity_main_downstream_edges", None),
@@ -1540,6 +1543,7 @@ class SafeRLPipeline:
             "episode_metrics": [],
             "aggregate": {},
             "merge_success_logic": str(merge_success_logic),
+            "structural_trigger_basis": str(structural_mode),
             "ramp_edges": list(ramp_edges),
             "main_downstream_edges": list(main_downstream_edges),
             "stuck_edge_prefixes": list(stuck_edge_prefixes),
@@ -1551,6 +1555,15 @@ class SafeRLPipeline:
                 "ramp_stuck_rate_max": float(getattr(cfg, "scene_sanity_trigger_stuck_rate_max", 0.50) or 0.50),
                 "teleport_rate_max": float(getattr(cfg, "scene_sanity_trigger_teleport_rate_max", 0.08) or 0.08),
                 "structural_rate_max": float(getattr(cfg, "scene_sanity_trigger_structural_rate_max", 0.12) or 0.12),
+                "structural_dominant_rate_max": float(
+                    getattr(cfg, "scene_sanity_trigger_structural_dominant_rate_max", 0.35) or 0.35
+                ),
+                "structural_candidate_rate_max": float(
+                    getattr(cfg, "scene_sanity_trigger_structural_candidate_rate_max", 0.35) or 0.35
+                ),
+                "structural_any_episode_warning_rate_max": float(
+                    getattr(cfg, "scene_sanity_warning_structural_any_episode_rate_max", 0.50) or 0.50
+                ),
                 "risk_saturation_by_structural_or_teleport_rate_max": float(
                     getattr(cfg, "scene_sanity_trigger_structural_saturation_rate_max", 0.50) or 0.50
                 ),
@@ -1560,6 +1573,12 @@ class SafeRLPipeline:
                 "ramp_stuck_rate_max": float(getattr(cfg, "scene_sanity_accept_stuck_rate_max", 0.35) or 0.35),
                 "teleport_rate_max": float(getattr(cfg, "scene_sanity_accept_teleport_rate_max", 0.08) or 0.08),
                 "structural_rate_max": float(getattr(cfg, "scene_sanity_accept_structural_rate_max", 0.12) or 0.12),
+                "structural_dominant_rate_max": float(
+                    getattr(cfg, "scene_sanity_accept_structural_dominant_rate_max", 0.25) or 0.25
+                ),
+                "structural_candidate_rate_max": float(
+                    getattr(cfg, "scene_sanity_accept_structural_candidate_rate_max", 0.25) or 0.25
+                ),
             },
             "roi": {
                 "x_min": float(x_min),
@@ -1580,6 +1599,9 @@ class SafeRLPipeline:
                 "ramp_stuck_rate": 0.0,
                 "teleport_rate": 0.0,
                 "structural_rate": 0.0,
+                "structural_rate_any_episode": 0.0,
+                "structural_candidate_rate_global": 0.0,
+                "structural_episode_dominant_rate": 0.0,
                 "risk_saturation_rate": 0.0,
                 "risk_saturation_by_structural_or_teleport_rate": 0.0,
             }
@@ -1587,6 +1609,11 @@ class SafeRLPipeline:
 
         stopped_speed = float(getattr(cfg, "scene_sanity_stopped_speed_threshold", 0.5) or 0.5)
         stuck_wait = max(1, int(getattr(cfg, "scene_sanity_stuck_min_wait_steps", 20) or 20))
+        structural_episode_ratio_threshold = min(
+            1.0,
+            max(0.0, float(getattr(cfg, "scene_sanity_structural_episode_ratio_threshold", 0.5) or 0.5)),
+        )
+        structural_episode_min_count = max(1, int(getattr(cfg, "scene_sanity_structural_episode_min_count", 3) or 3))
 
         events_by_episode: Dict[str, List[Dict[str, Any]]] = {}
         for event in list(probe_events or []):
@@ -1597,7 +1624,9 @@ class SafeRLPipeline:
         total_ramp_merged_count = 0
         total_ramp_stuck_count = 0
         total_teleport_episode_count = 0
-        total_structural_episode_count = 0
+        total_structural_episode_count_any = 0
+        total_structural_episode_count_dominant = 0
+        total_structural_candidate_count = 0
         total_saturated_candidates = 0
         total_saturated_structural_or_teleport = 0
         total_candidate_count = 0
@@ -1747,23 +1776,31 @@ class SafeRLPipeline:
                 "route_structural_count": int(structural_count),
                 "collision_count": int(collision_count),
                 "candidate_count": int(candidate_count),
+                "structural_candidate_rate": float(self._safe_ratio(structural_count, max(1, candidate_count))),
                 "saturated_candidate_count": int(saturated_count),
                 "saturated_structural_or_teleport_count": int(saturated_structural_or_teleport),
                 "mean_speed_near_merge": float(roi_speed_total / roi_speed_count) if roi_speed_count > 0 else 0.0,
                 "merge_zone_density": float(roi_vehicle_total / roi_step_count) if roi_step_count > 0 else 0.0,
             }
+            episode_payload["structural_episode_dominant"] = bool(
+                candidate_count >= structural_episode_min_count
+                and float(episode_payload["structural_candidate_rate"]) >= structural_episode_ratio_threshold
+            )
             report["episode_metrics"].append(episode_payload)
 
             total_ramp_vehicle_count += int(ramp_vehicle_count)
             total_ramp_merged_count += int(ramp_merged_count)
             total_ramp_stuck_count += int(ramp_stuck_count)
+            total_structural_candidate_count += int(structural_count)
             total_candidate_count += int(candidate_count)
             total_saturated_candidates += int(saturated_count)
             total_saturated_structural_or_teleport += int(saturated_structural_or_teleport)
             if teleport_step_count > 0:
                 total_teleport_episode_count += 1
             if structural_count > 0:
-                total_structural_episode_count += 1
+                total_structural_episode_count_any += 1
+            if bool(episode_payload.get("structural_episode_dominant", False)):
+                total_structural_episode_count_dominant += 1
             density_values.append(float(episode_payload["merge_zone_density"]))
             speed_values.append(float(episode_payload["mean_speed_near_merge"]))
 
@@ -1775,7 +1812,9 @@ class SafeRLPipeline:
         merge_success_rate = self._safe_ratio(total_ramp_merged_count, max(1, total_ramp_vehicle_count))
         stuck_rate = self._safe_ratio(total_ramp_stuck_count, max(1, total_ramp_vehicle_count))
         teleport_rate = self._safe_ratio(total_teleport_episode_count, max(1, episode_count))
-        structural_rate = self._safe_ratio(total_structural_episode_count, max(1, episode_count))
+        structural_rate_any_episode = self._safe_ratio(total_structural_episode_count_any, max(1, episode_count))
+        structural_candidate_rate_global = self._safe_ratio(total_structural_candidate_count, max(1, total_candidate_count))
+        structural_episode_dominant_rate = self._safe_ratio(total_structural_episode_count_dominant, max(1, episode_count))
         saturation_rate = self._safe_ratio(total_saturated_candidates, max(1, total_candidate_count))
         saturation_structural_rate = self._safe_ratio(
             total_saturated_structural_or_teleport,
@@ -1788,9 +1827,13 @@ class SafeRLPipeline:
             "ramp_merge_success_rate": float(merge_success_rate),
             "ramp_stuck_rate": float(stuck_rate),
             "teleport_rate": float(teleport_rate),
-            "structural_rate": float(structural_rate),
+            "structural_rate": float(structural_rate_any_episode),
+            "structural_rate_any_episode": float(structural_rate_any_episode),
+            "structural_candidate_rate_global": float(structural_candidate_rate_global),
+            "structural_episode_dominant_rate": float(structural_episode_dominant_rate),
             "risk_saturation_rate": float(saturation_rate),
             "risk_saturation_by_structural_or_teleport_rate": float(saturation_structural_rate),
+            "structural_candidate_count": int(total_structural_candidate_count),
             "candidate_count": int(total_candidate_count),
             "saturated_candidate_count": int(total_saturated_candidates),
             "saturated_structural_or_teleport_count": int(total_saturated_structural_or_teleport),
@@ -1807,7 +1850,12 @@ class SafeRLPipeline:
             critical_reasons.append("ramp_stuck_rate_above_trigger")
         if aggregate["teleport_rate"] > float(trigger["teleport_rate_max"]):
             critical_reasons.append("teleport_rate_above_trigger")
-        if aggregate["structural_rate"] > float(trigger["structural_rate_max"]):
+        if structural_mode == "dominant_ratio":
+            if aggregate["structural_episode_dominant_rate"] > float(trigger["structural_dominant_rate_max"]):
+                critical_reasons.append("structural_episode_dominant_rate_above_trigger")
+            if aggregate["structural_candidate_rate_global"] > float(trigger["structural_candidate_rate_max"]):
+                critical_reasons.append("structural_candidate_rate_global_above_trigger")
+        elif aggregate["structural_rate_any_episode"] > float(trigger["structural_rate_max"]):
             critical_reasons.append("structural_rate_above_trigger")
         if aggregate["risk_saturation_by_structural_or_teleport_rate"] > float(
             trigger["risk_saturation_by_structural_or_teleport_rate_max"]
@@ -1822,7 +1870,12 @@ class SafeRLPipeline:
             acceptance_reasons.append("ramp_stuck_rate_above_acceptance")
         if aggregate["teleport_rate"] > float(acceptance["teleport_rate_max"]):
             acceptance_reasons.append("teleport_rate_above_acceptance")
-        if aggregate["structural_rate"] > float(acceptance["structural_rate_max"]):
+        if structural_mode == "dominant_ratio":
+            if aggregate["structural_episode_dominant_rate"] > float(acceptance["structural_dominant_rate_max"]):
+                acceptance_reasons.append("structural_episode_dominant_rate_above_acceptance")
+            if aggregate["structural_candidate_rate_global"] > float(acceptance["structural_candidate_rate_max"]):
+                acceptance_reasons.append("structural_candidate_rate_global_above_acceptance")
+        elif aggregate["structural_rate_any_episode"] > float(acceptance["structural_rate_max"]):
             acceptance_reasons.append("structural_rate_above_acceptance")
 
         if critical_reasons:
@@ -1833,7 +1886,15 @@ class SafeRLPipeline:
             report["status"] = "healthy"
         report["critical_reasons"] = list(critical_reasons)
         report["acceptance_reasons"] = list(acceptance_reasons)
-        report["warnings"] = list(critical_reasons) + list(acceptance_reasons)
+        warnings = list(critical_reasons) + list(acceptance_reasons)
+        if (
+            structural_mode == "dominant_ratio"
+            and aggregate["structural_rate_any_episode"] > float(trigger["structural_any_episode_warning_rate_max"])
+            and "structural_episode_dominant_rate_above_trigger" not in critical_reasons
+            and "structural_candidate_rate_global_above_trigger" not in critical_reasons
+        ):
+            warnings.append("structural_any_episode_rate_high_but_not_dominant")
+        report["warnings"] = warnings
         return report
 
     def _build_stage1_distribution_health(

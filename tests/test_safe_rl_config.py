@@ -57,12 +57,20 @@ def test_default_config_loads():
     assert config.stage1_collection.scene_sanity_trigger_merge_success_min == pytest.approx(0.30)
     assert config.stage1_collection.scene_sanity_trigger_stuck_rate_max == pytest.approx(0.50)
     assert config.stage1_collection.scene_sanity_trigger_teleport_rate_max == pytest.approx(0.08)
+    assert config.stage1_collection.scene_sanity_structural_mode == "any_episode"
+    assert config.stage1_collection.scene_sanity_structural_episode_ratio_threshold == pytest.approx(0.5)
+    assert config.stage1_collection.scene_sanity_structural_episode_min_count == 3
     assert config.stage1_collection.scene_sanity_trigger_structural_rate_max == pytest.approx(0.12)
+    assert config.stage1_collection.scene_sanity_trigger_structural_dominant_rate_max == pytest.approx(0.35)
+    assert config.stage1_collection.scene_sanity_trigger_structural_candidate_rate_max == pytest.approx(0.35)
+    assert config.stage1_collection.scene_sanity_warning_structural_any_episode_rate_max == pytest.approx(0.50)
     assert config.stage1_collection.scene_sanity_trigger_structural_saturation_rate_max == pytest.approx(0.50)
     assert config.stage1_collection.scene_sanity_accept_merge_success_min == pytest.approx(0.45)
     assert config.stage1_collection.scene_sanity_accept_stuck_rate_max == pytest.approx(0.35)
     assert config.stage1_collection.scene_sanity_accept_teleport_rate_max == pytest.approx(0.08)
     assert config.stage1_collection.scene_sanity_accept_structural_rate_max == pytest.approx(0.12)
+    assert config.stage1_collection.scene_sanity_accept_structural_dominant_rate_max == pytest.approx(0.25)
+    assert config.stage1_collection.scene_sanity_accept_structural_candidate_rate_max == pytest.approx(0.25)
     assert config.stage1_collection.stage4_candidate_min_target_gap == 0.01
     assert config.stage1_collection.exclude_structural_from_main is True
     assert config.world_model.min_spread_eligible_pairs_for_gate_source == 128
@@ -241,6 +249,14 @@ def test_stage1_r_profiles_load():
     assert r3.stage1_collection.scene_sanity_ramp_edges == ["ramp_in"]
     assert r3.stage1_collection.scene_sanity_main_downstream_edges == ["main_out"]
     assert r3.stage1_collection.scene_sanity_stuck_edge_prefixes == ["ramp_in", ":merge"]
+    assert r3.stage1_collection.scene_sanity_structural_mode == "dominant_ratio"
+    assert r3.stage1_collection.scene_sanity_structural_episode_ratio_threshold == pytest.approx(0.5)
+    assert r3.stage1_collection.scene_sanity_structural_episode_min_count == 3
+    assert r3.stage1_collection.scene_sanity_trigger_structural_dominant_rate_max == pytest.approx(0.35)
+    assert r3.stage1_collection.scene_sanity_trigger_structural_candidate_rate_max == pytest.approx(0.35)
+    assert r3.stage1_collection.scene_sanity_warning_structural_any_episode_rate_max == pytest.approx(0.50)
+    assert r3.stage1_collection.scene_sanity_accept_structural_dominant_rate_max == pytest.approx(0.25)
+    assert r3.stage1_collection.scene_sanity_accept_structural_candidate_rate_max == pytest.approx(0.25)
 
     assert r0.world_model.pair_ft_gate_head_enabled == default_cfg.world_model.pair_ft_gate_head_enabled
 

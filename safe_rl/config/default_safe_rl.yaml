@@ -80,12 +80,20 @@ stage1_collection:
   scene_sanity_trigger_merge_success_min: 0.30
   scene_sanity_trigger_stuck_rate_max: 0.50
   scene_sanity_trigger_teleport_rate_max: 0.08
+  scene_sanity_structural_mode: "any_episode"
+  scene_sanity_structural_episode_ratio_threshold: 0.50
+  scene_sanity_structural_episode_min_count: 3
   scene_sanity_trigger_structural_rate_max: 0.12
+  scene_sanity_trigger_structural_dominant_rate_max: 0.35
+  scene_sanity_trigger_structural_candidate_rate_max: 0.35
+  scene_sanity_warning_structural_any_episode_rate_max: 0.50
   scene_sanity_trigger_structural_saturation_rate_max: 0.50
   scene_sanity_accept_merge_success_min: 0.45
   scene_sanity_accept_stuck_rate_max: 0.35
   scene_sanity_accept_teleport_rate_max: 0.08
   scene_sanity_accept_structural_rate_max: 0.12
+  scene_sanity_accept_structural_dominant_rate_max: 0.25
+  scene_sanity_accept_structural_candidate_rate_max: 0.25
   stage4_candidate_min_target_gap: 0.01
 
 light_risk:

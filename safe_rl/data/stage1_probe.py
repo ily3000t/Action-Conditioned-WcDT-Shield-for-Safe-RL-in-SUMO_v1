@@ -59,6 +59,8 @@ class Stage1ProbeRunner:
             'pairs_boundary_candidates_seen': 0,
             'pairs_boundary_appended': 0,
             'pairs_boundary_skipped_no_candidate': 0,
+            'trusted_excluded_by_structural_candidate_count': 0,
+            'trusted_excluded_by_structural_pair_count': 0,
         }
         self.bucket_summary = {}
 
@@ -636,7 +638,11 @@ class Stage1ProbeRunner:
 
     def _probe_pair_trusted_for_spread(self, left: Dict[str, Any], right: Dict[str, Any]) -> bool:
         if bool(getattr(self.config.stage1_collection, 'probe_trusted_exclude_structural_dominant', False)):
-            if self._is_structural_dominant(left) or self._is_structural_dominant(right):
+            left_structural = self._is_structural_dominant(left)
+            right_structural = self._is_structural_dominant(right)
+            if left_structural or right_structural:
+                self.summary['trusted_excluded_by_structural_pair_count'] += 1
+                self.summary['trusted_excluded_by_structural_candidate_count'] += int(left_structural) + int(right_structural)
                 return False
         if bool(left.get('collision', False)) != bool(right.get('collision', False)):
             return True

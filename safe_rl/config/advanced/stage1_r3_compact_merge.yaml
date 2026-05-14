@@ -13,6 +13,14 @@ stage1_collection:
   scene_sanity_ramp_edges: ["ramp_in"]
   scene_sanity_main_downstream_edges: ["main_out"]
   scene_sanity_stuck_edge_prefixes: ["ramp_in", ":merge"]
+  scene_sanity_structural_mode: "dominant_ratio"
+  scene_sanity_structural_episode_ratio_threshold: 0.50
+  scene_sanity_structural_episode_min_count: 3
+  scene_sanity_trigger_structural_dominant_rate_max: 0.35
+  scene_sanity_trigger_structural_candidate_rate_max: 0.35
+  scene_sanity_warning_structural_any_episode_rate_max: 0.50
+  scene_sanity_accept_structural_dominant_rate_max: 0.25
+  scene_sanity_accept_structural_candidate_rate_max: 0.25
   probe_pair_stratified_keep_enabled: true
   probe_pair_stratified_bins: 16
   probe_pair_keep_per_risk_bin: 32

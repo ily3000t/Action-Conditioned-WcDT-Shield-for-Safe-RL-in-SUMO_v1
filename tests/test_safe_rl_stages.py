@@ -7,6 +7,7 @@ import pytest
 
 from safe_rl.buffer import InterventionBuffer
 from safe_rl.config.config import SafeRLConfig, ShieldSweepVariant
+from safe_rl.data.stage1_probe import Stage1ProbeRunner
 from safe_rl.data.types import RiskPairSample
 from safe_rl.pipeline.pipeline import SafeRLPipeline
 from safe_rl.rl.ppo import HeuristicPolicy
@@ -549,6 +550,217 @@ def test_stage1_scene_sanity_edge_route_fallback_to_y_threshold_when_road_id_mis
     assert "missing_vehicle_road_id" in str(report.get("logic_fallback_reason", ""))
     assert agg["ramp_vehicle_count"] == 1
     assert agg["ramp_merged_count"] == 1
+
+
+def test_stage1_scene_sanity_dominant_mode_warns_on_any_episode_structural_without_critical():
+    config = _tiny_config()
+    config.stage1_collection.scene_sanity_structural_mode = "dominant_ratio"
+    config.stage1_collection.scene_sanity_structural_episode_ratio_threshold = 0.5
+    config.stage1_collection.scene_sanity_structural_episode_min_count = 3
+    config.stage1_collection.scene_sanity_warning_structural_any_episode_rate_max = 0.5
+    config.stage1_collection.scene_sanity_trigger_structural_dominant_rate_max = 0.9
+    config.stage1_collection.scene_sanity_trigger_structural_candidate_rate_max = 0.9
+    config.stage1_collection.scene_sanity_trigger_merge_success_min = -1.0
+    config.stage1_collection.scene_sanity_trigger_stuck_rate_max = 1.0
+    config.stage1_collection.scene_sanity_trigger_teleport_rate_max = 1.0
+    config.stage1_collection.scene_sanity_trigger_structural_saturation_rate_max = 1.0
+    config.stage1_collection.scene_sanity_accept_merge_success_min = -1.0
+    config.stage1_collection.scene_sanity_accept_stuck_rate_max = 1.0
+    config.stage1_collection.scene_sanity_accept_teleport_rate_max = 1.0
+    config.stage1_collection.scene_sanity_accept_structural_dominant_rate_max = 1.0
+    config.stage1_collection.scene_sanity_accept_structural_candidate_rate_max = 1.0
+    pipeline = SafeRLPipeline(config)
+    run_id = f"ut_stage1_scene_struct_warn_{uuid.uuid4().hex[:8]}"
+    pipeline._prepare_run_context(stage="stage1", run_id=run_id)
+
+    episode = SimpleNamespace(
+        episode_id="ep_warn",
+        steps=[SimpleNamespace(meta={}, risk_labels=SimpleNamespace(collision=False), scene=SimpleNamespace(vehicles=[]))],
+    )
+    probe_events = [
+        {
+            "episode_id": "ep_warn",
+            "candidates": [
+                {"route_structural_flag": idx == 0, "teleport_flag": False, "overall_proxy_risk": 0.6}
+                for idx in range(10)
+            ],
+        }
+    ]
+    report = pipeline._build_stage1_scene_sanity_report([episode], probe_events=probe_events)
+    agg = dict(report.get("aggregate", {}))
+    assert report["status"] != "critical"
+    assert "structural_any_episode_rate_high_but_not_dominant" in list(report.get("warnings", []))
+    assert agg["structural_rate"] == pytest.approx(agg["structural_rate_any_episode"])
+    assert agg["structural_rate_any_episode"] == pytest.approx(1.0)
+    assert agg["structural_candidate_rate_global"] == pytest.approx(0.1)
+    assert agg["structural_episode_dominant_rate"] == pytest.approx(0.0)
+
+
+def test_stage1_scene_sanity_dominant_mode_triggers_by_dominant_rate():
+    config = _tiny_config()
+    config.stage1_collection.scene_sanity_structural_mode = "dominant_ratio"
+    config.stage1_collection.scene_sanity_structural_episode_ratio_threshold = 0.5
+    config.stage1_collection.scene_sanity_structural_episode_min_count = 3
+    config.stage1_collection.scene_sanity_trigger_structural_dominant_rate_max = 0.2
+    config.stage1_collection.scene_sanity_trigger_structural_candidate_rate_max = 1.0
+    config.stage1_collection.scene_sanity_trigger_merge_success_min = -1.0
+    config.stage1_collection.scene_sanity_trigger_stuck_rate_max = 1.0
+    config.stage1_collection.scene_sanity_trigger_teleport_rate_max = 1.0
+    config.stage1_collection.scene_sanity_trigger_structural_saturation_rate_max = 1.0
+    config.stage1_collection.scene_sanity_accept_merge_success_min = -1.0
+    config.stage1_collection.scene_sanity_accept_stuck_rate_max = 1.0
+    config.stage1_collection.scene_sanity_accept_teleport_rate_max = 1.0
+    config.stage1_collection.scene_sanity_accept_structural_dominant_rate_max = 1.0
+    config.stage1_collection.scene_sanity_accept_structural_candidate_rate_max = 1.0
+    pipeline = SafeRLPipeline(config)
+    run_id = f"ut_stage1_scene_struct_dom_{uuid.uuid4().hex[:8]}"
+    pipeline._prepare_run_context(stage="stage1", run_id=run_id)
+
+    episode = SimpleNamespace(
+        episode_id="ep_dom",
+        steps=[SimpleNamespace(meta={}, risk_labels=SimpleNamespace(collision=False), scene=SimpleNamespace(vehicles=[]))],
+    )
+    probe_events = [
+        {
+            "episode_id": "ep_dom",
+            "candidates": [
+                {"route_structural_flag": idx < 3, "teleport_flag": False, "overall_proxy_risk": 0.6}
+                for idx in range(4)
+            ],
+        }
+    ]
+    report = pipeline._build_stage1_scene_sanity_report([episode], probe_events=probe_events)
+    assert report["status"] == "critical"
+    assert "structural_episode_dominant_rate_above_trigger" in list(report.get("critical_reasons", []))
+
+
+def test_stage1_scene_sanity_dominant_mode_triggers_by_candidate_rate():
+    config = _tiny_config()
+    config.stage1_collection.scene_sanity_structural_mode = "dominant_ratio"
+    config.stage1_collection.scene_sanity_structural_episode_ratio_threshold = 0.95
+    config.stage1_collection.scene_sanity_structural_episode_min_count = 20
+    config.stage1_collection.scene_sanity_trigger_structural_dominant_rate_max = 1.0
+    config.stage1_collection.scene_sanity_trigger_structural_candidate_rate_max = 0.35
+    config.stage1_collection.scene_sanity_trigger_merge_success_min = -1.0
+    config.stage1_collection.scene_sanity_trigger_stuck_rate_max = 1.0
+    config.stage1_collection.scene_sanity_trigger_teleport_rate_max = 1.0
+    config.stage1_collection.scene_sanity_trigger_structural_saturation_rate_max = 1.0
+    config.stage1_collection.scene_sanity_accept_merge_success_min = -1.0
+    config.stage1_collection.scene_sanity_accept_stuck_rate_max = 1.0
+    config.stage1_collection.scene_sanity_accept_teleport_rate_max = 1.0
+    config.stage1_collection.scene_sanity_accept_structural_dominant_rate_max = 1.0
+    config.stage1_collection.scene_sanity_accept_structural_candidate_rate_max = 1.0
+    pipeline = SafeRLPipeline(config)
+    run_id = f"ut_stage1_scene_struct_cand_{uuid.uuid4().hex[:8]}"
+    pipeline._prepare_run_context(stage="stage1", run_id=run_id)
+
+    episode = SimpleNamespace(
+        episode_id="ep_cand",
+        steps=[SimpleNamespace(meta={}, risk_labels=SimpleNamespace(collision=False), scene=SimpleNamespace(vehicles=[]))],
+    )
+    probe_events = [
+        {
+            "episode_id": "ep_cand",
+            "candidates": [
+                {"route_structural_flag": idx < 6, "teleport_flag": False, "overall_proxy_risk": 0.6}
+                for idx in range(10)
+            ],
+        }
+    ]
+    report = pipeline._build_stage1_scene_sanity_report([episode], probe_events=probe_events)
+    assert report["status"] == "critical"
+    assert "structural_candidate_rate_global_above_trigger" in list(report.get("critical_reasons", []))
+
+
+def test_stage1_scene_sanity_any_episode_mode_keeps_legacy_structural_trigger():
+    config = _tiny_config()
+    config.stage1_collection.scene_sanity_structural_mode = "any_episode"
+    config.stage1_collection.scene_sanity_trigger_structural_rate_max = 0.12
+    config.stage1_collection.scene_sanity_trigger_merge_success_min = -1.0
+    config.stage1_collection.scene_sanity_trigger_stuck_rate_max = 1.0
+    config.stage1_collection.scene_sanity_trigger_teleport_rate_max = 1.0
+    config.stage1_collection.scene_sanity_trigger_structural_saturation_rate_max = 1.0
+    config.stage1_collection.scene_sanity_accept_merge_success_min = -1.0
+    config.stage1_collection.scene_sanity_accept_stuck_rate_max = 1.0
+    config.stage1_collection.scene_sanity_accept_teleport_rate_max = 1.0
+    config.stage1_collection.scene_sanity_accept_structural_rate_max = 1.0
+    pipeline = SafeRLPipeline(config)
+    run_id = f"ut_stage1_scene_any_{uuid.uuid4().hex[:8]}"
+    pipeline._prepare_run_context(stage="stage1", run_id=run_id)
+
+    episode = SimpleNamespace(
+        episode_id="ep_any",
+        steps=[SimpleNamespace(meta={}, risk_labels=SimpleNamespace(collision=False), scene=SimpleNamespace(vehicles=[]))],
+    )
+    probe_events = [
+        {
+            "episode_id": "ep_any",
+            "candidates": [
+                {"route_structural_flag": True, "teleport_flag": False, "overall_proxy_risk": 0.4}
+            ],
+        }
+    ]
+    report = pipeline._build_stage1_scene_sanity_report([episode], probe_events=probe_events)
+    assert report["status"] == "critical"
+    assert "structural_rate_above_trigger" in list(report.get("critical_reasons", []))
+
+
+def test_stage1_scene_sanity_saturation_trigger_remains_critical():
+    config = _tiny_config()
+    config.stage1_collection.scene_sanity_structural_mode = "dominant_ratio"
+    config.stage1_collection.scene_sanity_trigger_structural_dominant_rate_max = 1.0
+    config.stage1_collection.scene_sanity_trigger_structural_candidate_rate_max = 1.0
+    config.stage1_collection.scene_sanity_trigger_structural_saturation_rate_max = 0.5
+    config.stage1_collection.scene_sanity_trigger_merge_success_min = -1.0
+    config.stage1_collection.scene_sanity_trigger_stuck_rate_max = 1.0
+    config.stage1_collection.scene_sanity_trigger_teleport_rate_max = 1.0
+    config.stage1_collection.scene_sanity_accept_merge_success_min = -1.0
+    config.stage1_collection.scene_sanity_accept_stuck_rate_max = 1.0
+    config.stage1_collection.scene_sanity_accept_teleport_rate_max = 1.0
+    config.stage1_collection.scene_sanity_accept_structural_dominant_rate_max = 1.0
+    config.stage1_collection.scene_sanity_accept_structural_candidate_rate_max = 1.0
+    pipeline = SafeRLPipeline(config)
+    run_id = f"ut_stage1_scene_sat_{uuid.uuid4().hex[:8]}"
+    pipeline._prepare_run_context(stage="stage1", run_id=run_id)
+
+    episode = SimpleNamespace(
+        episode_id="ep_sat",
+        steps=[SimpleNamespace(meta={}, risk_labels=SimpleNamespace(collision=False), scene=SimpleNamespace(vehicles=[]))],
+    )
+    probe_events = [
+        {
+            "episode_id": "ep_sat",
+            "candidates": [
+                {"route_structural_flag": True, "teleport_flag": False, "overall_proxy_risk": 1.0}
+                for _ in range(10)
+            ],
+        }
+    ]
+    report = pipeline._build_stage1_scene_sanity_report([episode], probe_events=probe_events)
+    assert report["status"] == "critical"
+    assert "risk_saturation_by_structural_or_teleport_above_trigger" in list(report.get("critical_reasons", []))
+
+
+def test_stage1_probe_structural_trusted_exclusion_counters():
+    config = _tiny_config()
+    config.stage1_collection.probe_trusted_exclude_structural_dominant = True
+    runner = Stage1ProbeRunner(config=config, probe_backend=None)
+    runner.reset()
+
+    left_struct = {"route_structural_flag": True, "teleport_flag": False, "collision": False, "min_ttc": 3.0, "min_distance": 10.0, "target_proxy_risk": 0.2}
+    right_clean = {"route_structural_flag": False, "teleport_flag": False, "collision": True, "min_ttc": 1.0, "min_distance": 2.0, "target_proxy_risk": 0.8}
+    assert runner._probe_pair_trusted_for_spread(left_struct, right_clean) is False
+
+    both_struct_left = {"route_structural_flag": True, "teleport_flag": False, "collision": False, "min_ttc": 4.0, "min_distance": 15.0, "target_proxy_risk": 0.1}
+    both_struct_right = {"route_structural_flag": False, "teleport_flag": True, "collision": False, "min_ttc": 3.5, "min_distance": 14.0, "target_proxy_risk": 0.2}
+    assert runner._probe_pair_trusted_for_spread(both_struct_left, both_struct_right) is False
+
+    clean_left = {"route_structural_flag": False, "teleport_flag": False, "collision": False, "min_ttc": 3.0, "min_distance": 10.0, "target_proxy_risk": 0.2}
+    clean_right = {"route_structural_flag": False, "teleport_flag": False, "collision": True, "min_ttc": 1.0, "min_distance": 2.0, "target_proxy_risk": 0.8}
+    assert runner._probe_pair_trusted_for_spread(clean_left, clean_right) is True
+
+    assert runner.summary["trusted_excluded_by_structural_pair_count"] == 2
+    assert runner.summary["trusted_excluded_by_structural_candidate_count"] == 3
 
 
 def test_stage2_distribution_gate_blocks_critical_and_allows_degraded():
