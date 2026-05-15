@@ -1,7 +1,7 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <nodes>
     <node id="main_start" x="-220.0" y="0.0" type="priority"/>
-    <node id="merge" x="0.0" y="0.0" type="priority"/>
+    <node id="merge" x="0.0" y="0.0" type="zipper"/>
     <node id="main_end" x="220.0" y="0.0" type="priority"/>
     <node id="ramp_start" x="-160.0" y="60.0" type="priority"/>
 </nodes>

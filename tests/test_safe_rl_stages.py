@@ -803,6 +803,41 @@ def test_stage2_distribution_gate_blocks_critical_and_allows_degraded():
     pipeline._enforce_stage1_distribution_gate(gate_degraded)
 
 
+def test_stage2_distribution_gate_blocks_when_scene_status_is_critical():
+    config = _tiny_config()
+    config.stage1_collection.stage2_distribution_gate_enabled = True
+    config.stage1_collection.stage2_distribution_gate_block_on_status = "critical"
+    pipeline = SafeRLPipeline(config)
+    run_id = f"ut_stage1_scene_gate_{uuid.uuid4().hex[:8]}"
+    pipeline._prepare_run_context(stage="stage2", run_id=run_id)
+
+    degraded_summary = {
+        "scene_sanity_status": "critical",
+        "stage1_distribution_health": {
+            "status": "degraded",
+            "pair_all_bin_effective": 6.5,
+            "pair_trusted_bin_effective": 5.2,
+            "candidate_bin_effective": 2.2,
+            "warnings": [],
+        },
+    }
+    scene_critical_report = {
+        "status": "critical",
+        "critical_reasons": ["ramp_merge_success_rate_below_trigger"],
+        "warnings": ["ramp_merge_success_rate_below_trigger"],
+    }
+    pipeline._write_json(pipeline.stage1_probe_summary_path, degraded_summary)
+    pipeline._write_json(pipeline.stage1_scene_sanity_path, scene_critical_report)
+
+    gate = pipeline._collect_stage1_distribution_gate()
+    assert gate["scene_status"] == "critical"
+    assert gate["scene_gate_hard_block"] is True
+    assert gate["hard_block"] is True
+    assert gate["gate_passed"] is False
+    with pytest.raises(RuntimeError):
+        pipeline._enforce_stage1_distribution_gate(gate)
+
+
 def test_stage4_pair_builder_uses_candidate_rank_pairs_without_interventions():
     from safe_rl.data.types import SceneState, VehicleState, dataclass_to_dict
 

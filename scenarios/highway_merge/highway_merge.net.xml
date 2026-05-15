@@ -1,16 +1,16 @@
 <?xml version="1.0" encoding="UTF-8"?>
 
-<!-- generated on 2026-05-12 11:06:41 by Eclipse SUMO netconvert Version 1.22.0
+<!-- generated on 2026-05-15 13:17:11 by Eclipse SUMO netconvert Version 1.22.0
 <netconvertConfiguration xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:noNamespaceSchemaLocation="http://sumo.dlr.de/xsd/netconvertConfiguration.xsd">
 
     <input>
-        <node-files value="scenarios/highway_merge/highway_merge.nod.xml"/>
-        <edge-files value="scenarios/highway_merge/highway_merge.edg.xml"/>
-        <connection-files value="scenarios/highway_merge/highway_merge.con.xml"/>
+        <node-files value="E:\WcDT_RL\scenarios\highway_merge\highway_merge.nod.xml"/>
+        <edge-files value="E:\WcDT_RL\scenarios\highway_merge\highway_merge.edg.xml"/>
+        <connection-files value="E:\WcDT_RL\scenarios\highway_merge\highway_merge.con.xml"/>
     </input>
 
     <output>
-        <output-file value="scenarios/highway_merge/highway_merge.net.xml"/>
+        <output-file value="E:\WcDT_RL\scenarios\highway_merge\highway_merge.net.xml"/>
     </output>
 
 </netconvertConfiguration>
@@ -26,7 +26,7 @@
         <lane id=":merge_0_2" index="2" speed="33.33" length="17.11" shape="206.89,-1.60 224.00,-1.60"/>
     </edge>
     <edge id=":merge_3" function="internal">
-        <lane id=":merge_3_0" index="0" speed="27.77" length="20.21" shape="207.70,2.90 210.85,0.46 213.93,-3.21 217.98,-6.54 224.00,-8.00"/>
+        <lane id=":merge_3_0" index="0" speed="27.77" length="17.07" shape="207.70,2.90 211.04,1.46 214.44,-0.01 218.55,-1.14 224.00,-1.60"/>
     </edge>
 
     <edge id="main_in" from="main_start" to="merge" priority="3">
@@ -45,22 +45,22 @@
 
     <junction id="main_end" type="dead_end" x="440.00" y="0.00" incLanes="main_out_0 main_out_1 main_out_2" intLanes="" shape="440.00,-9.60 440.00,0.00"/>
     <junction id="main_start" type="dead_end" x="0.00" y="0.00" incLanes="" intLanes="" shape="0.00,0.00 0.00,-9.60"/>
-    <junction id="merge" type="priority" x="220.00" y="0.00" incLanes="main_in_0 main_in_1 main_in_2 ramp_in_0" intLanes=":merge_0_0 :merge_0_1 :merge_0_2 :merge_3_0" shape="224.00,0.00 224.00,-9.60 206.89,-9.60 206.89,0.00 207.14,1.40 208.26,4.40 211.52,3.08 213.93,1.98 215.94,1.12 217.99,0.50 220.53,0.13">
-        <request index="0" response="0000" foes="1000" cont="0"/>
-        <request index="1" response="0000" foes="1000" cont="0"/>
-        <request index="2" response="0000" foes="1000" cont="0"/>
-        <request index="3" response="0111" foes="0111" cont="0"/>
+    <junction id="merge" type="zipper" x="220.00" y="0.00" incLanes="main_in_0 main_in_1 main_in_2 ramp_in_0" intLanes=":merge_0_0 :merge_0_1 :merge_0_2 :merge_3_0" shape="224.00,0.00 224.00,-9.60 206.89,-9.60 206.89,0.00 207.14,1.40 208.26,4.40 211.52,3.08 213.93,1.98 215.94,1.12 217.99,0.50 220.53,0.13">
+        <request index="0" response="0000" foes="0000" cont="0"/>
+        <request index="1" response="0000" foes="0000" cont="0"/>
+        <request index="2" response="1000" foes="1000" cont="0"/>
+        <request index="3" response="0100" foes="0100" cont="0"/>
     </junction>
     <junction id="ramp_start" type="dead_end" x="60.00" y="60.00" incLanes="" intLanes="" shape="60.00,60.00 58.88,57.00"/>
 
     <connection from="main_in" to="main_out" fromLane="0" toLane="0" via=":merge_0_0" dir="s" state="M"/>
     <connection from="main_in" to="main_out" fromLane="1" toLane="1" via=":merge_0_1" dir="s" state="M"/>
-    <connection from="main_in" to="main_out" fromLane="2" toLane="2" via=":merge_0_2" dir="s" state="M"/>
-    <connection from="ramp_in" to="main_out" fromLane="0" toLane="0" via=":merge_3_0" dir="s" state="m"/>
+    <connection from="main_in" to="main_out" fromLane="2" toLane="2" via=":merge_0_2" dir="s" state="Z"/>
+    <connection from="ramp_in" to="main_out" fromLane="0" toLane="2" via=":merge_3_0" dir="s" state="Z"/>
 
     <connection from=":merge_0" to="main_out" fromLane="0" toLane="0" dir="s" state="M"/>
     <connection from=":merge_0" to="main_out" fromLane="1" toLane="1" dir="s" state="M"/>
     <connection from=":merge_0" to="main_out" fromLane="2" toLane="2" dir="s" state="M"/>
-    <connection from=":merge_3" to="main_out" fromLane="0" toLane="0" dir="s" state="M"/>
+    <connection from=":merge_3" to="main_out" fromLane="0" toLane="2" dir="s" state="M"/>
 
 </net>

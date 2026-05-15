@@ -1,18 +1,20 @@
 {
-  "scenario_cfg": "E:\\wcdt_all\\WcDT\\scenarios\\highway_merge\\highway_merge.sumocfg",
+  "scenario_cfg": "E:\\WcDT_RL\\scenarios\\highway_merge\\highway_merge.sumocfg",
+  "net_file": "E:\\WcDT_RL\\scenarios\\highway_merge\\highway_merge.net.xml",
+  "route_file": "E:\\WcDT_RL\\scenarios\\highway_merge\\highway_merge.rou.xml",
   "passed": true,
   "errors": [],
   "warnings": [],
   "seed_positions": [
     {
       "vehicle_id": "ego",
-      "type_id": "car_main",
-      "route_id": "route_main",
-      "first_edge": "main_in",
+      "type_id": "car_ramp",
+      "route_id": "route_ramp",
+      "first_edge": "ramp_in",
       "depart_time": 0.0,
-      "depart_lane": 1,
-      "depart_pos": 250.0,
-      "edge_length": 400.0,
+      "depart_lane": 0,
+      "depart_pos": 35.0,
+      "edge_length": 158.35,
       "vehicle_length": 4.8,
       "min_gap": 2.5
     },
@@ -23,8 +25,8 @@
       "first_edge": "main_in",
       "depart_time": 0.0,
       "depart_lane": 1,
-      "depart_pos": 315.0,
-      "edge_length": 400.0,
+      "depart_pos": 165.0,
+      "edge_length": 206.89,
       "vehicle_length": 4.8,
       "min_gap": 2.5
     },
@@ -35,8 +37,8 @@
       "first_edge": "main_in",
       "depart_time": 0.0,
       "depart_lane": 2,
-      "depart_pos": 285.0,
-      "edge_length": 400.0,
+      "depart_pos": 145.0,
+      "edge_length": 206.89,
       "vehicle_length": 4.8,
       "min_gap": 2.5
     },
@@ -47,8 +49,8 @@
       "first_edge": "main_in",
       "depart_time": 0.0,
       "depart_lane": 0,
-      "depart_pos": 215.0,
-      "edge_length": 400.0,
+      "depart_pos": 95.0,
+      "edge_length": 206.89,
       "vehicle_length": 4.8,
       "min_gap": 2.5
     },
@@ -59,8 +61,8 @@
       "first_edge": "ramp_in",
       "depart_time": 0.0,
       "depart_lane": 0,
-      "depart_pos": 130.0,
-      "edge_length": 230.8679276123039,
+      "depart_pos": 95.0,
+      "edge_length": 158.35,
       "vehicle_length": 4.8,
       "min_gap": 2.5
     },
@@ -71,8 +73,8 @@
       "first_edge": "main_in",
       "depart_time": 0.0,
       "depart_lane": 1,
-      "depart_pos": 170.0,
-      "edge_length": 400.0,
+      "depart_pos": 70.0,
+      "edge_length": 206.89,
       "vehicle_length": 4.8,
       "min_gap": 2.5
     },
@@ -83,8 +85,8 @@
       "first_edge": "ramp_in",
       "depart_time": 0.0,
       "depart_lane": 0,
-      "depart_pos": 70.0,
-      "edge_length": 230.8679276123039,
+      "depart_pos": 5.0,
+      "edge_length": 158.35,
       "vehicle_length": 4.8,
       "min_gap": 2.5
     }

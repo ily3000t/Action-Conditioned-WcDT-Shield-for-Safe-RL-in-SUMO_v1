@@ -6,13 +6,13 @@
     <route id="route_main" edges="main_in main_out"/>
     <route id="route_ramp" edges="ramp_in main_out"/>
 
-    <vehicle id="ego" type="car_main" route="route_main" depart="0.00" departLane="1" departPos="120" departSpeed="22"/>
+    <vehicle id="ego" type="car_ramp" route="route_ramp" depart="0.00" departLane="0" departPos="35" departSpeed="18"/>
     <vehicle id="lead_seed" type="car_main" route="route_main" depart="0.00" departLane="1" departPos="165" departSpeed="19.5"/>
     <vehicle id="left_seed" type="car_main" route="route_main" depart="0.00" departLane="2" departPos="145" departSpeed="22"/>
     <vehicle id="right_seed" type="car_main" route="route_main" depart="0.00" departLane="0" departPos="95" departSpeed="21"/>
     <vehicle id="merge_seed" type="car_ramp" route="route_ramp" depart="0.00" departLane="0" departPos="95" departSpeed="17.5"/>
     <vehicle id="main_back_seed" type="car_main" route="route_main" depart="0.00" departLane="1" departPos="70" departSpeed="22"/>
-    <vehicle id="ramp_follow_seed" type="car_ramp" route="route_ramp" depart="0.00" departLane="0" departPos="45" departSpeed="18"/>
+    <vehicle id="ramp_follow_seed" type="car_ramp" route="route_ramp" depart="0.00" departLane="0" departPos="5" departSpeed="17"/>
 
     <flow id="main_flow_left" type="car_main" route="route_main" begin="0.20" end="3600" vehsPerHour="520" departLane="2" departSpeed="max"/>
     <flow id="main_flow_mid" type="car_main" route="route_main" begin="0.20" end="3600" vehsPerHour="760" departLane="1" departSpeed="max"/>

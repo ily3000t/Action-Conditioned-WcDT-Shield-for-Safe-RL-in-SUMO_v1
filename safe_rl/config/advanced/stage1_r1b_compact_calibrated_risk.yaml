@@ -1,0 +1,24 @@
+tensorboard:
+  run_name: "stage1_r1b_compact_calibrated_risk"
+
+sim:
+  scenario_variant: "stage1r_compact_merge_v1"
+
+stage1_collection:
+  probe_pair_target_risk_source: "calibrated_proxy_risk"
+  probe_trusted_exclude_structural_dominant: true
+
+  scene_sanity_merge_success_logic: "edge_route_based"
+  scene_sanity_roi_auto_from_net: true
+  scene_sanity_structural_mode: "dominant_ratio"
+
+  probe_pair_stratified_keep_enabled: false
+  stage2_distribution_gate_enabled: false
+
+  probe_calibrated_collision_weight: 3.0
+  probe_calibrated_ttc_trigger_weight: 1.2
+  probe_calibrated_lane_conflict_weight: 0.8
+  probe_calibrated_structural_weight: 0.9
+  probe_calibrated_teleport_weight: 0.8
+  probe_calibrated_distance_weight: 1.0
+  probe_calibrated_ttc_continuous_weight: 1.0

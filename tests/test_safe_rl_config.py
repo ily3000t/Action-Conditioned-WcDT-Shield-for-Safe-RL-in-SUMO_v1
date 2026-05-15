@@ -223,6 +223,8 @@ def test_stage1_r_profiles_load():
     r1 = load_safe_rl_config("safe_rl/config/advanced/stage1_r1_calibrated_risk.yaml")
     r2 = load_safe_rl_config("safe_rl/config/advanced/stage1_r2_stratified_sampling.yaml")
     r3 = load_safe_rl_config("safe_rl/config/advanced/stage1_r3_compact_merge.yaml")
+    r1b = load_safe_rl_config("safe_rl/config/advanced/stage1_r1b_compact_calibrated_risk.yaml")
+    r2b = load_safe_rl_config("safe_rl/config/advanced/stage1_r2b_compact_stratified_sampling.yaml")
 
     assert r0.stage1_collection.probe_pair_target_risk_source == "raw_proxy_risk"
     assert r0.stage1_collection.probe_pair_stratified_keep_enabled is False
@@ -257,6 +259,34 @@ def test_stage1_r_profiles_load():
     assert r3.stage1_collection.scene_sanity_warning_structural_any_episode_rate_max == pytest.approx(0.50)
     assert r3.stage1_collection.scene_sanity_accept_structural_dominant_rate_max == pytest.approx(0.25)
     assert r3.stage1_collection.scene_sanity_accept_structural_candidate_rate_max == pytest.approx(0.25)
+
+    assert r1b.sim.scenario_variant == "stage1r_compact_merge_v1"
+    assert r1b.stage1_collection.probe_pair_target_risk_source == "calibrated_proxy_risk"
+    assert r1b.stage1_collection.probe_trusted_exclude_structural_dominant is True
+    assert r1b.stage1_collection.probe_pair_stratified_keep_enabled is False
+    assert r1b.stage1_collection.stage2_distribution_gate_enabled is False
+    assert r1b.stage1_collection.probe_calibrated_structural_weight == pytest.approx(0.9)
+    assert r1b.stage1_collection.probe_calibrated_teleport_weight == pytest.approx(0.8)
+    assert r1b.stage1_collection.scene_sanity_merge_success_logic == "edge_route_based"
+    assert r1b.stage1_collection.scene_sanity_roi_auto_from_net is True
+    assert r1b.stage1_collection.scene_sanity_structural_mode == "dominant_ratio"
+
+    assert r2b.sim.scenario_variant == "stage1r_compact_merge_v1"
+    assert r2b.stage1_collection.probe_pair_target_risk_source == "calibrated_proxy_risk"
+    assert r2b.stage1_collection.probe_trusted_exclude_structural_dominant is True
+    assert r2b.stage1_collection.probe_pair_stratified_keep_enabled is True
+    assert r2b.stage1_collection.probe_pair_stratified_bins == 16
+    assert r2b.stage1_collection.probe_pair_keep_per_risk_bin == 48
+    assert r2b.stage1_collection.probe_pair_keep_per_gap_bin == 48
+    assert r2b.stage1_collection.probe_pair_min_total_per_active_bin == 24
+    assert r2b.stage1_collection.probe_pair_min_target_gap == pytest.approx(0.005)
+    assert r2b.stage1_collection.probe_pair_boundary_gap_floor == pytest.approx(0.003)
+    assert r2b.stage1_collection.probe_pair_boundary_keep_per_risky_step == 2
+    assert r2b.stage1_collection.probe_pair_max_pairs_per_step == 24
+    assert r2b.stage1_collection.stage2_distribution_gate_enabled is True
+    assert r2b.stage1_collection.stage2_distribution_gate_block_on_status == "critical"
+    assert r2b.stage1_collection.probe_calibrated_structural_weight == pytest.approx(0.9)
+    assert r2b.stage1_collection.probe_calibrated_teleport_weight == pytest.approx(0.8)
 
     assert r0.world_model.pair_ft_gate_head_enabled == default_cfg.world_model.pair_ft_gate_head_enabled
 

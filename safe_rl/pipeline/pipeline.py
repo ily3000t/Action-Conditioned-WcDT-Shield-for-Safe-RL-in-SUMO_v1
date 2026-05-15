@@ -2563,12 +2563,17 @@ class SafeRLPipeline:
             "created_at": dt.datetime.now().isoformat(timespec="seconds"),
             "enabled": bool(enabled),
             "stage1_probe_summary_path": str(self.stage1_probe_summary_path or ""),
+            "stage1_scene_sanity_report_path": str(self.stage1_scene_sanity_path or ""),
             "status": "disabled" if not enabled else "warning",
             "message": "Stage1 distribution gate disabled.",
             "gate_passed": True,
             "hard_block": False,
             "allow_with_warning": False,
             "block_on_status": str(block_on_status),
+            "scene_status": "unknown",
+            "scene_critical_reasons": [],
+            "scene_warnings": [],
+            "scene_gate_hard_block": False,
             "distribution_health": {},
             "recommendation_commands": [],
         }
@@ -2600,6 +2605,31 @@ class SafeRLPipeline:
             payload["status"] = "warning"
             payload["message"] = f"failed_to_read_stage1_probe_summary: {exc}"
             payload["allow_with_warning"] = True
+            return payload
+
+        scene_payload: Dict[str, Any] = {}
+        if self.stage1_scene_sanity_path is not None and self.stage1_scene_sanity_path.exists():
+            try:
+                scene_payload = dict(self._read_json(self.stage1_scene_sanity_path) or {})
+            except Exception as exc:
+                payload["status"] = "warning"
+                payload["message"] = f"failed_to_read_stage1_scene_sanity_report: {exc}"
+                payload["allow_with_warning"] = True
+                return payload
+
+        scene_status = str(scene_payload.get("status", stage1_summary.get("scene_sanity_status", "unknown")) or "unknown").strip().lower()
+        payload["scene_status"] = scene_status if scene_status in {"healthy", "degraded", "critical"} else "unknown"
+        payload["scene_critical_reasons"] = list(scene_payload.get("critical_reasons", []) or [])
+        payload["scene_warnings"] = list(scene_payload.get("warnings", []) or [])
+        if payload["scene_status"] == "critical":
+            payload["status"] = "critical"
+            payload["gate_passed"] = False
+            payload["hard_block"] = True
+            payload["allow_with_warning"] = False
+            payload["scene_gate_hard_block"] = True
+            payload["message"] = (
+                "Stage1 scene sanity is critical; Stage2 is blocked until compact scene accessibility is recovered."
+            )
             return payload
 
         distribution_health = dict(stage1_summary.get("stage1_distribution_health", {}) or {})
@@ -2643,6 +2673,10 @@ class SafeRLPipeline:
             payload["hard_block"] = False
             payload["allow_with_warning"] = False
             payload["message"] = str(payload["message"]).strip() or "Stage1 distribution health gate passed."
+            if payload["scene_status"] == "degraded":
+                payload["status"] = "degraded"
+                payload["allow_with_warning"] = True
+                payload["message"] = "Stage1 scene sanity is degraded; Stage2 proceeds with warning."
             return payload
 
         payload["gate_passed"] = True
@@ -2658,7 +2692,8 @@ class SafeRLPipeline:
         if not bool(gate.get("enabled", False)):
             return
         status = str(gate.get("status", "warning"))
-        if status == "healthy" and bool(gate.get("gate_passed", True)):
+        scene_status = str(gate.get("scene_status", "unknown") or "unknown")
+        if status == "healthy" and scene_status in {"healthy", "unknown"} and bool(gate.get("gate_passed", True)):
             print(
                 "[Pipeline][Stage2][Preflight] stage1 distribution health is healthy.",
                 flush=True,
@@ -2670,11 +2705,24 @@ class SafeRLPipeline:
         )
         print(
             f"[Pipeline][Stage2][Preflight] status={status}, block_on={str(gate.get('block_on_status', 'critical'))}, "
+            f"scene_status={scene_status}, "
             f"pair_all_bin_effective={float(gate.get('pair_all_bin_effective', 0.0)):.4f}, "
             f"pair_trusted_bin_effective={float(gate.get('pair_trusted_bin_effective', 0.0)):.4f}, "
             f"candidate_bin_effective={float(gate.get('candidate_bin_effective', 0.0)):.4f}",
             flush=True,
         )
+        scene_critical_reasons = list(gate.get("scene_critical_reasons", []) or [])
+        if scene_critical_reasons:
+            print(
+                f"[Pipeline][Stage2][Preflight] scene_critical_reasons={','.join(str(item) for item in scene_critical_reasons)}",
+                flush=True,
+            )
+        scene_warnings = list(gate.get("scene_warnings", []) or [])
+        if scene_warnings:
+            print(
+                f"[Pipeline][Stage2][Preflight] scene_warnings={','.join(str(item) for item in scene_warnings)}",
+                flush=True,
+            )
         warnings = list(gate.get("warnings", []) or [])
         if warnings:
             print(
